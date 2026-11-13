@@ -20,7 +20,10 @@ public enum LPPerformanceProfile: String, Codable, Sendable, CaseIterable {
     case balanced    // 60 fps, 75 %
     case battery     // 30 fps, 75 %
 
-    public struct Resolved: Sendable, Equatable { public let fps: Int; public let scale: Double }
+    public struct Resolved: Sendable, Equatable {
+        public let fps: Int; public let scale: Double
+        public init(fps: Int, scale: Double) { self.fps = fps; self.scale = scale }
+    }
 
     public func resolved(onBatteryOrLowPower: Bool) -> Resolved {
         switch self {
