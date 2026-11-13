@@ -1,0 +1,563 @@
+// Voltron.saver — a macOS screen saver that plays the Voltron lock-screen scenes.
+//
+// Each scene is a self-contained HTML file (Resources/scenes/<id>.html) rendered live in a WKWebView.
+// Settings (System Settings › Screen Saver › Options…) are stored with ScreenSaverDefaults.
+//
+// Sonoma+ notes (legacyScreenSaver host):
+//  * stopAnimation() is often never called and views are not released between runs, so we listen for
+//    "com.apple.screensaver.willstop" and exit the host process (the same workaround Aerial and other
+//    third-party savers use) so nothing keeps running after you unlock. The System Settings preview
+//    ignores it (it lives in a different host process that must keep running).
+//  * isPreview is unreliable; treat small frames as previews too.
+//  * Power: scenes pause when the displays sleep; "Automatic" performance drops to 30 fps at 75%
+//    resolution on battery or in Low Power Mode.
+import AppKit
+import IOKit.ps
+import ScreenSaver
+import WebKit
+
+private let kModuleName = "local.voltron.lockscreen.saver"
+
+struct SceneInfo: Decodable {
+    let id: String
+    let title: String
+    let description: String
+    let file: String
+}
+
+enum Performance: Int, CaseIterable {
+    case automatic = 3, best = 0, balanced = 1, battery = 2
+
+    var label: String {
+        switch self {
+        case .automatic: return "Automatic (battery saver when unplugged)"
+        case .best: return "Best quality (60 fps)"
+        case .balanced: return "Balanced (60 fps, 75% resolution)"
+        case .battery: return "Battery saver (30 fps, 75% resolution)"
+        }
+    }
+
+    /// The concrete mode to use right now.
+    var resolved: Performance {
+        guard self == .automatic else { return self }
+        return Performance.onBatteryOrLowPower() ? .battery : .best
+    }
+    var fps: Int { resolved == .battery ? 30 : 60 }
+    var scale: Double { resolved == .best ? 1.0 : 0.75 }
+
+    static func onBatteryOrLowPower() -> Bool {
+        if ProcessInfo.processInfo.isLowPowerModeEnabled { return true }
+        guard let blob = IOPSCopyPowerSourcesInfo()?.takeRetainedValue(),
+              let type = IOPSGetProvidingPowerSourceType(blob)?.takeUnretainedValue() else { return false }
+        return (type as String) == kIOPSBatteryPowerValue
+    }
+}
+
+final class SaverSettings {
+    static let cycleChoices = [0, 2, 5, 10, 20, 30]
+    private let d: UserDefaults
+
+    init() {
+        d = ScreenSaverDefaults(forModuleWithName: kModuleName) ?? UserDefaults.standard
+        d.register(defaults: ["scene": "shuffle", "cycleMinutes": 5, "showClock": true, "perf": Performance.automatic.rawValue])
+    }
+    var scene: String { get { d.string(forKey: "scene") ?? "shuffle" } set { d.set(newValue, forKey: "scene") } }
+    var cycleMinutes: Int { get { d.integer(forKey: "cycleMinutes") } set { d.set(newValue, forKey: "cycleMinutes") } }
+    var showClock: Bool { get { d.bool(forKey: "showClock") } set { d.set(newValue, forKey: "showClock") } }
+    var perf: Performance {
+        get { Performance(rawValue: d.integer(forKey: "perf")) ?? .automatic }
+        set { d.set(newValue.rawValue, forKey: "perf") }
+    }
+    // Bookkeeping so consecutive lock sessions start on different scenes, while every display
+    // in the same session (same 30 s epoch) agrees on the scene.
+    var prevScene: String? { get { d.string(forKey: "prevScene") } set { d.set(newValue, forKey: "prevScene") } }
+    var curScene: String? { get { d.string(forKey: "curScene") } set { d.set(newValue, forKey: "curScene") } }
+    var curEpoch: Int { get { d.integer(forKey: "curEpoch") } set { d.set(newValue, forKey: "curEpoch") } }
+    func save() { d.synchronize() }
+}
+
+struct SplitMix64: RandomNumberGenerator {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed &+ 0x9E3779B97F4A7C15 }
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
+    }
+}
+
+/// A WKWebView that never takes mouse events, so the screen saver engine always sees them.
+final class PassiveWebView: WKWebView {
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override var acceptsFirstResponder: Bool { false }
+}
+
+/// Breaks the WKUserContentController -> handler retain cycle and logs scene errors to Console.
+final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard let body = message.body as? [String: Any], body["type"] as? String == "error" else { return }
+        NSLog("Voltron scene error: %@", String(describing: body["message"] ?? "?"))
+    }
+}
+
+@objc(VoltronSaverView)
+final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
+    private let bundle = Bundle(for: VoltronSaverView.self)
+    private lazy var scenes: [SceneInfo] = VoltronSaverView.loadScenes(from: bundle)
+    private let settings = SaverSettings()
+    private var current: WKWebView?
+    private var incoming: WKWebView?
+    private var deck: [Int] = []
+    private var deckPos = 0
+    private var seed = 1
+    private var cycleTimer: Timer?
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    private var configSheet: ConfigSheet?
+    private var started = false
+    private var crossfadeDuration: TimeInterval = 0.6
+    private var failures: [Date] = []
+
+    private var previewLike: Bool { isPreview || bounds.width < 500 }
+
+    override init?(frame: NSRect, isPreview: Bool) {
+        super.init(frame: frame, isPreview: isPreview)
+        commonInit()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        commonInit()
+    }
+
+    private func commonInit() {
+        animationTimeInterval = 1.0 // we don't use ScreenSaverView's timer; WebKit drives the frames
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+        let dnc = DistributedNotificationCenter.default()
+        observers.append((dnc, dnc.addObserver(forName: NSNotification.Name("com.apple.screensaver.willstop"), object: nil, queue: .main) { [weak self] _ in
+            self?.screenSaverWillStop()
+        }))
+        // Belt and braces: WebKit already throttles hidden pages, but make sure nothing renders
+        // while the displays are asleep (e.g. a locked laptop overnight).
+        let wnc = NSWorkspace.shared.notificationCenter
+        observers.append((wnc, wnc.addObserver(forName: NSWorkspace.screensDidSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            self?.setPaused(true)
+        }))
+        observers.append((wnc, wnc.addObserver(forName: NSWorkspace.screensDidWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            guard let self, self.isAnimating else { return }
+            self.setPaused(false)
+        }))
+    }
+
+    deinit {
+        for (center, o) in observers { center.removeObserver(o) }
+        cycleTimer?.invalidate()
+    }
+
+    static func displaysAsleep() -> Bool { CGDisplayIsAsleep(CGMainDisplayID()) != 0 }
+
+    static func loadScenes(from bundle: Bundle) -> [SceneInfo] {
+        guard let url = bundle.url(forResource: "scenes", withExtension: "json"),
+              let data = try? Data(contentsOf: url),
+              let list = try? JSONDecoder().decode([SceneInfo].self, from: data) else { return [] }
+        return list.filter { bundle.url(forResource: $0.id, withExtension: "html", subdirectory: "scenes") != nil }
+    }
+
+    // MARK: lifecycle
+
+    override func startAnimation() {
+        super.startAnimation()
+        if !started {
+            started = true
+            begin()
+        } else {
+            setPaused(false)
+            scheduleCycle()
+        }
+    }
+
+    override func stopAnimation() {
+        super.stopAnimation()
+        cycleTimer?.invalidate()
+        cycleTimer = nil
+        setPaused(true)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // Some hosts add the view to a window without calling startAnimation right away.
+        if window != nil && !started {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                guard let self, !self.started, self.window != nil else { return }
+                self.started = true
+                self.begin()
+            }
+        }
+    }
+
+    private func begin() {
+        failures = []
+        buildDeck()
+        show(animated: false)
+        scheduleCycle()
+    }
+
+    private func setPaused(_ paused: Bool) {
+        let js = paused ? "window.Voltron && Voltron.pause()" : "window.Voltron && Voltron.resume()"
+        for wv in [current, incoming].compactMap({ $0 }) { wv.evaluateJavaScript(js, completionHandler: nil) }
+    }
+
+    private func screenSaverWillStop() {
+        // The System Settings preview runs in its own host process and must survive real sessions.
+        guard !previewLike else { return }
+        cycleTimer?.invalidate()
+        cycleTimer = nil
+        // Keep the scene on screen during loginwindow's fade, then quit the host so nothing lingers.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { exit(0) }
+    }
+
+    private func teardown() {
+        cycleTimer?.invalidate()
+        cycleTimer = nil
+        for wv in [current, incoming].compactMap({ $0 }) { dispose(wv) }
+        current = nil
+        incoming = nil
+        started = false
+    }
+
+    private func dispose(_ wv: WKWebView) {
+        wv.navigationDelegate = nil
+        wv.stopLoading()
+        wv.configuration.userContentController.removeScriptMessageHandler(forName: "voltron")
+        wv.removeFromSuperview()
+    }
+
+    override func draw(_ rect: NSRect) {
+        NSColor.black.setFill()
+        bounds.fill()
+        if scenes.isEmpty || (current == nil && incoming == nil && started) {
+            let msg = (scenes.isEmpty ? "Voltron: no scenes found in the screen saver bundle." : "Voltron: the scene could not be displayed.") as NSString
+            let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.gray, .font: NSFont.systemFont(ofSize: previewLike ? 10 : 18)]
+            let size = msg.size(withAttributes: attrs)
+            msg.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attrs)
+        }
+    }
+
+    override func animateOneFrame() {}
+
+    // MARK: scene selection
+
+    private func buildDeck() {
+        deck = []
+        deckPos = 0
+        guard !scenes.isEmpty else { needsDisplay = true; return }
+        let epoch = Int(Date().timeIntervalSince1970 / 30)
+        seed = epoch % 100_000 + 1
+        let choice = settings.scene
+        if choice != "shuffle", let i = scenes.firstIndex(where: { $0.id == choice }) {
+            deck = [i]
+            return
+        }
+        var rng = SplitMix64(seed: UInt64(epoch))
+        deck = Array(scenes.indices).shuffled(using: &rng)
+        // Don't repeat the scene that was on screen when the last session ended. Displays starting in
+        // the same epoch read the same "avoid" value, so they all land on the same scene.
+        let avoid = settings.curEpoch == epoch ? settings.prevScene : settings.curScene
+        if deck.count > 1, let avoid, scenes[deck[0]].id == avoid { deck.swapAt(0, 1) }
+        if !previewLike && settings.curEpoch != epoch {
+            settings.prevScene = avoid
+            settings.curScene = scenes[deck[0]].id
+            settings.curEpoch = epoch
+            settings.save()
+        }
+    }
+
+    private func scheduleCycle() {
+        cycleTimer?.invalidate()
+        cycleTimer = nil
+        let minutes = settings.cycleMinutes
+        guard deck.count > 1, minutes > 0, !previewLike else { return }
+        let t = Timer(timeInterval: TimeInterval(minutes * 60), repeats: true) { [weak self] _ in self?.advance() }
+        RunLoop.main.add(t, forMode: .common)
+        cycleTimer = t
+    }
+
+    private func advance() {
+        guard deck.count > 1 else { return }
+        deckPos = (deckPos + 1) % deck.count
+        if !previewLike {
+            settings.curScene = scenes[deck[deckPos]].id
+            settings.save()
+        }
+        show(animated: true)
+    }
+
+    // MARK: web views
+
+    private func show(animated: Bool) {
+        guard !deck.isEmpty else { return }
+        let info = scenes[deck[deckPos]]
+        guard let url = bundle.url(forResource: info.id, withExtension: "html", subdirectory: "scenes"),
+              let html = try? String(contentsOf: url, encoding: .utf8) else { recover(); return }
+        if let pending = incoming { dispose(pending) }
+        let wv = makeWebView()
+        wv.alphaValue = 0
+        addSubview(wv, positioned: .above, relativeTo: current)
+        incoming = wv
+        crossfadeDuration = animated ? 2.0 : 0.6
+        wv.loadHTMLString(html, baseURL: nil)
+        // If the navigation never reports back, reveal (or recover) anyway instead of staying black.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self, weak wv] in
+            guard let self, let wv, wv === self.incoming else { return }
+            self.reveal(wv)
+        }
+    }
+
+    private func makeWebView() -> WKWebView {
+        let conf = WKWebViewConfiguration()
+        conf.websiteDataStore = .nonPersistent()
+        conf.suppressesIncrementalRendering = true
+        conf.mediaTypesRequiringUserActionForPlayback = .all
+        let perf = settings.perf
+        let cfg: [String: Any] = [
+            "clock": settings.showClock,
+            "fps": previewLike ? 30 : perf.fps,
+            "scale": previewLike ? 1.0 : perf.scale,
+            "seed": seed,
+        ]
+        let json = (try? JSONSerialization.data(withJSONObject: cfg)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+        conf.userContentController.addUserScript(
+            WKUserScript(source: "window.VOLTRON_CONFIG = \(json);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        conf.userContentController.add(WeakScriptHandler(), name: "voltron")
+        let wv = PassiveWebView(frame: bounds, configuration: conf)
+        // macOS 26 hosts legacy savers in a window that AppKit reports as occluded, so WebKit would treat
+        // the page as hidden and never draw (black screen). Opt out of occlusion detection; display
+        // sleep is handled explicitly (screensDidSleep / displaysAsleep) so nothing renders in the dark.
+        let occlusion = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        if wv.responds(to: occlusion) {
+            typealias Setter = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(wv.method(for: occlusion), to: Setter.self)(wv, occlusion, false)
+        }
+        wv.autoresizingMask = [.width, .height]
+        wv.setValue(false, forKey: "drawsBackground")
+        wv.underPageBackgroundColor = .black
+        wv.allowsMagnification = false
+        wv.allowsBackForwardNavigationGestures = false
+        wv.navigationDelegate = self
+        return wv
+    }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        guard webView === incoming else { return }
+        // Give the scene a couple of frames to paint before revealing it.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self, weak webView] in
+            guard let self, let webView, webView === self.incoming else { return }
+            self.reveal(webView)
+        }
+    }
+
+    private func reveal(_ webView: WKWebView) {
+        let old = current
+        current = webView
+        incoming = nil
+        if !isAnimating || VoltronSaverView.displaysAsleep() {
+            webView.evaluateJavaScript("window.Voltron && Voltron.pause()", completionHandler: nil)
+        }
+        // True crossfade: fade the new scene in on top, then drop the old one.
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = self.crossfadeDuration
+            webView.animator().alphaValue = 1
+        }, completionHandler: { [weak self] in
+            if let old { self?.dispose(old) }
+        })
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if webView === incoming || webView === current { recover() }
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if webView === incoming || webView === current { recover() }
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        decisionHandler(navigationAction.navigationType == .linkActivated ? .cancel : .allow)
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        if webView === current || webView === incoming { recover() }
+    }
+
+    /// Reload after a crash or failed load, with backoff; skip to another scene if one keeps failing,
+    /// and give up (black screen with a message) rather than crash-looping all night.
+    private func recover() {
+        let now = Date()
+        failures = failures.filter { now.timeIntervalSince($0) < 120 } + [now]
+        NSLog("Voltron: scene failure #%d", failures.count)
+        if failures.count >= 4 {
+            teardown()
+            started = true
+            needsDisplay = true
+            return
+        }
+        if failures.count >= 2, deck.count > 1 { deckPos = (deckPos + 1) % deck.count }
+        DispatchQueue.main.asyncAfter(deadline: .now() + Double(failures.count)) { [weak self] in
+            guard let self, self.started else { return }
+            self.show(animated: false)
+        }
+    }
+
+    // MARK: options sheet
+
+    override var hasConfigureSheet: Bool { true }
+
+    override var configureSheet: NSWindow? {
+        let sheet = ConfigSheet(scenes: scenes, settings: settings) { [weak self] in
+            guard let self else { return }
+            self.teardown()
+            self.started = true
+            self.begin()
+        }
+        configSheet = sheet
+        return sheet.window
+    }
+}
+
+/// Programmatic options sheet (no nib needed).
+final class ConfigSheet: NSObject {
+    let window: NSWindow
+    private let scenes: [SceneInfo]
+    private let settings: SaverSettings
+    private let onSave: () -> Void
+    private let scenePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let cyclePopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let perfPopup = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let clockBox = NSButton(checkboxWithTitle: "Show date and time", target: nil, action: nil)
+    private let blurb = NSTextField(wrappingLabelWithString: "")
+
+    init(scenes: [SceneInfo], settings: SaverSettings, onSave: @escaping () -> Void) {
+        self.scenes = scenes
+        self.settings = settings
+        self.onSave = onSave
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 500, height: 300),
+                          styleMask: [.titled], backing: .buffered, defer: true)
+        window.isReleasedWhenClosed = false
+        super.init()
+        build()
+    }
+
+    private func label(_ s: String) -> NSTextField {
+        let l = NSTextField(labelWithString: s)
+        l.alignment = .right
+        return l
+    }
+
+    private func item(_ title: String, _ value: Any) -> NSMenuItem {
+        let i = NSMenuItem(title: title, action: nil, keyEquivalent: "")
+        i.representedObject = value
+        return i
+    }
+
+    private func build() {
+        window.title = "Voltron Lock Screens"
+
+        // Items carry their ids/values, so duplicate titles can't shift the selection.
+        let sceneMenu = NSMenu()
+        sceneMenu.addItem(item("Shuffle all scenes", "shuffle"))
+        sceneMenu.addItem(.separator())
+        for s in scenes { sceneMenu.addItem(item(s.title, s.id)) }
+        scenePopup.menu = sceneMenu
+        scenePopup.select(sceneMenu.items.first { ($0.representedObject as? String) == settings.scene } ?? sceneMenu.items[0])
+        scenePopup.target = self
+        scenePopup.action = #selector(sceneChanged)
+
+        let cycleMenu = NSMenu()
+        for m in SaverSettings.cycleChoices { cycleMenu.addItem(item(m == 0 ? "Never" : "Every \(m) minutes", m)) }
+        cyclePopup.menu = cycleMenu
+        cyclePopup.select(cycleMenu.items.first { ($0.representedObject as? Int) == settings.cycleMinutes } ?? cycleMenu.items[2])
+
+        let perfMenu = NSMenu()
+        for p in [Performance.automatic, .best, .balanced, .battery] { perfMenu.addItem(item(p.label, p.rawValue)) }
+        perfPopup.menu = perfMenu
+        perfPopup.select(perfMenu.items.first { ($0.representedObject as? Int) == settings.perf.rawValue } ?? perfMenu.items[0])
+
+        clockBox.state = settings.showClock ? .on : .off
+
+        blurb.textColor = .secondaryLabelColor
+        blurb.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        blurb.preferredMaxLayoutWidth = 320
+
+        let grid = NSGridView(views: [
+            [label("Scene:"), scenePopup],
+            [NSGridCell.emptyContentView, blurb],
+            [label("Change scene:"), cyclePopup],
+            [label("Performance:"), perfPopup],
+            [NSGridCell.emptyContentView, clockBox],
+        ])
+        grid.rowSpacing = 10
+        grid.columnSpacing = 10
+        grid.column(at: 0).xPlacement = .trailing
+        grid.rowAlignment = .firstBaseline
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancelPressed))
+        cancel.keyEquivalent = "\u{1b}"
+        let ok = NSButton(title: "OK", target: self, action: #selector(okPressed))
+        ok.keyEquivalent = "\r"
+        let version = NSTextField(labelWithString: "Voltron Lock Screens · \(scenes.count) scenes")
+        version.textColor = .tertiaryLabelColor
+        version.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        let buttons = NSStackView(views: [version, NSView(), cancel, ok])
+        buttons.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSView()
+        content.addSubview(grid)
+        content.addSubview(buttons)
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: content.topAnchor, constant: 22),
+            grid.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
+            grid.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -22),
+            buttons.topAnchor.constraint(equalTo: grid.bottomAnchor, constant: 26),
+            buttons.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 22),
+            buttons.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -22),
+            buttons.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -18),
+            content.widthAnchor.constraint(equalToConstant: 500),
+        ])
+        window.contentView = content
+        window.defaultButtonCell = ok.cell as? NSButtonCell
+        sceneChanged()
+        content.layoutSubtreeIfNeeded()
+        window.setContentSize(NSSize(width: 500, height: max(200, content.fittingSize.height)))
+    }
+
+    private var selectedSceneID: String { scenePopup.selectedItem?.representedObject as? String ?? "shuffle" }
+
+    @objc private func sceneChanged() {
+        if let s = scenes.first(where: { $0.id == selectedSceneID }) {
+            blurb.stringValue = s.description
+            cyclePopup.isEnabled = false
+        } else {
+            blurb.stringValue = "A different scene each time you lock, rotating through all \(scenes.count)."
+            cyclePopup.isEnabled = true
+        }
+    }
+
+    @objc private func okPressed() {
+        settings.scene = selectedSceneID
+        settings.cycleMinutes = cyclePopup.selectedItem?.representedObject as? Int ?? 5
+        settings.perf = Performance(rawValue: perfPopup.selectedItem?.representedObject as? Int ?? 3) ?? .automatic
+        settings.showClock = clockBox.state == .on
+        settings.save()
+        close()
+        onSave()
+    }
+
+    @objc private func cancelPressed() { close() }
+
+    private func close() {
+        if let parent = window.sheetParent { parent.endSheet(window) } else { window.orderOut(nil) }
+    }
+}

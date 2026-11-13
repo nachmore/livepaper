@@ -1,0 +1,67 @@
+// "Voltron Lock"
+//   VoltronLock            start the screen saver now (with "Require password immediately" = lock now)
+//   VoltronLock --watch    background helper (LaunchAgent): whenever the Mac locks — Ctrl-Cmd-Q, the
+//                          Apple menu, Touch ID key, hot corner — start the screen saver right away, so
+//                          the lock screen shows Voltron instead of the plain wallpaper. Skips when the
+//                          displays are asleep (lid closed / display off) or a screen saver already runs.
+import AppKit
+
+let engineURL = URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
+let engineID = "com.apple.ScreenSaver.Engine"
+let saverPath = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Screen Savers/Voltron.saver")
+
+func log(_ s: String) { FileHandle.standardError.write("VoltronLock: \(s)\n".data(using: .utf8)!) }
+
+/// True when Voltron is the selected screen saver (any display). Reads the wallpaper store; the
+/// screen-saver ("Idle") choices embed the module path in their configuration blob.
+func voltronSelected() -> Bool {
+    let store = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Application Support/com.apple.wallpaper/Store/Index.plist")
+    guard let data = FileManager.default.contents(atPath: store),
+          let root = try? PropertyListSerialization.propertyList(from: data, format: nil) else { return false }
+    var found = false
+    func scan(_ o: Any, inIdle: Bool) {
+        if found { return }
+        if let d = o as? [String: Any] {
+            for (k, v) in d { scan(v, inIdle: inIdle || k == "Idle") }
+        } else if let a = o as? [Any] {
+            for v in a { scan(v, inIdle: inIdle) }
+        } else if inIdle, let blob = o as? Data {
+            if blob.range(of: Data("Voltron.saver".utf8)) != nil || blob.range(of: Data("local.voltron".utf8)) != nil { found = true }
+            else if let inner = try? PropertyListSerialization.propertyList(from: blob, format: nil) { scan(inner, inIdle: true) }
+        } else if inIdle, let str = o as? String, str.contains("Voltron.saver") || str.contains("local.voltron") {
+            found = true
+        }
+    }
+    scan(root, inIdle: false)
+    return found
+}
+
+func startSaver(_ done: ((Bool) -> Void)? = nil) {
+    let cfg = NSWorkspace.OpenConfiguration()
+    cfg.activates = true
+    NSWorkspace.shared.openApplication(at: engineURL, configuration: cfg) { _, error in
+        if let error { log(error.localizedDescription) }
+        done?(error == nil)
+    }
+}
+
+if CommandLine.arguments.contains("--watch") {
+    let observer = DistributedNotificationCenter.default().addObserver(
+        forName: NSNotification.Name("com.apple.screenIsLocked"), object: nil, queue: .main
+    ) { _ in
+        // Let loginwindow finish presenting the lock screen first.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
+            guard FileManager.default.fileExists(atPath: saverPath) else { return }
+            guard voltronSelected() else { log("screen locked, but Voltron isn't the selected screen saver -> leaving macOS alone"); return }
+            guard CGDisplayIsAsleep(CGMainDisplayID()) == 0 else { return }
+            guard NSRunningApplication.runningApplications(withBundleIdentifier: engineID).isEmpty else { return }
+            log("screen locked -> starting screen saver")
+            startSaver()
+        }
+    }
+    withExtendedLifetime(observer) { RunLoop.main.run() }
+} else {
+    startSaver { ok in exit(ok ? 0 : 1) }
+    RunLoop.main.run(until: Date(timeIntervalSinceNow: 10))
+    exit(1)
+}

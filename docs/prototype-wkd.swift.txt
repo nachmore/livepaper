@@ -1,0 +1,285 @@
+// wkd — one long-lived, off-screen WebKit render server for the Voltron tools.
+//
+// Why: launching a fresh AppKit/WebKit process for every screenshot registers a new app with the
+// window server each time, which the user perceives as focus stealing when it happens many times a
+// minute. wkd is launched once (by the first client) and then serves every request; the clients
+// (tools/bin/wkshot, tools/bin/powertest) are plain scripts that never touch the window server.
+//
+// Protocol: clients drop JSON requests into /tmp/voltron-wkd/req/<id>.json and wait for
+// /tmp/voltron-wkd/resp/<id>.json. Requests are served one at a time (so live power measurements
+// are attributable). Exits after 15 minutes without requests.
+import AppKit
+import Darwin
+import WebKit
+
+let base = URL(fileURLWithPath: "/tmp/voltron-wkd")
+let reqDir = base.appendingPathComponent("req")
+let respDir = base.appendingPathComponent("resp")
+let pidFile = base.appendingPathComponent("pid")
+let fm = FileManager.default
+try? fm.createDirectory(at: reqDir, withIntermediateDirectories: true)
+try? fm.createDirectory(at: respDir, withIntermediateDirectories: true)
+if let s = try? String(contentsOf: pidFile, encoding: .utf8), let p = Int32(s.trimmingCharacters(in: .whitespacesAndNewlines)),
+   p != getpid(), kill(p, 0) == 0 {
+    print("wkd already running as \(p)"); exit(0)
+}
+try? "\(getpid())".write(to: pidFile, atomically: true, encoding: .utf8)
+
+func logLine(_ s: String) { print("[wkd] \(s)"); fflush(stdout) }
+
+// MARK: process accounting (for live mode)
+typealias RespFn = @convention(c) (pid_t) -> pid_t
+let respFn: RespFn? = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "responsibility_get_pid_responsible_for_pid").map { unsafeBitCast($0, to: RespFn.self) }
+let me = getpid()
+func allPids() -> [pid_t] {
+    var pids = [pid_t](repeating: 0, count: 8192)
+    let n = proc_listallpids(&pids, Int32(pids.count * MemoryLayout<pid_t>.size))
+    return n > 0 ? Array(pids.prefix(Int(n))).filter { $0 > 0 } : []
+}
+let startupPids = Set(allPids())
+let myResponsible = respFn?(me) ?? me
+func ourPids() -> [pid_t] {
+    guard let respFn else { return [me] }
+    return [me] + allPids().filter { p in p != me && !startupPids.contains(p) && (respFn(p) == myResponsible || respFn(p) == me) }
+}
+var timebase = mach_timebase_info_data_t()
+mach_timebase_info(&timebase)
+func cpuSample(_ pids: [pid_t]) -> (cpuNs: Double, energyNj: Double) {
+    var cpu = 0.0, energy = 0.0
+    for p in pids {
+        var info = rusage_info_v6()
+        let r = withUnsafeMutablePointer(to: &info) { ptr in
+            ptr.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { proc_pid_rusage(p, RUSAGE_INFO_V6, $0) }
+        }
+        guard r == 0 else { continue }
+        cpu += Double(info.ri_user_time + info.ri_system_time) * Double(timebase.numer) / Double(timebase.denom)
+        energy += Double(info.ri_energy_nj)
+    }
+    return (cpu, energy)
+}
+
+// MARK: requests
+struct Request: Decodable {
+    var id: String
+    var mode: String            // still | bench | live
+    var html: String
+    var width: Double
+    var height: Double
+    var dpr: Double?
+    var t: Double?
+    var out: String?
+    var frames: Int?
+    var clock: Bool?
+    var fps: Double?
+    var scale: Double?
+    var seconds: Double?
+    var warmup: Double?
+    var timeout: Double?
+}
+
+final class Handler: NSObject, WKScriptMessageHandler {
+    var onMessage: (([String: Any]) -> Void)?
+    func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
+        if let b = message.body as? [String: Any] { onMessage?(b) }
+    }
+}
+
+final class Server: NSObject, WKNavigationDelegate {
+    let window: NSWindow
+    var busy = false
+    var lastActivity = Date()
+    var webView: WKWebView?
+    var handler: Handler?
+    var current: Request?
+    var result: [String: Any] = [:]
+    var errors: [String] = []
+    var finished = true
+    var generation = 0
+
+    override init() {
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 500), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.ignoresMouseEvents = true
+        window.collectionBehavior = [.transient, .ignoresCycle, .stationary]
+        window.setFrameOrigin(NSPoint(x: -30000, y: -30000)) // never visible
+        super.init()
+        window.orderFrontRegardless() // once, for the lifetime of the server
+    }
+
+    func start() {
+        let t = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in self?.poll() }
+        RunLoop.main.add(t, forMode: .common)
+    }
+
+    func poll() {
+        if busy { return }
+        if Date().timeIntervalSince(lastActivity) > 900 { logLine("idle, exiting"); try? fm.removeItem(at: pidFile); exit(0) }
+        guard let items = try? fm.contentsOfDirectory(at: reqDir, includingPropertiesForKeys: [.contentModificationDateKey]) else { return }
+        let reqs = items.filter { $0.pathExtension == "json" }.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return a < b
+        }
+        guard let next = reqs.first else { return }
+        let work = next.deletingPathExtension().appendingPathExtension("work")
+        guard (try? fm.moveItem(at: next, to: work)) != nil, let data = try? Data(contentsOf: work) else { return }
+        try? fm.removeItem(at: work)
+        guard let req = try? JSONDecoder().decode(Request.self, from: data) else { logLine("bad request \(next.lastPathComponent)"); return }
+        lastActivity = Date()
+        serve(req)
+    }
+
+    func respond() {
+        guard let req = current, !finished else { return }
+        finished = true
+        result["errors"] = errors
+        if result["ready"] == nil { result["ready"] = false }
+        let tmp = respDir.appendingPathComponent(req.id + ".tmp")
+        if let d = try? JSONSerialization.data(withJSONObject: result, options: [.sortedKeys]) {
+            try? d.write(to: tmp)
+            try? fm.moveItem(at: tmp, to: respDir.appendingPathComponent(req.id + ".json"))
+        }
+        if let wv = webView {
+            wv.navigationDelegate = nil
+            wv.stopLoading()
+            wv.configuration.userContentController.removeScriptMessageHandler(forName: "voltron")
+            wv.removeFromSuperview()
+        }
+        window.contentView = nil
+        webView = nil
+        handler = nil
+        current = nil
+        lastActivity = Date()
+        busy = false
+    }
+
+    func fail(_ note: String) { result["note"] = note; respond() }
+
+    func serve(_ req: Request) {
+        busy = true
+        finished = false
+        generation += 1
+        let gen = generation
+        current = req
+        result = [:]
+        errors = []
+        guard let html = try? String(contentsOfFile: req.html, encoding: .utf8) else { fail("cannot read \(req.html)"); return }
+        let dpr = req.dpr ?? 1
+        var cfg: [String: Any] = ["clock": req.clock ?? true, "debug": true, "dprMax": dpr]
+        switch req.mode {
+        case "bench": cfg["bench"] = req.frames ?? 120; cfg["t"] = req.t ?? 0
+        case "live": cfg["fps"] = req.fps ?? 60; cfg["scale"] = req.scale ?? 1
+        default: cfg["still"] = true; cfg["t"] = req.t ?? 8
+        }
+        let json = String(data: try! JSONSerialization.data(withJSONObject: cfg), encoding: .utf8)!
+        let conf = WKWebViewConfiguration()
+        conf.websiteDataStore = .nonPersistent()
+        conf.suppressesIncrementalRendering = true
+        let ucc = conf.userContentController
+        // Emulate the requested pixel density regardless of which display is currently main.
+        ucc.addUserScript(WKUserScript(source: "Object.defineProperty(window,'devicePixelRatio',{get:function(){return \(dpr)},configurable:true});window.VOLTRON_CONFIG=\(json);",
+                                       injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        let h = Handler()
+        h.onMessage = { [weak self] body in self?.message(body, gen: gen) }
+        ucc.add(h, name: "voltron")
+        handler = h
+        let rect = NSRect(x: 0, y: 0, width: req.width, height: req.height)
+        let wv = WKWebView(frame: rect, configuration: conf)
+        wv.setValue(false, forKey: "drawsBackground")
+        let occ = NSSelectorFromString("_setWindowOcclusionDetectionEnabled:")
+        if wv.responds(to: occ) {
+            typealias F = @convention(c) (AnyObject, Selector, Bool) -> Void
+            unsafeBitCast(wv.method(for: occ), to: F.self)(wv, occ, false)
+        }
+        wv.navigationDelegate = self
+        webView = wv
+        window.setContentSize(rect.size)
+        window.setFrameOrigin(NSPoint(x: -30000, y: -30000))
+        window.contentView = wv
+        wv.loadHTMLString(html, baseURL: nil)
+        let timeout = req.timeout ?? (req.mode == "live" ? (req.seconds ?? 12) + (req.warmup ?? 3) + 30 : 60)
+        DispatchQueue.main.asyncAfter(deadline: .now() + timeout) { [weak self] in
+            guard let self, self.generation == gen, !self.finished else { return }
+            self.fail("timeout waiting for scene")
+        }
+    }
+
+    func message(_ body: [String: Any], gen: Int) {
+        guard gen == generation, let req = current, !finished, let type = body["type"] as? String else { return }
+        if type == "error" { errors.append(body["message"] as? String ?? "?"); return }
+        guard type == "ready" else { return }
+        result["scene"] = body["scene"]
+        result["ready"] = true
+        switch req.mode {
+        case "bench":
+            if let b = body["bench"] as? Double { result["bench_ms"] = (b * 1000).rounded() / 1000 }
+            respond()
+        case "live":
+            liveMeasure(req, gen: gen)
+        default:
+            if let out = req.out { snapshot(to: out, gen: gen) } else { respond() }
+        }
+    }
+
+    func snapshot(to path: String, gen: Int) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            guard let self, self.generation == gen, let wv = self.webView else { return }
+            let sc = WKSnapshotConfiguration()
+            sc.afterScreenUpdates = true
+            wv.takeSnapshot(with: sc) { image, error in
+                guard self.generation == gen else { return }
+                guard let image, let tiff = image.tiffRepresentation, let rep = NSBitmapImageRep(data: tiff),
+                      let png = rep.representation(using: .png, properties: [:]) else { self.fail("snapshot failed: \(String(describing: error))"); return }
+                do { try png.write(to: URL(fileURLWithPath: path)); self.result["out"] = path } catch { self.fail("write failed: \(error)"); return }
+                self.respond()
+            }
+        }
+    }
+
+    func js(_ s: String, _ done: @escaping (Any?) -> Void) { webView?.evaluateJavaScript(s) { r, _ in done(r) } }
+
+    func liveMeasure(_ req: Request, gen: Int) {
+        let warm = req.warmup ?? 3, secs = req.seconds ?? 12
+        DispatchQueue.main.asyncAfter(deadline: .now() + warm) { [weak self] in
+            guard let self, self.generation == gen else { return }
+            let pids = ourPids()
+            self.js("Voltron.stats().frame") { f0 in
+                let c0 = cpuSample(pids), t0 = Date()
+                DispatchQueue.main.asyncAfter(deadline: .now() + secs) {
+                    guard self.generation == gen else { return }
+                    self.js("Voltron.stats().frame") { f1 in
+                        let pids2 = Array(Set(pids + ourPids()))
+                        let c1 = cpuSample(pids2)
+                        let dt = Date().timeIntervalSince(t0)
+                        let frames = ((f1 as? NSNumber)?.doubleValue ?? 0) - ((f0 as? NSNumber)?.doubleValue ?? 0)
+                        func r1(_ x: Double) -> Double { (x * 10).rounded() / 10 }
+                        let cpuNs: Double = c1.cpuNs - c0.cpuNs
+                        let nj: Double = c1.energyNj - c0.energyNj
+                        self.result["mode"] = "scene"
+                        self.result["seconds"] = r1(dt)
+                        self.result["fps"] = r1(frames / dt)
+                        self.result["cpu_pct"] = r1(cpuNs / (dt * 1e9) * 100)
+                        self.result["cpu_mW"] = (nj / dt / 1e6).rounded()
+                        self.result["size"] = "\(Int(req.width))x\(Int(req.height))"
+                        self.result["dpr"] = req.dpr ?? 1
+                        self.result["fps_cap"] = req.fps ?? 60
+                        self.result["scale"] = req.scale ?? 1
+                        self.result["processes"] = pids2.count
+                        self.respond()
+                    }
+                }
+            }
+        }
+    }
+
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { fail("web content process crashed") }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { fail("navigation failed: \(error)") }
+}
+
+let app = NSApplication.shared
+app.setActivationPolicy(.prohibited)
+// Opt out of App Nap / timer throttling, otherwise live scenes are capped at 30 fps and measurements lie.
+let napGuard = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled], reason: "Voltron render server")
+let server = Server()
+logLine("serving as pid \(getpid())")
+DispatchQueue.main.async { server.start() }
+app.run()
