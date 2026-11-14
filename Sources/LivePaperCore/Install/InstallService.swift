@@ -156,6 +156,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     // MARK: - Status
 
+    /// Blocking (runs `sysadminctl` and `launchctl print`, both read-only, ≤ 10 s each): call it
+    /// off the main thread.
     public func status() -> InstallStatus {
         let installedVersion = FileOps.bundleInfo(paths.installedSaver, "CFBundleVersion")
         let templateVersion = FileOps.bundleInfo(paths.saverTemplate, "CFBundleVersion")
@@ -232,6 +234,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     // MARK: - Helper
 
+    /// The login item's state (e.g. `.requiresApproval` → onboarding points the user to System
+    /// Settings › General › Login Items). `.notFound` when running outside the app bundle.
+    public var helperLoginItemStatus: LoginItemStatus { loginItem.status }
+
+    /// Registers the helper as a login item (SMAppService), falling back to a LaunchAgent plist
+    /// when the process isn't the app bundle or SMAppService refuses. Idempotent.
     public func registerHelper() throws {
         if loginItem.isAvailable {
             // A LaunchAgent from an earlier unbundled install uses the same label; launchd can't
@@ -255,6 +263,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         try installFallbackAgent()
     }
 
+    /// Unregisters the login item, unloads the job and removes a fallback plist. Idempotent.
     public func unregisterHelper() throws {
         if loginItem.isAvailable {
             try perform("Unregister the helper login item",
