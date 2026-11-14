@@ -287,16 +287,20 @@ struct SaverRecoveryPolicy: Equatable {
 /// Everything the saver reacts to, decoupled from where it came from (distributed notifications,
 /// NSWorkspace, or the in-process test hook).
 enum SaverSystemEvent: String, CaseIterable {
-    case lockUIShowing, lockUIShown, lockUIHidden, screenLocked, screenUnlocked, willStop, screensDidSleep, screensDidWake, published
+    /// loginwindow drew its lock UI (clock + password field) over the running saver.
+    case lockUIShown
+    /// …and removed it again.
+    case lockUIHidden
+    case screenLocked, screenUnlocked, willStop, screensDidSleep, screensDidWake, published
 
     /// Names of NSWorkspace's display-sleep notifications (`NSWorkspace.screensDid…Notification.rawValue`).
     static let screensDidSleepName = "NSWorkspaceScreensDidSleepNotification"
     static let screensDidWakeName = "NSWorkspaceScreensDidWakeNotification"
 
     init?(notificationName name: String) {
+        // `lockUIShowing` is an alias of `lockUIShown` on current macOS; both mean "hide our clock".
+        if name == LPNotification.lockUIShowing || name == LPNotification.lockUIShown { self = .lockUIShown; return }
         switch name {
-        case LPNotification.lockUIShowing: self = .lockUIShowing
-        case LPNotification.lockUIShown: self = .lockUIShown
         case LPNotification.lockUIHidden: self = .lockUIHidden
         case LPNotification.screenLocked: self = .screenLocked
         case LPNotification.screenUnlocked: self = .screenUnlocked
@@ -308,10 +312,14 @@ enum SaverSystemEvent: String, CaseIterable {
         }
     }
 
-    /// The distributed notifications the saver subscribes to.
-    static let distributedNames = [LPNotification.lockUIShowing, LPNotification.lockUIShown, LPNotification.lockUIHidden,
-                                   LPNotification.screenLocked, LPNotification.screenUnlocked, LPNotification.saverWillStop,
-                                   LPNotification.published]
+    /// The distributed notifications the saver subscribes to (each name once).
+    static let distributedNames: [String] = {
+        let all = [LPNotification.lockUIShowing, LPNotification.lockUIShown, LPNotification.lockUIHidden,
+                   LPNotification.screenLocked, LPNotification.screenUnlocked, LPNotification.saverWillStop,
+                   LPNotification.published]
+        var seen = Set<String>()
+        return all.filter { seen.insert($0).inserted }
+    }()
 }
 
 /// Whether macOS is drawing its lock UI (with its own clock) over the running saver.
@@ -323,7 +331,7 @@ struct SaverLockUIState: Equatable {
     mutating func apply(_ event: SaverSystemEvent) -> Bool {
         let old = isShowing
         switch event {
-        case .lockUIShowing, .lockUIShown: isShowing = true
+        case .lockUIShown: isShowing = true
         // Unlocking removes the lock UI even if its IsHidden notification was missed.
         case .lockUIHidden, .screenUnlocked: isShowing = false
         default: break

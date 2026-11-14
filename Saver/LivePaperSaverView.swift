@@ -14,7 +14,7 @@
 //    therefore loads nothing until the session is locked (SaverRunGate) — never on startAnimation
 //    alone and never from viewDidMoveToWindow.
 //  * When the user touches the keyboard/mouse, loginwindow draws its lock UI (with Apple's clock)
-//    over the running saver, bracketed by com.apple.sessionagent.screenLockUIIs{Showing,Shown,Hidden};
+//    over the running saver, bracketed by com.apple.screenLockUIIsShown / …IsHidden (LPNotification);
 //    we hide our clock meanwhile so there are never two clocks.
 //  * Nothing should render while the displays sleep (a locked laptop overnight): we pause on
 //    NSWorkspace.screensDidSleep and resume on wake.
@@ -232,7 +232,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     func handleNotification(named name: String) {
         guard let event = SaverSystemEvent(notificationName: name) else { return }
         switch event {
-        case .lockUIShowing, .lockUIShown, .lockUIHidden:
+        case .lockUIShown, .lockUIHidden:
             applyLockUI(event)
         case .screenLocked, .screenUnlocked, .screensDidSleep, .screensDidWake:
             gate.apply(event)

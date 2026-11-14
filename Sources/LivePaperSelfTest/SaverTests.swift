@@ -166,7 +166,10 @@ extension SelfTests {
 
         // MARK: lock UI hand-off
         TestCase(name: "saver.lockui.events") {
-            try expectEqual(SaverSystemEvent(notificationName: LPNotification.lockUIShowing), .lockUIShowing)
+            try expectEqual(SaverSystemEvent(notificationName: LPNotification.lockUIShowing), .lockUIShown)
+            try expectEqual(SaverSystemEvent(notificationName: LPNotification.lockUIShown), .lockUIShown)
+            try expectEqual(SaverSystemEvent(notificationName: LPNotification.lockUIHidden), .lockUIHidden)
+            try expectEqual(SaverSystemEvent.distributedNames.count, Set(SaverSystemEvent.distributedNames).count)
             try expectEqual(SaverSystemEvent(notificationName: LPNotification.saverWillStop), .willStop)
             try expectEqual(SaverSystemEvent(notificationName: LPNotification.screenLocked), .screenLocked)
             try expectEqual(SaverSystemEvent(notificationName: LPNotification.screenUnlocked), .screenUnlocked)
@@ -174,8 +177,8 @@ extension SelfTests {
             try expect(SaverSystemEvent(notificationName: "com.example.other") == nil)
             for name in SaverSystemEvent.distributedNames { try expect(SaverSystemEvent(notificationName: name) != nil, name) }
             var state = SaverLockUIState()
-            try expect(state.apply(.lockUIShowing) && state.isShowing)
-            try expect(!state.apply(.lockUIShown) && state.isShowing, "Shown after Showing is not a change")
+            try expect(state.apply(.lockUIShown) && state.isShowing)
+            try expect(!state.apply(.lockUIShown) && state.isShowing, "a repeated Shown is not a change")
             try expect(!state.apply(.screensDidSleep) && state.isShowing)
             try expect(state.apply(.lockUIHidden) && !state.isShowing)
             state.apply(.lockUIShown)
@@ -196,7 +199,7 @@ extension SelfTests {
             try expect(gate.shouldRun)
             gate.apply(.screenUnlocked)
             try expect(!gate.shouldRun, "pause as soon as the user is back at the desktop")
-            gate.apply(.lockUIShowing)
+            gate.apply(.lockUIShown)
             try expect(!gate.sessionLocked, "lock UI events don't change the lock state")
         },
         TestCase(name: "saver.gate.preview-and-stop") {
