@@ -22,6 +22,8 @@ private func playlistDir(_ playlist: LPPlaylist, extraFiles: [String] = [], skip
     return dir
 }
 
+private func remove(_ url: URL) { try? FileManager.default.removeItem(at: url) }
+
 private var repoRoot: URL {
     URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 }
@@ -31,13 +33,16 @@ extension SelfTests {
         // MARK: playlist
         TestCase(name: "saver.playlist.load") {
             let p = LPPlaylist(generation: 7, mode: .sequence, cycleMinutes: 2, scenes: [entry("aurora"), entry("beach", .video)])
-            let content = SaverPlaylistLoader.load(from: try playlistDir(p))
+            let dir = try playlistDir(p)
+            defer { remove(dir) }
+            let content = SaverPlaylistLoader.load(from: dir)
             try expectEqual(content.entries.map(\.id), ["aurora", "beach"])
             try expectEqual(content.playlist?.generation, 7)
             try expect(content.problems.isEmpty, "\(content.problems)")
         },
         TestCase(name: "saver.playlist.missing-or-corrupt") {
             let empty = try tempDir("saver-empty")
+            defer { remove(empty) }
             let missing = SaverPlaylistLoader.load(from: empty)
             try expect(missing.isEmpty && missing.playlist == nil && missing.problems.count == 1)
             try Data("{not json".utf8).write(to: empty.appendingPathComponent(LPPlaylist.fileName))
@@ -48,13 +53,17 @@ extension SelfTests {
             let p = LPPlaylist(scenes: [entry("ok"), entry("escape", file: "../../etc/passwd.html"), entry("hidden", file: ".x.html"),
                                         entry("wrong-ext", file: "wrong.mov"), entry("gone"), entry("ok", file: "dup.html"),
                                         entry("clip", .video, file: "clip.mp4")])
-            let content = SaverPlaylistLoader.load(from: try playlistDir(p, skipFiles: ["gone.html"]))
+            let dir = try playlistDir(p, skipFiles: ["gone.html"])
+            defer { remove(dir) }
+            let content = SaverPlaylistLoader.load(from: dir)
             try expectEqual(content.entries.map(\.id), ["ok", "clip"])
             try expectEqual(content.problems.count, 5)
         },
         TestCase(name: "saver.playlist.newer-schema-still-plays") {
             let p = LPPlaylist(schema: LPPlaylist.currentSchema + 1, scenes: [entry("a")])
-            let content = SaverPlaylistLoader.load(from: try playlistDir(p))
+            let dir = try playlistDir(p)
+            defer { remove(dir) }
+            let content = SaverPlaylistLoader.load(from: dir)
             try expectEqual(content.entries.count, 1)
             try expect(content.problems.first?.contains("newer") == true)
         },
@@ -126,7 +135,9 @@ extension SelfTests {
             try expect(first.session.sceneSeed >= 1 && first.session.sceneSeed <= 100_000)
         },
         TestCase(name: "saver.session.file-store") {
-            let url = try tempDir("saver-store").appendingPathComponent("state.json")
+            let dir = try tempDir("saver-store")
+            defer { remove(dir) }
+            let url = dir.appendingPathComponent("state.json")
             let store = SaverFileSessionStore(url: url)
             try expect(store.load() == nil)
             let r = SaverSessionRecord(epoch: 5, startedAt: 150, avoid: "a", lastShown: "b")
@@ -282,7 +293,8 @@ extension SelfTests {
 
         // MARK: options sheet
         TestCase(name: "saver.summary") {
-            let dir = try tempDir("saver-summary")
+            // Only the URL is used; nothing is read or written.
+            let dir = FileManager.default.temporaryDirectory.appendingPathComponent("livepaper-selftest-saver-summary")
             let none = SaverSummary.make(content: .empty(directory: dir), version: "0.1.0")
             try expect(none.scenes == nil && none.playlist.contains("No scenes"))
             let scenes = (1...6).map { entry("scene-\($0)") }
