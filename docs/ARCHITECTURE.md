@@ -23,9 +23,19 @@ This document is the contract between components. Keep it current when interface
   `kAELockScreenEvent` ("direct lock") and never start a saver.
   ⇒ **LivePaper's lock = start the saver first; the saver locks** (requires "Require password
   after screen saver begins: Immediately", which install verifies).
+* **`defaults write com.apple.loginwindow immediateLockLaunchesScreenSaver -bool true`** (user
+  domain, default off, not MDM-managed here) makes ⌃⌘Q, Apple-menu *Lock Screen* and the Touch ID /
+  lock key start the saver first (`screenSaverStartNow` → lock → "Screen saver IS running").
+  **Verified live on 26.7, takes effect without logout, password prompt still required.** Not
+  covered: lid close / display-sleep locks (still the wallpaper). Idle-timeout path unchanged.
+  ⇒ This is LivePaper's primary "lock takeover": no Accessibility/Input Monitoring needed.
+* **Prewarm:** after every unlock WallpaperAgent spawns a hidden, never-presented saver instance.
+  With WebKit occlusion detection disabled it would animate forever (~45 % of a core). Non-preview
+  instances must render nothing until `CGSSessionScreenIsLocked` is true / `com.apple.screenIsLocked`
+  arrives, and pause on `com.apple.screenIsUnlocked`.
 * When the user touches a key/mouse while the saver runs, the lock UI (with Apple's own clock) is
-  drawn over the saver. Distributed notifications `com.apple.sessionagent.screenLockUIIsShowing`,
-  `…IsShown`, `…IsHidden` bracket that. ⇒ scenes must hide their own clock then (no double clock).
+  drawn over the saver. Distributed notifications `com.apple.screenLockUIIsShown` / `com.apple.screenLockUIIsHidden`
+  (object = uid string) bracket that (verified). ⇒ scenes must hide their own clock then (no double clock).
 * Video-call apps holding display-sleep assertions block every screen saver. Expected.
 * Idle time may be MDM-managed (e.g. 900 s); we never touch it.
 
@@ -187,7 +197,7 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   config injected as a user script, occlusion detection disabled, failure recovery with backoff.
 * **Video scenes:** native `AVPlayerLayer` + `AVPlayerLooper` (hardware decode, lowest power),
   native clock overlay (`CATextLayer`s) styled like the runtime clock.
-* Clock hand-off: observe `com.apple.sessionagent.screenLockUIIsShowing|IsShown|IsHidden` →
+* Clock hand-off: observe `com.apple.screenLockUIIsShown|IsHidden` →
   `lockUI(true/false)` (web) / fade native clock (video).
 * Power: pause on `screensDidSleep`, resume on wake; `Automatic` profile = battery saver on battery
   or Low Power Mode; exit host process on `com.apple.screensaver.willstop` (non-preview only).
@@ -199,10 +209,11 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
 * Lock flow: if a saver is already running → nothing; else launch
   `/System/Library/CoreServices/ScreenSaverEngine.app` (the saver locks immediately).
   If "Require password … Immediately" is off, fall back to `SACLockScreenImmediate` after start.
-* **System-lock takeover (opt-in, needs Accessibility):** active `CGEventTap` swallowing ⌃⌘Q and
-  (if feasible) the Touch ID / lock key, replacing them with the LivePaper lock flow. Must fail
-  safe: if the tap is disabled by the system, or the helper is stopping, it must never leave the
-  user without a working lock gesture. Details pending docs/RESEARCH.md.
+* **System-lock takeover (default on, no permissions):** the app sets
+  `com.apple.loginwindow immediateLockLaunchesScreenSaver = true` (backing up the previous value)
+  so ⌃⌘Q / Apple-menu Lock / Touch ID key show the scene; uninstall restores it. Fails safe: if the
+  saver can't run, loginwindow still locks. The Carbon hotkey stays as an optional extra.
+  An event-tap route (Accessibility) is NOT needed and not planned.
 * Watches `state.json` / `com.nachmore.livepaper.stateChanged`; relays "open app" requests from
   the saver.
 * Idle footprint: zero timers; wakes only on events.

@@ -97,10 +97,12 @@ public enum LPNotification {
     public static let openApp = "com.nachmore.livepaper.openApp"
     /// App → saver (preview instances): playlist was republished.
     public static let published = "com.nachmore.livepaper.published"
-    /// System: the lock UI is being drawn over the running saver (hide our clock) / went away.
-    public static let lockUIShowing = "com.apple.sessionagent.screenLockUIIsShowing"
-    public static let lockUIShown = "com.apple.sessionagent.screenLockUIIsShown"
-    public static let lockUIHidden = "com.apple.sessionagent.screenLockUIIsHidden"
+    /// System (distributed; object = the user's uid as a string; verified on macOS 26.7): loginwindow
+    /// drew its own clock + password UI over the running saver (hide our clock) / removed it again.
+    public static let lockUIShown = "com.apple.screenLockUIIsShown"
+    public static let lockUIHidden = "com.apple.screenLockUIIsHidden"
+    /// Kept for source compatibility; macOS posts only Shown/Hidden as distributed notifications.
+    public static let lockUIShowing = lockUIShown
     /// System: screen saver lifecycle.
     public static let saverWillStop = "com.apple.screensaver.willstop"
     public static let saverDidStart = "com.apple.screensaver.didstart"
