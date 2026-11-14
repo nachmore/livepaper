@@ -1,5 +1,5 @@
-// SaverSupport — small platform services used by the saver: logging, power source, display sleep,
-// and the persistent session store.
+// SaverSupport — small platform services used by the saver: logging, power source, notifications,
+// session lock state, display sleep, and the persistent session store.
 import AppKit
 import IOKit.ps
 import notify
@@ -44,6 +44,54 @@ final class SaverPowerMonitor {
     deinit {
         if token != NOTIFY_TOKEN_INVALID { notify_cancel(token) }
         if let lowPowerObserver { NotificationCenter.default.removeObserver(lowPowerObserver) }
+    }
+}
+
+// MARK: - Notifications
+
+/// Subscribes to the distributed and workspace notifications the saver reacts to and forwards their
+/// names on the main queue.
+///
+/// Distributed observers use `.deliverImmediately`: AppKit suspends distributed-notification delivery
+/// while an app is inactive — and a screen-saver host never becomes active — so with the default
+/// suspension behaviour (coalesce) a notification the poster didn't flag as immediate would be held
+/// back until it no longer matters (lock UI hand-off, willstop).
+final class SaverNotificationRelay: NSObject {
+    private let handler: (String) -> Void
+
+    init(distributedNames: [String], handler: @escaping (String) -> Void) {
+        self.handler = handler
+        super.init()
+        let distributed = DistributedNotificationCenter.default()
+        for name in distributedNames {
+            distributed.addObserver(self, selector: #selector(received(_:)), name: NSNotification.Name(name), object: nil,
+                                    suspensionBehavior: .deliverImmediately)
+        }
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification] {
+            workspace.addObserver(self, selector: #selector(received(_:)), name: name, object: nil)
+        }
+    }
+
+    deinit {
+        DistributedNotificationCenter.default().removeObserver(self)
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
+    @objc private func received(_ note: Notification) {
+        let name = note.name.rawValue
+        if Thread.isMainThread { handler(name) } else { DispatchQueue.main.async { [handler] in handler(name) } }
+    }
+}
+
+// MARK: - Session lock
+
+enum SaverSessionLock {
+    /// Whether the login session is locked right now. `CGSSessionScreenIsLocked` is only present in
+    /// the session dictionary while the screen is locked.
+    static var isLocked: Bool {
+        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
     }
 }
 

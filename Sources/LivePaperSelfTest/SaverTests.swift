@@ -168,6 +168,8 @@ extension SelfTests {
         TestCase(name: "saver.lockui.events") {
             try expectEqual(SaverSystemEvent(notificationName: LPNotification.lockUIShowing), .lockUIShowing)
             try expectEqual(SaverSystemEvent(notificationName: LPNotification.saverWillStop), .willStop)
+            try expectEqual(SaverSystemEvent(notificationName: LPNotification.screenLocked), .screenLocked)
+            try expectEqual(SaverSystemEvent(notificationName: LPNotification.screenUnlocked), .screenUnlocked)
             try expectEqual(SaverSystemEvent(notificationName: "NSWorkspaceScreensDidSleepNotification"), .screensDidSleep)
             try expect(SaverSystemEvent(notificationName: "com.example.other") == nil)
             for name in SaverSystemEvent.distributedNames { try expect(SaverSystemEvent(notificationName: name) != nil, name) }
@@ -178,6 +180,38 @@ extension SelfTests {
             try expect(state.apply(.lockUIHidden) && !state.isShowing)
             state.apply(.lockUIShown)
             try expect(state.apply(.screenUnlocked) && !state.isShowing, "unlock clears a missed IsHidden")
+        },
+
+        // MARK: prewarm / run gate
+        TestCase(name: "saver.gate.prewarmed-instance-waits-for-lock") {
+            // WallpaperAgent's hidden prewarm instance: started, session unlocked → nothing loads.
+            var gate = SaverRunGate(preview: false, sessionLocked: false)
+            gate.animating = true
+            try expect(!gate.mayLoad && !gate.shouldRun, "a non-preview instance must not load before the session locks")
+            gate.apply(.screenLocked)
+            try expect(gate.mayLoad && gate.shouldRun)
+            gate.apply(.screensDidSleep)
+            try expect(gate.mayLoad && !gate.shouldRun, "loaded but paused while the displays sleep")
+            gate.apply(.screensDidWake)
+            try expect(gate.shouldRun)
+            gate.apply(.screenUnlocked)
+            try expect(!gate.shouldRun, "pause as soon as the user is back at the desktop")
+            gate.apply(.lockUIShowing)
+            try expect(!gate.sessionLocked, "lock UI events don't change the lock state")
+        },
+        TestCase(name: "saver.gate.preview-and-stop") {
+            var preview = SaverRunGate(preview: true, sessionLocked: false)
+            try expect(!preview.mayLoad, "nothing before startAnimation")
+            preview.animating = true
+            try expect(preview.mayLoad && preview.shouldRun, "previews render immediately")
+            var locked = SaverRunGate(preview: false, sessionLocked: true)
+            locked.animating = true
+            try expect(locked.shouldRun, "already locked at start")
+            locked.exiting = true
+            try expect(!locked.mayLoad && !locked.shouldRun, "nothing new after willstop")
+            locked.exiting = false
+            locked.animating = false
+            try expect(!locked.shouldRun, "stopAnimation pauses")
         },
 
         // MARK: clock
@@ -218,18 +252,21 @@ extension SelfTests {
         // MARK: web bridge & power
         TestCase(name: "saver.web.config-and-js") {
             let cfg = SaverWebConfig(showClock: true, clockPosition: .bottomLeft, profile: .init(fps: 30, scale: 0.75), seed: 12,
-                                     power: SaverPowerState(onBattery: true, lowPowerMode: false), preview: false, lockUI: true)
+                                     power: SaverPowerState(onBattery: true, lowPowerMode: false))
             try expect(cfg.userScript.hasPrefix("window.LIVEPAPER_CONFIG = {") && cfg.userScript.hasSuffix("};"))
             let decoded = try JSONSerialization.jsonObject(with: Data(cfg.json.utf8)) as? [String: Any]
             try expectEqual(decoded?["clockPosition"] as? String, "bottom-left")
             try expectEqual(decoded?["power"] as? String, "battery")
             try expectEqual(decoded?["fps"] as? Int, 30)
-            try expectEqual(decoded?["lockUI"] as? Bool, true)
-            try expectEqual(Set(decoded?.keys.map { $0 } ?? []),
-                            ["clock", "clockPosition", "fps", "scale", "seed", "power", "lowPower", "preview", "lockUI"])
+            try expectEqual(decoded?["seed"] as? Int, 12)
+            // Only keys the runtime understands (runtime.js TYPES).
+            try expectEqual(Set(decoded?.keys.map { $0 } ?? []), ["clock", "clockPosition", "fps", "scale", "seed", "power", "lowPower"])
             try expectEqual(SaverJS.lockUI(true),
                             "(function(h){if(h&&typeof h.lockUI==='function'){h.lockUI(true);}})(window.LivePaper&&window.LivePaper.host);")
-            try expect(SaverJS.power(SaverPowerState(onBattery: false, lowPowerMode: true)).contains("{\"power\":\"ac\",\"lowPower\":true}"))
+            try expect(SaverJS.pause.contains("h.pause()") && SaverJS.resume.contains("h.resume()"))
+            let update = SaverPowerUpdate(power: SaverPowerState(onBattery: false, lowPowerMode: true), profile: .init(fps: 30, scale: 0.75))
+            try expect(SaverJS.power(update).contains("h.power({\"fps\":30,\"lowPower\":true,\"power\":\"ac\",\"scale\":0.75})"),
+                       SaverJS.power(update))
         },
         TestCase(name: "saver.performance.resolve") {
             let battery = SaverPowerState(onBattery: true, lowPowerMode: false), ac = SaverPowerState(onBattery: false, lowPowerMode: false)

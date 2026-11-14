@@ -15,8 +15,8 @@ struct SceneContext {
     var paused: Bool
     var profile: LPPerformanceProfile.Resolved
     var power: SaverPowerState
+    /// Session seed handed to web scenes (identical on every display).
     var seed: Int
-    var preview: Bool
 
     /// Whether a native (CATextLayer) clock should exist at all for this scene.
     var wantsNativeClock: Bool { showClock && clockPosition != .none }

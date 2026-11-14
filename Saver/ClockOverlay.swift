@@ -1,9 +1,10 @@
 // ClockOverlay — the native lock-screen-style clock used by video scenes and the fallback.
 //
-// Geometry and typography mirror the runtime's web clock (SaverClockLayout): date above a large
-// time, SF semibold, near-white. The shadow is a soft neutral one (like Apple's lock-screen clock)
-// so the clock stays legible over arbitrary video. It redraws once a minute on a one-shot timer
-// re-armed for the next minute boundary, which also realigns itself after sleep or clock changes.
+// Geometry and typography mirror the runtime's web clock (SaverClockLayout and runtime.js
+// `drawClock`): the date in SF semibold above a large SF bold time, white at 90 %, with a soft dark
+// shadow (like Apple's lock-screen clock) so it stays legible over arbitrary video. It redraws once
+// a minute on a one-shot timer re-armed for the next minute boundary, which also realigns itself
+// after sleep or clock changes.
 import AppKit
 import QuartzCore
 
@@ -23,7 +24,9 @@ final class ClockOverlay {
     private var size: CGSize = .zero
     private var scale: CGFloat = 2
 
-    private static let textColor = CGColor(srgbRed: 246 / 255, green: 248 / 255, blue: 1, alpha: 0.94)
+    private static let textColor = CGColor(srgbRed: 1, green: 1, blue: 1, alpha: 0.9)
+    /// runtime.js: shadowColor rgba(0,0,0,0.28).
+    private static let shadowOpacity: Float = 0.28
 
     init(position: LPClockPosition) {
         self.position = position
@@ -35,7 +38,8 @@ final class ClockOverlay {
             text.isWrapped = false
             text.truncationMode = .none
             text.shadowColor = CGColor(gray: 0, alpha: 1)
-            text.shadowOpacity = 0.35
+            text.shadowOpacity = Self.shadowOpacity
+            text.shadowOffset = .zero
             // Text layers are re-laid out by hand; never animate their geometry or content.
             text.actions = ["contents": NSNull(), "bounds": NSNull(), "position": NSNull(), "string": NSNull()]
             layer.addSublayer(text)
@@ -56,9 +60,10 @@ final class ClockOverlay {
         }
         layer.isHidden = false
         let dateFont = NSFont.systemFont(ofSize: CGFloat(metrics.dateSize), weight: .semibold)
-        let timeFont = NSFont.systemFont(ofSize: CGFloat(metrics.timeSize), weight: .semibold)
-        place(dateLayer, font: dateFont, baseline: metrics.dateBaseline, metrics: metrics, shadowRadius: metrics.dateSize * 0.5)
-        place(timeLayer, font: timeFont, baseline: metrics.timeBaseline, metrics: metrics, shadowRadius: metrics.timeSize * 0.12)
+        let timeFont = NSFont.systemFont(ofSize: CGFloat(metrics.timeSize), weight: .bold)
+        // Canvas shadowBlur is roughly twice a CALayer shadowRadius (runtime: date × 0.5, time × 0.08).
+        place(dateLayer, font: dateFont, baseline: metrics.dateBaseline, metrics: metrics, shadowRadius: metrics.dateSize * 0.25)
+        place(timeLayer, font: timeFont, baseline: metrics.timeBaseline, metrics: metrics, shadowRadius: metrics.timeSize * 0.04)
     }
 
     private func place(_ text: CATextLayer, font: NSFont, baseline: Double, metrics: SaverClockLayout, shadowRadius: Double) {
@@ -66,7 +71,6 @@ final class ClockOverlay {
         text.fontSize = font.pointSize
         text.contentsScale = scale
         text.shadowRadius = CGFloat(shadowRadius)
-        text.shadowOffset = CGSize(width: 0, height: -max(1, font.pointSize * 0.01))
         // CATextLayer puts the first line's ascent at the top of its bounds, so the frame's top is
         // baseline − ascender. A little slack keeps descenders and the shadow from being clipped.
         let slack = ceil(font.pointSize * 0.1)

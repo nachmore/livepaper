@@ -287,7 +287,7 @@ struct SaverRecoveryPolicy: Equatable {
 /// Everything the saver reacts to, decoupled from where it came from (distributed notifications,
 /// NSWorkspace, or the in-process test hook).
 enum SaverSystemEvent: String, CaseIterable {
-    case lockUIShowing, lockUIShown, lockUIHidden, screenUnlocked, willStop, screensDidSleep, screensDidWake, published
+    case lockUIShowing, lockUIShown, lockUIHidden, screenLocked, screenUnlocked, willStop, screensDidSleep, screensDidWake, published
 
     /// Names of NSWorkspace's display-sleep notifications (`NSWorkspace.screensDid…Notification.rawValue`).
     static let screensDidSleepName = "NSWorkspaceScreensDidSleepNotification"
@@ -298,6 +298,7 @@ enum SaverSystemEvent: String, CaseIterable {
         case LPNotification.lockUIShowing: self = .lockUIShowing
         case LPNotification.lockUIShown: self = .lockUIShown
         case LPNotification.lockUIHidden: self = .lockUIHidden
+        case LPNotification.screenLocked: self = .screenLocked
         case LPNotification.screenUnlocked: self = .screenUnlocked
         case LPNotification.saverWillStop: self = .willStop
         case LPNotification.published: self = .published
@@ -309,7 +310,8 @@ enum SaverSystemEvent: String, CaseIterable {
 
     /// The distributed notifications the saver subscribes to.
     static let distributedNames = [LPNotification.lockUIShowing, LPNotification.lockUIShown, LPNotification.lockUIHidden,
-                                   LPNotification.screenUnlocked, LPNotification.saverWillStop, LPNotification.published]
+                                   LPNotification.screenLocked, LPNotification.screenUnlocked, LPNotification.saverWillStop,
+                                   LPNotification.published]
 }
 
 /// Whether macOS is drawing its lock UI (with its own clock) over the running saver.
@@ -327,6 +329,45 @@ struct SaverLockUIState: Equatable {
         default: break
         }
         return old != isShowing
+    }
+}
+
+// MARK: - Run gate (prewarm)
+
+/// Decides when the saver may load and animate scenes.
+///
+/// After every unlock WallpaperAgent spawns a hidden, never-presented saver instance so that the
+/// next start is fast. Web scenes run with WebKit's occlusion detection disabled (they would never
+/// draw otherwise, see WebSceneHost), so that hidden copy would animate for as long as the user
+/// works — measured at ~45 % of a CPU core in the prototype. A real (non-preview) instance therefore
+/// loads nothing until the login session is actually locked, and pauses again when it is unlocked.
+/// Previews (System Settings thumbnails) render immediately. Video scenes follow the same rule.
+struct SaverRunGate: Equatable {
+    /// System Settings preview or another small host (`isPreview || width < 500`).
+    var preview: Bool
+    /// The login session is locked: `CGSSessionScreenIsLocked` at start, then
+    /// com.apple.screenIsLocked / com.apple.screenIsUnlocked.
+    var sessionLocked: Bool
+    /// Between startAnimation and stopAnimation.
+    var animating = false
+    var displaysAsleep = false
+    /// com.apple.screensaver.willstop arrived; the host process is about to exit.
+    var exiting = false
+
+    /// Scenes may be loaded and session bookkeeping written.
+    var mayLoad: Bool { animating && !exiting && (preview || sessionLocked) }
+    /// Loaded scenes may animate or play, and the cycle and clock timers may run.
+    var shouldRun: Bool { mayLoad && !displaysAsleep }
+
+    /// Applies the lock and display-sleep events (others are ignored).
+    mutating func apply(_ event: SaverSystemEvent) {
+        switch event {
+        case .screenLocked: sessionLocked = true
+        case .screenUnlocked: sessionLocked = false
+        case .screensDidSleep: displaysAsleep = true
+        case .screensDidWake: displaysAsleep = false
+        default: break
+        }
     }
 }
 
@@ -349,7 +390,15 @@ enum SaverPerformance {
 
 // MARK: - Web scene bridge
 
-/// `window.LIVEPAPER_CONFIG`, injected as a user script before the scene's own code runs.
+/// Sorted-key JSON for the small objects the saver hands to web scenes.
+private func saverJSON<T: Encodable>(_ value: T) -> String {
+    let encoder = JSONEncoder()
+    encoder.outputFormatting = [.sortedKeys]
+    return (try? encoder.encode(value)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
+}
+
+/// `window.LIVEPAPER_CONFIG`, injected as a user script before the scene's own code runs. The keys
+/// are the runtime's (Runtime/runtime.js `TYPES`); fps/scale are already resolved from the profile.
 struct SaverWebConfig: Codable, Equatable {
     /// Playlist-level clock switch (false hides every clock, including scene-drawn ones).
     var clock: Bool
@@ -357,28 +406,39 @@ struct SaverWebConfig: Codable, Equatable {
     var clockPosition: String
     var fps: Int
     var scale: Double
+    /// Identical on every display of a session, so they all render the same variation.
     var seed: Int
-    /// "ac" | "battery" (matches `lp.env.power`).
+    /// "ac" | "battery" (becomes `lp.env.power`).
     var power: String
     var lowPower: Bool
-    var preview: Bool
-    /// The lock UI is already over the saver when the scene loads: start with the clock hidden.
-    var lockUI: Bool
 
-    init(showClock: Bool, clockPosition: LPClockPosition, profile: LPPerformanceProfile.Resolved, seed: Int,
-         power: SaverPowerState, preview: Bool, lockUI: Bool) {
-        clock = showClock; self.clockPosition = clockPosition.rawValue; fps = profile.fps; scale = profile.scale
-        self.seed = seed; self.power = power.onBattery ? "battery" : "ac"; lowPower = power.lowPowerMode
-        self.preview = preview; self.lockUI = lockUI
+    init(showClock: Bool, clockPosition: LPClockPosition, profile: LPPerformanceProfile.Resolved, seed: Int, power: SaverPowerState) {
+        clock = showClock
+        self.clockPosition = clockPosition.rawValue
+        fps = profile.fps
+        scale = profile.scale
+        self.seed = seed
+        self.power = power.onBattery ? "battery" : "ac"
+        lowPower = power.lowPowerMode
     }
 
-    var json: String {
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.sortedKeys]
-        return (try? enc.encode(self)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
-    }
-
+    var json: String { saverJSON(self) }
     var userScript: String { "window.LIVEPAPER_CONFIG = \(json);" }
+}
+
+/// The argument of `LivePaper.host.power(…)` after an AC ⇄ battery or Low Power Mode change.
+struct SaverPowerUpdate: Codable, Equatable {
+    var power: String
+    var lowPower: Bool
+    var fps: Int
+    var scale: Double
+
+    init(power state: SaverPowerState, profile: LPPerformanceProfile.Resolved) {
+        power = state.onBattery ? "battery" : "ac"
+        lowPower = state.lowPowerMode
+        fps = profile.fps
+        scale = profile.scale
+    }
 }
 
 /// JavaScript the saver evaluates in web scenes. Every call is guarded so it is a harmless no-op
@@ -390,18 +450,23 @@ enum SaverJS {
     static func lockUI(_ showing: Bool) -> String { hostCall("lockUI", showing ? "true" : "false") }
     static let pause = hostCall("pause")
     static let resume = hostCall("resume")
-    static func config(_ profile: LPPerformanceProfile.Resolved) -> String {
-        hostCall("config", "{\"fps\":\(profile.fps),\"scale\":\(profile.scale)}")
-    }
-    static func power(_ state: SaverPowerState) -> String {
-        hostCall("power", "{\"power\":\"\(state.onBattery ? "battery" : "ac")\",\"lowPower\":\(state.lowPowerMode)}")
-    }
+    static func power(_ update: SaverPowerUpdate) -> String { hostCall("power", saverJSON(update)) }
 }
 
 // MARK: - Native clock (video scenes and the fallback)
 
+/// A rectangle in top-left-origin points. (Foundation's CGRect lacks its geometry accessors without
+/// CoreGraphics, and this file must stay Foundation-only.)
+struct SaverRect: Equatable {
+    var x: Double, y: Double, width: Double, height: Double
+    var minX: Double { x }
+    var maxX: Double { x + width }
+    var minY: Double { y }
+    var maxY: Double { y + height }
+}
+
 /// Geometry of the native clock. Mirrors the runtime clock (Runtime/runtime.js `clockSizes` /
-/// `clockRect` / `drawClock`) so web and video scenes put the clock in the same place.
+/// `rectFor` / `drawClock`) so web and video scenes put the clock in the same place.
 /// Coordinates are top-left based, in points.
 struct SaverClockLayout: Equatable {
     enum Alignment: Equatable { case left, center, right }
@@ -415,22 +480,31 @@ struct SaverClockLayout: Equatable {
     var dateBaseline: Double
     var timeBaseline: Double
     /// The region the clock occupies (what the runtime exposes as `lp.clockRect`).
-    var rect: CGRect
+    var rect: SaverRect
 
     static func make(width w: Double, height h: Double, position: LPClockPosition) -> SaverClockLayout? {
         guard position != .none, w > 0, h > 0 else { return nil }
         let time = min(max(min(w * 0.11, h * 0.15), 40), 210)
         let date = max(13, time * 0.2)
-        let bw = time * 3.4, bh = date * 1.6 + time * 1.1
+        let boxWidth = time * 3.4
+        let boxHeight = date * 1.6 + time * 1.1
         let pad = max(24, min(w, h) * 0.06)
-        let rect: CGRect, alignment: Alignment, anchor: Double
+        let rect: SaverRect
+        let alignment: Alignment
+        let anchor: Double
         switch position {
         case .bottomLeft:
-            rect = CGRect(x: pad, y: h - pad - bh, width: bw, height: bh); alignment = .left; anchor = rect.minX
+            rect = SaverRect(x: pad, y: h - pad - boxHeight, width: boxWidth, height: boxHeight)
+            alignment = .left
+            anchor = rect.minX
         case .bottomRight:
-            rect = CGRect(x: w - pad - bw, y: h - pad - bh, width: bw, height: bh); alignment = .right; anchor = rect.maxX
+            rect = SaverRect(x: w - pad - boxWidth, y: h - pad - boxHeight, width: boxWidth, height: boxHeight)
+            alignment = .right
+            anchor = rect.maxX
         case .top, .none:
-            rect = CGRect(x: w / 2 - bw / 2, y: h * 0.07, width: bw, height: bh); alignment = .center; anchor = w / 2
+            rect = SaverRect(x: w / 2 - boxWidth / 2, y: h * 0.07, width: boxWidth, height: boxHeight)
+            alignment = .center
+            anchor = w / 2
         }
         let dateBaseline = rect.minY + date * 1.1
         return SaverClockLayout(timeSize: time, dateSize: date, alignment: alignment, anchorX: anchor,

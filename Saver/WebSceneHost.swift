@@ -43,6 +43,10 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
     private var paused: Bool
     private var lockUIShowing: Bool
     private var profile: LPPerformanceProfile.Resolved
+    private var power: SaverPowerState
+    /// The power state baked into LIVEPAPER_CONFIG (re-sent on ready if it changed while loading).
+    private let initialPower: SaverPowerState
+    private let initialProfile: LPPerformanceProfile.Resolved
     private var isReady = false
     private var failed = false
     private var errorCount = 0
@@ -54,6 +58,9 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         paused = context.paused
         lockUIShowing = context.lockUIShowing
         profile = context.profile
+        power = context.power
+        initialPower = context.power
+        initialProfile = context.profile
 
         let config = WKWebViewConfiguration()
         // Nothing a scene does may persist (no cookies, storage or caches on disk).
@@ -61,7 +68,7 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         config.suppressesIncrementalRendering = true
         config.mediaTypesRequiringUserActionForPlayback = .all
         let webConfig = SaverWebConfig(showClock: context.showClock, clockPosition: context.clockPosition, profile: context.profile,
-                                       seed: context.seed, power: context.power, preview: context.preview, lockUI: context.lockUIShowing)
+                                       seed: context.seed, power: context.power)
         config.userContentController.addUserScript(
             WKUserScript(source: webConfig.userScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let proxy = WeakMessageProxy()
@@ -126,9 +133,9 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
 
     func powerDidChange(profile: LPPerformanceProfile.Resolved, power: SaverPowerState) {
         self.profile = profile
+        self.power = power
         guard isReady else { return }
-        run(SaverJS.config(profile))
-        run(SaverJS.power(power))
+        run(SaverJS.power(SaverPowerUpdate(power: power, profile: profile)))
     }
 
     func tearDown() {
@@ -144,7 +151,7 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
 
     var diagnostics: [String: Any] {
         ["kind": kind, "id": entryID, "ready": isReady, "paused": paused, "lockUIShowing": lockUIShowing,
-         "errors": errorCount, "fps": profile.fps, "scale": profile.scale]
+         "errors": errorCount, "fps": profile.fps, "scale": profile.scale, "power": power.onBattery ? "battery" : "ac"]
     }
 
     // MARK: Page → host
@@ -153,7 +160,14 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         guard let message = body as? [String: Any], let type = message["type"] as? String else { return }
         switch type {
         case "ready":
-            markReady()
+            // The runtime reports ready with failed:true when the scene never registered itself
+            // (syntax error, exception at top level): treat that like a failed load so recovery
+            // moves on instead of showing a black page all night.
+            if (message["failed"] as? Bool) == true {
+                fail("the scene did not start (\(errorCount) error(s) reported)")
+            } else {
+                markReady()
+            }
         case "error":
             errorCount += 1
             if errorCount <= Self.maxLoggedErrors {
@@ -170,9 +184,13 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
     private func markReady() {
         guard !isReady, !failed else { return }
         isReady = true
-        // Apply whatever changed while the page was loading.
+        // Apply whatever changed while the page was loading (the config the page started with
+        // only knows the state at creation time).
         run(SaverJS.lockUI(lockUIShowing))
         if paused { run(SaverJS.pause) }
+        if power != initialPower || profile != initialProfile {
+            run(SaverJS.power(SaverPowerUpdate(power: power, profile: profile)))
+        }
         delegate?.sceneHostDidBecomeReady(self)
     }
 
