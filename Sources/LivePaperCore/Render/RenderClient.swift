@@ -73,6 +73,13 @@ public final class RenderClient: RenderClienting, @unchecked Sendable {
     /// True if a render server accepts connections right now (never starts one).
     public func isServerRunning() -> Bool { LineSocket.isListening(path: socket.path) }
 
+    /// Starts LivePaperRenderd if nothing serves the socket (same rules as `send`).
+    public func ensureServer(timeout: TimeInterval) throws {
+        if isServerRunning() { return }
+        guard allowSpawn else { throw RenderClientError.serverUnavailable("nothing is listening on \(socket.path)") }
+        try DaemonLauncher(socket: socket).ensureRunning(deadline: Date().addingTimeInterval(timeout))
+    }
+
     // MARK: - Request
 
     private func sendBlocking(_ request: RenderRequest, timeout: TimeInterval, cancel: CancelToken) throws -> RenderResponse {

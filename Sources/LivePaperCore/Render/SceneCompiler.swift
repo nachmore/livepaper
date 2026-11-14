@@ -175,6 +175,10 @@ public final class SceneCompiler: SceneCompiling, @unchecked Sendable {
         }
         do {
             return try SceneManifest.load(package: pkg)
+        } catch let DecodingError.dataCorrupted(ctx) where !ctx.codingPath.isEmpty {
+            // Valid JSON, invalid value (e.g. an unknown clock position or kind).
+            let path = ctx.codingPath.map(\.stringValue).joined(separator: ".")
+            throw SceneCompileError(file: SceneManifest.fileName, "field \"\(path)\" has an invalid value (\(ctx.debugDescription))\(Self.allowedValues(path)).")
         } catch let DecodingError.dataCorrupted(ctx) {
             throw SceneCompileError(file: SceneManifest.fileName, "is not valid JSON (\(Self.underlyingMessage(ctx))).")
         } catch let DecodingError.keyNotFound(key, _) {
@@ -189,10 +193,15 @@ public final class SceneCompiler: SceneCompiling, @unchecked Sendable {
 
     private static func underlyingMessage(_ ctx: DecodingError.Context) -> String {
         if let e = ctx.underlyingError as NSError?, let d = e.userInfo[NSDebugDescriptionErrorKey] as? String { return d }
-        if !ctx.codingPath.isEmpty {
-            return "field \"\(ctx.codingPath.map(\.stringValue).joined(separator: "."))\": \(ctx.debugDescription)"
-        }
         return ctx.debugDescription
+    }
+
+    private static func allowedValues(_ path: String) -> String {
+        switch path {
+        case "clock.position": return "; use one of: " + LPClockPosition.allCases.map(\.rawValue).joined(separator: ", ")
+        case "kind": return "; use \"web\" or \"video\""
+        default: return ""
+        }
     }
 
     static func readSceneJS(_ pkg: URL) throws -> String {

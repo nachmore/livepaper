@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "id": "quiet-aurora",
+  "name": "Quiet Aurora",
+  "description": "Slow northern lights over a still mountain lake, under a gently drifting starfield.",
+  "kind": "web",
+  "runtime": 1,
+  "clock": { "position": "top" },
+  "author": "LivePaper",
+  "tags": ["night", "aurora", "calm"]
+}

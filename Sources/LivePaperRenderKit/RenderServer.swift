@@ -112,7 +112,7 @@ extension LivePaperRenderKit {
             let fd = open(files.serverLock.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
             guard fd >= 0 else { throw RenderServerError.setup("cannot open \(files.serverLock.path): \(String(cString: strerror(errno)))") }
             guard flock(fd, LOCK_EX | LOCK_NB) == 0 else { close(fd); return false }
-            try startListening(lockFD: fd)
+            do { try startListening(lockFD: fd) } catch { close(fd); throw error }
             return true
         }
 
