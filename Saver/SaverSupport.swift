@@ -112,13 +112,15 @@ extension NSView {
 
 // MARK: - Session store
 
-/// ScreenSaverDefaults-backed store. Pitfalls this works around:
-///  * The real host (legacyScreenSaver) and System Settings' preview run in different sandbox
-///    containers, so these defaults can't carry settings between the Options sheet and the saver —
-///    which is why everything configurable is published into the bundle instead. They're only used
-///    for bookkeeping (which scene was shown last).
+/// ScreenSaverDefaults-backed store, used only for bookkeeping (which scene was shown last) —
+/// everything configurable is published into the bundle by the app (ARCHITECTURE §4.3).
+/// Pitfalls this works around:
+///  * In the sandboxed host, writes are silently dropped until the container's
+///    Library/Preferences/ByHost directory exists (seen with the prototype on macOS 26), so it is
+///    created first. ScreenSaverDefaults are per-host (ByHost) preferences.
 ///  * Writes must be followed by `synchronize()`: the host process is killed (or we exit(0) on
-///    willstop) long before an automatic flush would happen.
+///    willstop) long before an automatic flush would happen, and the other displays' hosts read
+///    the record through cfprefsd.
 ///  * `integer(forKey:)` & co. return 0 for missing keys, so the record is stored as one encoded
 ///    blob — never half-written, never confused with a real value.
 ///  * `ScreenSaverDefaults(forModuleWithName:)` can return nil; we then keep the record in memory
@@ -128,6 +130,11 @@ final class SaverDefaultsSessionStore: SaverSessionStore {
     private let defaults: ScreenSaverDefaults
 
     init?(moduleName: String) {
+        // Inside the sandbox the user Library directory is the host's container, never ~/Library.
+        if let library = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask).first {
+            let byHost = library.appendingPathComponent("Preferences/ByHost", isDirectory: true)
+            try? FileManager.default.createDirectory(at: byHost, withIntermediateDirectories: true)
+        }
         guard let defaults = ScreenSaverDefaults(forModuleWithName: moduleName) else { return nil }
         self.defaults = defaults
     }
