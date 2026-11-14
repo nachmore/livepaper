@@ -1,5 +1,5 @@
 // HarnessAdapters — how each AI coding CLI is invoked (ARCHITECTURE §10). Every flag below was
-// checked against the `--help` output of the installed CLI (claude 2.1, codex 0.168, kiro-cli 3.3).
+// checked against the `--help` output of the installed CLIs (claude 2.1, codex 0.169, kiro-cli 3.3).
 //
 // The user's prompt never appears on a command line: it lives in the workspace's TASK.md, which is
 // either connected to the harness's stdin or referenced by a fixed instruction. No shell is
@@ -25,8 +25,13 @@ public struct HarnessContext: Sendable {
     public var model: String?
     /// PATH directories, used to resolve a custom harness's program.
     public var searchPath: [String]
-    public init(workspace: AIWorkspace, model: String?, searchPath: [String]) {
-        self.workspace = workspace; self.model = model?.trimmingCharacters(in: .whitespaces).nilIfEmpty; self.searchPath = searchPath
+    /// User-supplied extra options (e.g. `-c model_reasoning_effort="low"` for codex), inserted
+    /// after LivePaper's own options and before any positional prompt argument. Ignored by custom
+    /// harnesses, whose template already is the complete command.
+    public var extraArguments: [String]
+    public init(workspace: AIWorkspace, model: String?, searchPath: [String], extraArguments: [String] = []) {
+        self.workspace = workspace; self.model = model?.trimmingCharacters(in: .whitespaces).nilIfEmpty
+        self.searchPath = searchPath; self.extraArguments = extraArguments
     }
 }
 
@@ -61,6 +66,7 @@ public struct ClaudeAdapter: HarnessAdapter {
         var args = ["-p", "--output-format", "stream-json", "--verbose",
                     "--permission-mode", "acceptEdits", "--allowedTools", Self.allowedTools]
         if let model = context.model { args += ["--model", model] }
+        args += context.extraArguments
         return HarnessInvocation(executable: harness.executable, arguments: args,
                                  currentDirectory: context.workspace.root, stdinFile: context.workspace.taskFile)
     }
@@ -80,6 +86,7 @@ public struct CodexAdapter: HarnessAdapter {
                     // `livepaper check` uses to reach the RenderService.
                     "-c", "sandbox_workspace_write.network_access=true"]
         if let model = context.model { args += ["-m", model] }
+        args += context.extraArguments
         args.append("-")
         return HarnessInvocation(executable: harness.executable, arguments: args, currentDirectory: ws.root, stdinFile: ws.taskFile)
     }
@@ -96,8 +103,10 @@ public struct KiroAdapter: HarnessAdapter {
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         var args = ["chat", "--no-interactive", "--trust-tools=\(Self.trustedTools)"]
-        if streamJSON { args += ["--output-format", "stream-json"] }
+        // Text mode would otherwise wrap long lines at an assumed terminal width.
+        args += streamJSON ? ["--output-format", "stream-json"] : ["--wrap", "never"]
         if let model = context.model { args += ["--model", model] }
+        args += context.extraArguments
         args.append(HarnessAdapters.bootstrapInstruction)
         return HarnessInvocation(executable: harness.executable, arguments: args,
                                  currentDirectory: context.workspace.root, stdinFile: nil)
