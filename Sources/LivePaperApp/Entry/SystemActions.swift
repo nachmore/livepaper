@@ -95,10 +95,13 @@ enum SystemActions {
 @MainActor
 final class DockIconPolicy {
     static let shared = DockIconPolicy()
+    /// Off in the snapshot harness, which must never become a regular (focus-taking) app.
+    var isEnabled = true
     private var openMainWindows = Set<ObjectIdentifier>()
     private var closeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
 
     func mainWindowAppeared(_ window: NSWindow) {
+        guard isEnabled else { return }
         let key = ObjectIdentifier(window)
         guard !openMainWindows.contains(key) else { return }
         openMainWindows.insert(key)

@@ -122,7 +122,7 @@ enum PowerSource {
 
 // MARK: - AppKit host
 
-private struct LivePreviewRepresentable: NSViewRepresentable {
+fileprivate struct LivePreviewRepresentable: NSViewRepresentable {
     enum Content {
         case web(URL, config: [String: Any], onError: ((String) -> Void)?)
         case video(URL, fit: LPVideoFit)
@@ -150,7 +150,7 @@ private struct LivePreviewRepresentable: NSViewRepresentable {
 }
 
 /// Owns the live content and starts/stops it as the view's visibility changes.
-final class LivePreviewHostView: NSView {
+fileprivate final class LivePreviewHostView: NSView {
     private(set) var content: LivePreviewRepresentable.Content
     private var web: PassiveWebView?
     private var webRelay: ScriptMessageRelay?
@@ -160,7 +160,7 @@ final class LivePreviewHostView: NSView {
     private var displaysAsleep = false
     private var sessionInactive = false
 
-    fileprivate init(content: LivePreviewRepresentable.Content) {
+    init(content: LivePreviewRepresentable.Content) {
         self.content = content
         super.init(frame: .zero)
         wantsLayer = true
@@ -193,7 +193,7 @@ final class LivePreviewHostView: NSView {
     /// Previews never take clicks or hovers; the card or detail view around them does.
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
-    fileprivate func replace(_ new: LivePreviewRepresentable.Content) {
+    func replace(_ new: LivePreviewRepresentable.Content) {
         stop()
         content = new
         updateActivity()

@@ -125,6 +125,7 @@ struct UninstallPlan: Equatable, Sendable {
         enum Action: String, Sendable { case remove, restore, keep }
         let id: String
         let action: Action
+        /// A complete instruction ("Remove the LivePaper screen saver").
         let title: String
         /// A "~"-abbreviated path or short explanation.
         let detail: String
@@ -140,21 +141,21 @@ struct UninstallPlan: Equatable, Sendable {
                      home: String = NSHomeDirectory()) -> UninstallPlan {
         func short(_ url: URL) -> String { LPFormat.abbreviatingHome(url.path, home: home) }
         var items: [Item] = [
-            Item(id: "helper", action: .remove, title: "The LivePaper helper (login item)",
+            Item(id: "helper", action: .remove, title: "Remove the LivePaper helper (login item)",
                  detail: "Stops it and removes \(LPPaths.helperLabel) from Login Items."),
-            Item(id: "saver", action: .remove, title: "The LivePaper screen saver", detail: short(LPPaths.installedSaver)),
-            Item(id: "restore", action: .restore, title: "Your previous screen saver and settings",
-                 detail: "Restored from the backup taken at install (\(short(LPPaths.backups)))."),
+            Item(id: "saver", action: .remove, title: "Remove the LivePaper screen saver", detail: short(LPPaths.installedSaver)),
+            Item(id: "restore", action: .restore, title: "Restore your previous screen saver and settings",
+                 detail: "From the backup taken at install (\(short(LPPaths.backups)))."),
         ]
         let scenes = userSceneCount == 1 ? "1 scene" : "\(userSceneCount) scenes"
         if keepScenes {
-            items.append(Item(id: "library", action: .keep, title: "Your scenes (\(scenes))", detail: short(LPPaths.library)))
+            items.append(Item(id: "library", action: .keep, title: "Keep your scenes (\(scenes))", detail: short(LPPaths.library)))
         } else {
-            items.append(Item(id: "library", action: .remove, title: "Your scenes (\(scenes)) and AI workspaces",
+            items.append(Item(id: "library", action: .remove, title: "Delete your scenes (\(scenes)) and AI workspaces",
                               detail: short(LPPaths.supportRoot)))
         }
         if let app = appBundlePath {
-            items.append(Item(id: "app", action: .remove, title: "LivePaper.app (moved to the Trash)",
+            items.append(Item(id: "app", action: .remove, title: "Move LivePaper.app to the Trash",
                               detail: LPFormat.abbreviatingHome(app, home: home)))
         }
         return UninstallPlan(items: items)

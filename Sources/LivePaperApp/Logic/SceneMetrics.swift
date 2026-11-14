@@ -152,3 +152,15 @@ enum LPFormat {
         return parts.joined(separator: " · ")
     }
 }
+
+/// Labels for `CheckReport.benchMs` keys ("1512x982@2 t=14").
+enum BenchLabel {
+    /// "1512x982@2 t=14" → "1512×982 @2x". Unknown formats are returned unchanged.
+    static func title(_ key: String) -> String {
+        let size = key.split(separator: " ").first.map(String.init) ?? key
+        let parts = size.split(separator: "@", maxSplits: 1).map(String.init)
+        guard let dims = parts.first, dims.contains("x") else { return key }
+        let pretty = dims.replacingOccurrences(of: "x", with: "\u{00D7}")
+        return parts.count > 1 ? "\(pretty) @\(parts[1])x" : pretty
+    }
+}

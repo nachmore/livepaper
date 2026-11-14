@@ -9,6 +9,9 @@ final class MockAIService: AIServicing, @unchecked Sendable {
     private let library: MockLibraryService
     private let workspaces: URL
     private let pace: Double
+    /// Snapshot/test hook: sessions stop after this many scripted steps and keep "running" until
+    /// cancelled, which freezes the UI in its mid-session state.
+    var holdAfterSteps: Int?
 
     init(library: MockLibraryService, workspaces: URL, pace: Double) {
         self.library = library
@@ -35,7 +38,8 @@ final class MockAIService: AIServicing, @unchecked Sendable {
             base = item
         }
         let session = MockAISession(id: id, workspace: workspace)
-        session.run(MockAIScript(request: request, harness: harness, model: model, base: base, workspace: workspace), pace: pace)
+        session.run(MockAIScript(request: request, harness: harness, model: model, base: base, workspace: workspace), pace: pace,
+                    holdAfter: holdAfterSteps)
         return session
     }
 }
@@ -56,13 +60,18 @@ final class MockAISession: AISessionHandle, @unchecked Sendable {
         continuation = c
     }
 
-    func run(_ script: MockAIScript, pace: Double) {
+    func run(_ script: MockAIScript, pace: Double, holdAfter: Int? = nil) {
         let continuation = self.continuation
         let t = Task.detached {
             do {
-                for step in script.steps() {
+                let steps = script.steps()
+                for step in steps.prefix(holdAfter ?? steps.count) {
                     try await MockServices.pause(step.delay, pace: pace)
                     if let event = try step.make() { continuation.yield(event) }
+                }
+                if holdAfter != nil {
+                    // Stay "running" until cancelled (the stream is finished by cancel()).
+                    while !Task.isCancelled { try await Task.sleep(nanoseconds: 1_000_000_000) }
                 }
             } catch is CancellationError {
                 // Cancelled by the user: the real service kills the harness process group.

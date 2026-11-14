@@ -47,12 +47,23 @@ extension SceneBadge {
 }
 
 extension EnergyClass {
+    /// For window backgrounds (light and dark).
     var tint: Color {
         switch self {
         case .low: return .green
         case .medium: return .yellow
         case .high: return .orange
         case .unmeasured: return .secondary
+        }
+    }
+
+    /// For the dark scrim of thumbnail badges, where system colours would read too dark.
+    var overlayTint: Color {
+        switch self {
+        case .low: return Color(red: 0.6, green: 0.95, blue: 0.65)
+        case .medium: return Color(red: 1.0, green: 0.88, blue: 0.45)
+        case .high: return Color(red: 1.0, green: 0.68, blue: 0.45)
+        case .unmeasured: return .white.opacity(0.8)
         }
     }
 }

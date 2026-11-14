@@ -89,6 +89,10 @@ final class AppModel {
     private var thumbnailAttempts: Set<String> = []
     private var previewHTMLCache: [String: URL] = [:]
     private(set) var videoImport: VideoImport?
+    /// Scenes with a `livepaper check` in progress.
+    private(set) var checkingSceneIDs: Set<String> = []
+    /// Bumped when per-scene files (history, check report) change, so detail views reload them.
+    private(set) var detailsRevision = 0
 
     // Screen saver, lock, system
     private(set) var playlist = PlaylistSettings()
@@ -117,6 +121,7 @@ final class AppModel {
 
     /// Initial load. Safe to call again (e.g. from "Reload").
     func start() async {
+        await clearPreviewCache()
         async let lib: Void = reloadLibrary()
         async let pl: Void = loadPlaylist()
         async let st: Void = refreshInstallStatus()
@@ -178,9 +183,10 @@ final class AppModel {
     }
 
     /// A compiled, self-contained HTML file for live previews of a web scene (cached per version).
+    /// The key includes the package location so an AI candidate never reuses the library copy.
     func previewHTML(for item: SceneItem) async throws -> URL {
         let stamp = Int(item.manifest.updated?.timeIntervalSince1970 ?? 0)
-        let key = "\(item.id)-\(stamp)"
+        let key = "\(item.id)-\(stamp)-\(String(AppModel.stableHash(item.packageURL.path), radix: 36))"
         if let cached = previewHTMLCache[key], FileManager.default.fileExists(atPath: cached.path) { return cached }
         let dir = environment.previewCacheDirectory
         let out = dir.appendingPathComponent("\(key).html")
@@ -192,6 +198,55 @@ final class AppModel {
         }
         previewHTMLCache[key] = out
         return out
+    }
+
+    /// Compiled previews are disposable; start each launch with an empty cache so it can't grow.
+    private func clearPreviewCache() async {
+        let dir = environment.previewCacheDirectory
+        _ = try? await offMain { () -> Bool in
+            let fm = FileManager.default
+            for url in (try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil)) ?? [] where url.pathExtension == "html" {
+                try? fm.removeItem(at: url)
+            }
+            return true
+        }
+    }
+
+    /// FNV-1a: stable across launches (Swift's Hasher is randomly seeded per process).
+    static func stableHash(_ s: String) -> UInt64 {
+        var h: UInt64 = 0xcbf2_9ce4_8422_2325
+        for b in s.utf8 { h ^= UInt64(b); h = h &* 0x100_0000_01b3 }
+        return h
+    }
+
+    /// Runs `livepaper check` on a user scene and records the measured performance in its manifest
+    /// (built-in scenes ship already measured and are read-only).
+    func runCheck(_ id: String) async {
+        guard let entry = entry(id: id), !entry.item.isBuiltin, !checkingSceneIDs.contains(id) else { return }
+        checkingSceneIDs.insert(id)
+        defer { checkingSceneIDs.remove(id) }
+        let name = entry.manifest.name
+        do {
+            let report = try await services.checker.check(package: entry.item.packageURL, options: CheckOptions(power: true))
+            var manifest = entry.manifest
+            manifest.performance = SceneManifest.Performance(benchMs: CheckReportFile.primaryBenchMs(report),
+                                                             energyMw: report.energyMw, checkedAt: report.checkedAt)
+            if manifest.performance != entry.manifest.performance {
+                let library = services.library
+                let m = manifest
+                try await offMain { try library.update(m) }
+            }
+            detailsRevision += 1
+            await reloadLibrary()
+            if report.passed {
+                banners.post(.success, "\u{201C}\(name)\u{201D} passed its check", message: LPFormat.checkSummary(report))
+            } else {
+                banners.post(.warning, "\u{201C}\(name)\u{201D} has problems", message: report.problems.first ?? LPFormat.checkSummary(report),
+                             actions: [.init(title: "Modify with AI") { [weak self] in self?.sceneAction = .modify(id) }])
+            }
+        } catch {
+            banners.error("Couldn't check \u{201C}\(name)\u{201D}", error) { [weak self] in Task { await self?.runCheck(id) } }
+        }
     }
 
     @discardableResult
@@ -298,6 +353,11 @@ final class AppModel {
 
     var playlistSummary: String {
         PlaylistDraft.summary(playlist, available: availableSceneIDs, names: sceneNames)
+    }
+
+    /// Whether the saver will show this scene with the current settings.
+    func isInPlaylist(_ id: String) -> Bool {
+        PlaylistDraft(playlist).effectiveSceneIDs(available: availableSceneIDs).contains(id)
     }
 
     func loadPlaylist() async {
@@ -428,6 +488,8 @@ final class AppModel {
         await refreshInstallStatus()
     }
 
+    var hasCompletedOnboarding: Bool { environment.defaults.bool(forKey: AppEnvironment.onboardingCompletedKey) }
+
     func completeOnboarding() {
         environment.defaults.set(true, forKey: AppEnvironment.onboardingCompletedKey)
         showOnboarding = false
@@ -541,6 +603,7 @@ final class AppModel {
             session.resolution = .accepted(sceneID: item.id)
             previewHTMLCache = previewHTMLCache.filter { !$0.key.hasPrefix(item.id + "-") }
             thumbnailRevision[item.id, default: 0] += 1
+            detailsRevision += 1
             await reloadLibrary()
             let verb = session.isModify ? "Updated" : "Added"
             banners.post(.success, "\(verb) \u{201C}\(item.manifest.name)\u{201D}",

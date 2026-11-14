@@ -181,3 +181,23 @@ struct AISessionState: Equatable {
         return "\u{2026}" + String(text.suffix(maxTextLength))
     }
 }
+
+/// One-line titles for collapsed groups of tool calls: "Used 3 tools · Read ×2, Write".
+enum ToolSummary {
+    static func title(_ calls: [AISessionState.ToolCall]) -> String {
+        guard !calls.isEmpty else { return "No tools used" }
+        var order: [String] = []
+        var counts: [String: Int] = [:]
+        for call in calls {
+            if counts[call.name] == nil { order.append(call.name) }
+            counts[call.name, default: 0] += 1
+        }
+        let names = order.prefix(4).map { name in
+            let n = counts[name] ?? 1
+            return n > 1 ? "\(name) \u{00D7}\(n)" : name
+        }
+        let more = order.count > 4 ? ", \u{2026}" : ""
+        let head = calls.count == 1 ? "Used 1 tool" : "Used \(calls.count) tools"
+        return "\(head) \u{00B7} \(names.joined(separator: ", "))\(more)"
+    }
+}
