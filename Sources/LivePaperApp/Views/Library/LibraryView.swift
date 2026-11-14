@@ -172,7 +172,8 @@ struct SceneCard: View {
                 .padding(8)
             }
             .overlay(alignment: .bottomTrailing) {
-                if model.isInPlaylist(entry.id) {
+                // When every scene plays, a per-card marker would carry no information.
+                if model.isInPlaylist(entry.id) && !PlaylistDraft(model.playlist).includesAllScenes {
                     Image(systemName: "play.circle.fill")
                         .font(.title3)
                         .symbolRenderingMode(.palette)

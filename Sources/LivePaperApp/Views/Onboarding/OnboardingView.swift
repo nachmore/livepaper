@@ -321,7 +321,8 @@ private struct ScreenSaverPage: View {
                     CheckWithAction(check: check) { EmptyView() }
                 }
             }
-            if !SetupChecklist.isComplete(.screenSaver, status: status) {
+            let guided = needsGuidedSelection && status.saverInstalled && !status.saverSelected
+            if !SetupChecklist.isComplete(.screenSaver, status: status) && !guided {
                 HStack(spacing: 10) {
                     Button {
                         Task { needsGuidedSelection = !(await model.makeLivePaperScreenSaver()) }
@@ -335,7 +336,7 @@ private struct ScreenSaverPage: View {
                     if model.isInstallBusy { ProgressView().controlSize(.small) }
                 }
             }
-            if needsGuidedSelection && status.saverInstalled && !status.saverSelected {
+            if guided {
                 GuidedSaverSelection()
             }
         }
@@ -429,7 +430,8 @@ private struct SettingsIllustration: View {
                             .aspectRatio(1.5, contentMode: .fit)
                             .overlay(alignment: .bottom) {
                                 if i == 1 {
-                                    Text("LivePaper").font(.system(size: 7, weight: .semibold)).foregroundStyle(.white).padding(.bottom, 2)
+                                    Text("LivePaper").font(.system(size: 7, weight: .semibold)).foregroundStyle(.white)
+                                        .lineLimit(1).fixedSize().padding(.bottom, 2)
                                 }
                             }
                         }

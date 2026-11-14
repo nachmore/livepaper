@@ -361,7 +361,7 @@ struct UninstallSheet: View {
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(item.title)
-                            Text(item.detail).font(.callout.monospaced()).foregroundStyle(.secondary)
+                            Text(item.detail).font(.callout).foregroundStyle(.secondary)
                                 .textSelection(.enabled)
                         }
                     }

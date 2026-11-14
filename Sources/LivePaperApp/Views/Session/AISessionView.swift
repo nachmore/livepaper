@@ -18,9 +18,15 @@ struct AISessionView: View {
                 SessionTimeline(state: session.state)
                     .frame(minWidth: 340, maxWidth: .infinity)
                 Divider()
-                ScrollView {
-                    SessionResultPanel(session: session)
-                        .padding(20)
+                VStack(spacing: 0) {
+                    ScrollView {
+                        SessionResultPanel(session: session)
+                            .padding(20)
+                    }
+                    Divider()
+                    // Pinned, so the decision is always visible however long the report is.
+                    SessionDecisionBar(session: session)
+                        .padding(16)
                 }
                 .frame(width: 400)
                 .background(.background.secondary)
@@ -49,7 +55,7 @@ private struct SessionHeader: View {
                     if let m = session.model { Text("\u{00B7}"); Text(m) }
                     if let source = session.clonedFrom { Text("\u{00B7}"); Text("copy of \(source)") }
                     Text("\u{00B7}")
-                    Text(session.state.lastStatus).lineLimit(1)
+                    Text(AISessionState.describe(session.state.phase)).lineLimit(1)
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -206,8 +212,6 @@ private struct SessionResultPanel: View {
     @Environment(AppModel.self) private var model
     @State private var selectedStill: URL?
     @State private var candidate: SceneItem?
-    @State private var feedback = ""
-    @State private var accepting = false
 
     var body: some View {
         let state = session.state
@@ -219,7 +223,6 @@ private struct SessionResultPanel: View {
                     CheckReportSummary(report: report)
                 }
             }
-            decision(state)
         }
         .task(id: state.package) { await loadCandidate(state.package) }
     }
@@ -291,8 +294,29 @@ private struct SessionResultPanel: View {
         }
     }
 
+    private func loadCandidate(_ package: URL?) async {
+        guard let package else { candidate = nil; return }
+        let manifest = try? await offMain { try SceneManifest.load(package: package) }
+        candidate = manifest.map { SceneItem(manifest: $0, packageURL: package, isBuiltin: false) }
+    }
+}
+
+// MARK: - Decision
+
+/// Accept / Replace / Try again / Discard, depending on how the session ended.
+private struct SessionDecisionBar: View {
+    let session: AISessionModel
+    @Environment(AppModel.self) private var model
+    @State private var feedback = ""
+    @State private var accepting = false
+
+    var body: some View {
+        content.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     @ViewBuilder
-    private func decision(_ state: AISessionState) -> some View {
+    private var content: some View {
+        let state = session.state
         switch (state.phase, session.resolution) {
         case (.succeeded, .accepted(let id)):
             VStack(alignment: .leading, spacing: 10) {
@@ -362,12 +386,6 @@ private struct SessionResultPanel: View {
                 .textFieldStyle(.roundedBorder)
             Button(buttonTitle) { model.retry(session, feedback: feedback) }
         }
-    }
-
-    private func loadCandidate(_ package: URL?) async {
-        guard let package else { candidate = nil; return }
-        let manifest = try? await offMain { try SceneManifest.load(package: package) }
-        candidate = manifest.map { SceneItem(manifest: $0, packageURL: package, isBuiltin: false) }
     }
 }
 

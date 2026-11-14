@@ -13,15 +13,9 @@ struct CreateView: View {
                         .font(.title3)
                         .foregroundStyle(.secondary)
                 }
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 20) {
-                        VideoCreateCard().frame(minWidth: 340, maxWidth: .infinity)
-                        DescribeCreateCard().frame(minWidth: 400, maxWidth: .infinity)
-                    }
-                    VStack(spacing: 20) {
-                        VideoCreateCard()
-                        DescribeCreateCard()
-                    }
+                AdaptiveStack(threshold: 780, weights: [0.42, 0.58]) {
+                    VideoCreateCard()
+                    DescribeCreateCard()
                 }
             }
             .padding(28)

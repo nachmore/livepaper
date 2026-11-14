@@ -39,15 +39,9 @@ private struct SceneDetailContent: View {
                 preview
                 header
                 actions
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 16) {
-                        aboutBox.frame(minWidth: 300)
-                        performanceBox.frame(minWidth: 300)
-                    }
-                    VStack(spacing: 16) {
-                        aboutBox
-                        performanceBox
-                    }
+                AdaptiveStack(threshold: 680, spacing: 16) {
+                    aboutBox.frame(maxHeight: .infinity, alignment: .top)
+                    performanceBox.frame(maxHeight: .infinity, alignment: .top)
                 }
                 historyBox
             }
@@ -75,14 +69,16 @@ private struct SceneDetailContent: View {
 
     private var preview: some View {
         VStack(spacing: 10) {
-            ScenePreview(item: entry.item, quality: .full, showClock: true) { message in previewError = message }
+            // The black box takes the display's shape exactly, so the preview never letterboxes.
+            Color.black
                 .aspectRatio(aspect.ratio, contentMode: .fit)
-                .frame(maxWidth: .infinity)
-                .frame(maxHeight: 460)
-                .background(.black)
+                .overlay {
+                    ScenePreview(item: entry.item, quality: .full, showClock: true) { message in previewError = message }
+                }
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.primary.opacity(0.1)))
                 .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
+                .frame(maxWidth: .infinity, maxHeight: 460)
                 .animation(.snappy, value: aspect)
             HStack {
                 Picker("Display shape", selection: $aspect) {

@@ -281,12 +281,61 @@ struct BannerView: View {
 
 // MARK: - Layout
 
+/// Side by side when there is room (children share the width by `weights` and get equal heights),
+/// stacked vertically otherwise. Unlike ViewThatFits it decides on the *available* width, so long
+/// single-line text ideal widths can't force the stacked layout.
+struct AdaptiveStack: Layout {
+    var threshold: CGFloat
+    var weights: [CGFloat] = []
+    var spacing: CGFloat = 20
+
+    private func widths(total: CGFloat, count: Int) -> [CGFloat] {
+        let w = (0..<count).map { $0 < weights.count ? max(weights[$0], 0.01) : 1 }
+        let sum = w.reduce(0, +)
+        let usable = max(0, total - spacing * CGFloat(count - 1))
+        return w.map { usable * $0 / sum }
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        guard !subviews.isEmpty else { return .zero }
+        let width = proposal.width ?? threshold
+        if width >= threshold {
+            let ws = widths(total: width, count: subviews.count)
+            let h = zip(subviews, ws).map { $0.sizeThatFits(ProposedViewSize(width: $1, height: nil)).height }.max() ?? 0
+            return CGSize(width: width, height: h)
+        }
+        let hs = subviews.map { $0.sizeThatFits(ProposedViewSize(width: width, height: nil)).height }
+        return CGSize(width: width, height: hs.reduce(0, +) + spacing * CGFloat(subviews.count - 1))
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        guard !subviews.isEmpty else { return }
+        if bounds.width >= threshold {
+            var x = bounds.minX
+            for (view, w) in zip(subviews, widths(total: bounds.width, count: subviews.count)) {
+                view.place(at: CGPoint(x: x, y: bounds.minY), proposal: ProposedViewSize(width: w, height: bounds.height))
+                x += w + spacing
+            }
+        } else {
+            var y = bounds.minY
+            for view in subviews {
+                let h = view.sizeThatFits(ProposedViewSize(width: bounds.width, height: nil)).height
+                view.place(at: CGPoint(x: bounds.minX, y: y), proposal: ProposedViewSize(width: bounds.width, height: h))
+                y += h + spacing
+            }
+        }
+    }
+}
+
 /// Wrapping horizontal layout for chips.
 struct FlowLayout: Layout {
     var spacing: CGFloat = 8
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = arrange(width: proposal.width ?? .infinity, subviews: subviews)
+        // With no width proposed (ideal size), wrap at the widest chip rather than laying every chip
+        // out on one endless row, which would make any container think the chips need a huge width.
+        let widest = subviews.map { $0.sizeThatFits(.unspecified).width }.max() ?? 0
+        let rows = arrange(width: proposal.width ?? widest, subviews: subviews)
         let height = rows.last.map { $0.y + $0.height } ?? 0
         let width = rows.map(\.width).max() ?? 0
         return CGSize(width: proposal.width ?? width, height: height)
