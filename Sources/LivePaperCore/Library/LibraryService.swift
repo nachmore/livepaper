@@ -22,7 +22,7 @@ public final class LibraryService: LibraryServicing, @unchecked Sendable {
     static let historyEntries: Set<String> = [SceneHistory.directoryName, SceneHistory.fileName]
 
     private let lock = NSRecursiveLock()
-    private let now: @Sendable () -> Date
+    private let clock: @Sendable () -> Date
     private let runner: CommandRunning
     private let log = Logger(subsystem: LPPaths.bundleID, category: "library")
     private var prunedStaging = false
@@ -36,7 +36,7 @@ public final class LibraryService: LibraryServicing, @unchecked Sendable {
         self.builtinDirectory = builtinDirectory
         self.templateDirectory = templateDirectory
         self.runner = runner
-        self.now = now
+        self.clock = now
     }
 
     // MARK: - Reading
@@ -238,6 +238,10 @@ public final class LibraryService: LibraryServicing, @unchecked Sendable {
     }
 
     // MARK: - Internals
+
+    /// The current time in whole seconds: scene.json stores ISO 8601 without fractions, so this
+    /// keeps the manifests this service returns equal to what a later read from disk gives.
+    private func now() -> Date { Date(timeIntervalSince1970: clock().timeIntervalSince1970.rounded(.down)) }
 
     private func withLock<T>(_ body: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }

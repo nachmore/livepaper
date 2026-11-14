@@ -234,17 +234,19 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     public func registerHelper() throws {
         if loginItem.isAvailable {
+            // A LaunchAgent from an earlier unbundled install uses the same label; launchd can't
+            // load the login item while it is loaded.
+            if FileOps.entryExists(paths.fallbackAgentPlist) {
+                try stopHelperJob()
+                try removeFallbackAgent()
+            }
             do {
                 var status = LoginItemStatus.notRegistered
                 try perform("Register the helper as a login item") {
                     status = try loginItem.register()
                     return nil
                 }
-                if !dryRun {
-                    // An agent from an earlier unbundled install would run a second helper.
-                    try removeFallbackAgent()
-                    if status == .requiresApproval { log.notice("helper needs approval in System Settings › Login Items") }
-                }
+                if status == .requiresApproval { log.notice("helper needs approval in System Settings › Login Items") }
                 return
             } catch {
                 log.error("SMAppService registration failed, using a LaunchAgent: \(error.localizedDescription, privacy: .public)")
@@ -260,6 +262,11 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 try loginItem.unregister(); return nil
             }
         }
+        try stopHelperJob()
+        try removeFallbackAgent()
+    }
+
+    private func stopHelperJob() throws {
         try perform("Stop the helper (\(helperService))", skipIf: { helperLoaded() ? nil : "not loaded" }) {
             let result = try runner.run("/bin/launchctl", ["bootout", helperService], timeout: 15)
             // Unregistering the login item may already have unloaded it.
@@ -268,7 +275,6 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             }
             return nil
         }
-        try removeFallbackAgent()
     }
 
     /// `launchctl print` (read-only) succeeds only for a loaded job.

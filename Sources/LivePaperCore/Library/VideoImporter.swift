@@ -132,7 +132,6 @@ enum VideoImporter {
                 try? await Task.sleep(nanoseconds: 250_000_000)
             }
         }
-        defer { poller.cancel() }
         await withTaskCancellationHandler {
             await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
                 box.value.exportAsynchronously { done.resume() }
@@ -140,6 +139,9 @@ enum VideoImporter {
         } onCancel: {
             box.value.cancelExport()
         }
+        // Wait for the poller so no stale value is reported after the final one.
+        poller.cancel()
+        await poller.value
         switch session.status {
         case .completed: progress(1)
         case .cancelled: throw CancellationError()

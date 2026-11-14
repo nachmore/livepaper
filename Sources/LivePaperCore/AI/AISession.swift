@@ -183,8 +183,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         switch stopReason {
         case .cancelled: finish(.failed("Cancelled.")); return
         case .timedOut:
-            let minutes = Int((deps.timeout / 60).rounded())
-            finish(.failed("\(harness.name) didn't finish within \(minutes) minute\(minutes == 1 ? "" : "s"), so LivePaper stopped it."))
+            finish(.failed("\(harness.name) didn't finish within \(Self.describe(deps.timeout)), so LivePaper stopped it."))
             return
         case nil: break
         }
@@ -267,16 +266,16 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
 
     private func scanStills() {
         let dir = ws.scene.appendingPathComponent(".check")
-        guard let urls = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: [.contentModificationDateKey],
-                                                                      options: [.skipsHiddenFiles]) else { return }
-        for url in urls.filter({ $0.pathExtension.lowercased() == "png" }).sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
-            reportStill(url)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return }
+        // URLs built from the workspace path (not the listing's), so they match `workspace`.
+        for name in names.sorted() where !name.hasPrefix(".") && (name as NSString).pathExtension.lowercased() == "png" {
+            reportStill(dir.appendingPathComponent(name, isDirectory: false))
         }
     }
 
     /// Emits `.stillRendered` for a PNG that is new or was rewritten since it was last reported.
     private func reportStill(_ url: URL) {
-        guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate else { return }
+        guard let date = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.modificationDate] as? Date else { return }
         guard stillDates[url.path] != date else { return }
         stillDates[url.path] = date
         emit(.stillRendered(url))
@@ -315,6 +314,14 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         let how = status > 128 ? "was stopped by signal \(status - 128)" : "exited with status \(status)"
         let detail = stderrTail.suffix(3).joined(separator: " ").nilIfEmpty ?? parser?.finalMessage
         return "\(harness.name) \(how)" + (detail.map { ": " + StreamText.truncate($0, 400) } ?? ".")
+    }
+
+    /// "20 minutes", "1 minute", "45 seconds".
+    static func describe(_ interval: TimeInterval) -> String {
+        if interval < 60 {
+            let s = Int(interval.rounded()); return "\(s) second\(s == 1 ? "" : "s")"
+        }
+        let m = Int((interval / 60).rounded()); return "\(m) minute\(m == 1 ? "" : "s")"
     }
 
     static func checkFailure(_ report: CheckReport) -> String {

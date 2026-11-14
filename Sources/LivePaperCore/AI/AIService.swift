@@ -44,18 +44,22 @@ public final class AIService: AIServicing, @unchecked Sendable {
     public let detector: HarnessDetector
     private let checker: SceneChecking
     private let runner: CommandRunning
+    private let timeoutOverride: TimeInterval?
     private let lock = NSLock()
     /// kiro-cli executable → whether it supports `--output-format stream-json`.
     private var kiroStreamJSON: [String: Bool] = [:]
     private var prunedWorkspaces = false
     private let log = Logger(subsystem: LPPaths.bundleID, category: "ai")
 
+    /// - Parameter timeout: overrides the timeout from the settings (CLI option, tests).
     public init(library: LibraryServicing, checker: SceneChecking,
                 workspaceBuilder: WorkspaceBuilder? = nil,
                 detector: HarnessDetector = HarnessDetector(),
                 runner: CommandRunning = SystemCommandRunner(),
-                settingsURL: URL = LPPaths.supportRoot.appendingPathComponent(AIService.settingsFileName)) {
+                settingsURL: URL = LPPaths.supportRoot.appendingPathComponent(AIService.settingsFileName),
+                timeout: TimeInterval? = nil) {
         self.checker = checker
+        self.timeoutOverride = timeout
         self.workspaceBuilder = workspaceBuilder ?? WorkspaceBuilder(library: library)
         self.detector = detector
         self.runner = runner
@@ -124,7 +128,7 @@ public final class AIService: AIServicing, @unchecked Sendable {
             },
             searchPath: { detector.searchPath() },
             extraArguments: settings.extraArguments[harness.kind.rawValue] ?? [],
-            timeout: settings.timeout)
+            timeout: timeoutOverride ?? settings.timeout)
         let chosenModel = model ?? settings.models[harness.kind.rawValue]
         let session = AISession(id: id, workspace: workspace, request: request, harness: harness, model: chosenModel, dependencies: deps)
         log.info("starting AI session \(id, privacy: .public) with \(harness.name, privacy: .public)")
