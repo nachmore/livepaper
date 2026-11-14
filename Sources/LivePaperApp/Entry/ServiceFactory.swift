@@ -1,5 +1,4 @@
 // ServiceFactory — decides between live and mock services and builds the AppModel once.
-import AppKit
 import Foundation
 import LivePaperCore
 import LivePaperRenderKit
@@ -28,35 +27,25 @@ enum ServiceFactory {
     /// (state.json, preview cache) stays out of the user's real files.
     @MainActor
     static func make(mock: Bool, pace: Double = 1) -> (LivePaperServices, AppEnvironment, Notice?) {
-        if mock {
-            let root = MockServices.temporaryRoot()
-            redirectPaths(into: root)
-            let defaults = UserDefaults(suiteName: "\(LPPaths.bundleID).mock") ?? .standard
-            return (mockServices(root: root, pace: pace), environment(mock: true, defaults: defaults, cache: root.appendingPathComponent("Previews")), nil)
+        if !mock {
+            do {
+                let live = try LivePaperServices.live()
+                let cache = FileManager.default.temporaryDirectory.appendingPathComponent("LivePaperPreviews")
+                return (live, environment(mock: false, defaults: UserDefaults.standard, cache: cache), nil)
+            } catch {
+                NSLog("LivePaper: live services unavailable (\(error.localizedDescription)); using sample data")
+            }
         }
-        let cache = FileManager.default.temporaryDirectory.appendingPathComponent("LivePaperPreviews")
-        if let live = liveServices() {
-            return (live, environment(mock: false, defaults: .standard, cache: cache), nil)
-        }
-        // Temporary: LivePaperServices.live() isn't in this tree yet. Fall back to sample data
-        // (in a temporary directory) rather than half-working live services.
         let root = MockServices.temporaryRoot()
         redirectPaths(into: root)
-        return (mockServices(root: root, pace: pace),
-                environment(mock: true, defaults: UserDefaults(suiteName: "\(LPPaths.bundleID).mock") ?? .standard,
-                            cache: root.appendingPathComponent("Previews")),
-                Notice(title: "Showing sample scenes",
-                       message: "This build doesn't include LivePaper's system services yet, so nothing on your Mac will change."))
+        let env = environment(mock: true, defaults: InMemoryPreferences(), cache: root.appendingPathComponent("Previews"))
+        let notice = mock ? nil : Notice(
+            title: "Showing sample scenes",
+            message: "This build doesn't include LivePaper's system services yet, so nothing on your Mac will change.")
+        return (mockServices(root: root, pace: pace), env, notice)
     }
 
-    private static func liveServices() -> LivePaperServices? {
-        #if LIVEPAPER_HAS_LIVE_SERVICES
-        return try? LivePaperServices.live()
-        #else
-        return nil
-        #endif
-    }
-
+    /// Points LPPaths (via its environment overrides) at a scratch root.
     static func redirectPaths(into root: URL) {
         let fm = FileManager.default
         let home = root.appendingPathComponent("Support"), savers = root.appendingPathComponent("Screen Savers")
@@ -77,7 +66,7 @@ enum ServiceFactory {
         }
     }
 
-    private static func environment(mock: Bool, defaults: UserDefaults, cache: URL) -> AppEnvironment {
+    static func environment(mock: Bool, defaults: PreferenceStore, cache: URL) -> AppEnvironment {
         let bundle = Bundle.main
         let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0-dev"
         let appPath = (!mock && bundle.bundleURL.pathExtension == "app") ? bundle.bundleURL.path : nil
@@ -90,14 +79,18 @@ enum ServiceFactory {
 
 /// Starts the in-process RenderService so thumbnails, AI validation stills and checks never need a
 /// separate GUI-registered process while the app runs (ARCHITECTURE §2, focus-stealing rule).
+@MainActor
 enum EmbeddedRenderServer {
+    /// Whatever the server hands back is retained for the life of the process.
+    private static var server: Any?
+
     static func start() {
-        #if LIVEPAPER_HAS_RENDERSERVER
-        _ = try? LivePaperRenderKit.RenderServer.startEmbeddedServer()
-        #else
-        // Temporary: LivePaperRenderKit.RenderServer isn't in this tree yet; RenderClient falls back
-        // to launching LivePaperRenderd on demand.
-        NSLog("LivePaper: embedded render server unavailable in this build (RenderKit \(LivePaperRenderKit.version))")
-        #endif
+        guard server == nil else { return }
+        do {
+            server = try LivePaperRenderKit.RenderServer.startEmbeddedServer()
+        } catch {
+            // Not fatal: RenderClient falls back to the headless LivePaperRenderd.
+            NSLog("LivePaper: couldn't start the embedded render server: \(error.localizedDescription)")
+        }
     }
 }

@@ -12,7 +12,7 @@ import LivePaperCore
 /// Process-level facts the model needs, injectable for tests.
 struct AppEnvironment {
     var isMock: Bool
-    var defaults: UserDefaults
+    var defaults: PreferenceStore
     var stateURL: URL
     /// Persists state.json (the live implementation also notifies the helper).
     var saveState: (LPSharedState) throws -> Void
@@ -140,7 +140,7 @@ final class AppModel {
         let library = services.library
         do {
             entries = try await offMain {
-                try library.scenes().map { LibraryEntry(item: $0, hasAIHistory: ProvenanceLog.hasHistory(package: $0.packageURL)) }
+                try library.scenes().map { LibraryEntry(item: $0, hasAIHistory: ProvenanceLog.hasAIHistory(package: $0.packageURL)) }
             }
             libraryLoadError = nil
             // Drop navigation to scenes that no longer exist.

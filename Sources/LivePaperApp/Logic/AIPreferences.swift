@@ -3,7 +3,7 @@
 import Foundation
 import LivePaperCore
 
-/// Stored as one JSON value in the app's UserDefaults (these are app-only preferences; the helper
+/// Stored as one JSON value in the app's preferences (these are app-only preferences; the helper
 /// and saver never need them, so they don't belong in state.json).
 struct AIPreferences: Codable, Equatable, Sendable {
     static let defaultsKey = "aiPreferences"
@@ -33,13 +33,13 @@ struct AIPreferences: Codable, Equatable, Sendable {
         customCommand = try c.decodeIfPresent(String.self, forKey: .customCommand) ?? ""
     }
 
-    static func load(from defaults: UserDefaults) -> AIPreferences {
+    static func load(from defaults: PreferenceStore) -> AIPreferences {
         guard let data = defaults.data(forKey: defaultsKey),
               let prefs = try? JSONDecoder().decode(AIPreferences.self, from: data) else { return AIPreferences() }
         return prefs
     }
 
-    func save(to defaults: UserDefaults) {
+    func save(to defaults: PreferenceStore) {
         if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: AIPreferences.defaultsKey) }
     }
 

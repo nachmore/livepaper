@@ -11,11 +11,26 @@ import LivePaperCore
 struct ProvenanceEntry: Identifiable, Equatable, Sendable {
     let id: Int
     var date: Date?
+    /// create | modify | clone | replace (free-form: agents and newer versions may add more).
     var action: String?
     var harness: String?
     var model: String?
     var prompt: String?
     var summary: String?
+
+    /// AI work: an explicit create/modify, or any line that names a harness.
+    var isAI: Bool { action == "create" || action == "modify" || harness != nil }
+
+    /// "Created with AI" / "Modified with AI" / "Cloned" / "Replaced" / "Changed".
+    var title: String {
+        switch action {
+        case "create": return "Created with AI"
+        case "modify": return "Modified with AI"
+        case "clone": return "Cloned"
+        case "replace": return "Replaced"
+        default: return harness != nil ? "Changed with AI" : "Changed"
+        }
+    }
 }
 
 enum ProvenanceLog {
@@ -42,12 +57,10 @@ enum ProvenanceLog {
         return parse(data)
     }
 
-    /// Cheap existence check used when building library cards.
-    static func hasHistory(package: URL) -> Bool {
-        let url = package.appendingPathComponent(fileName)
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-              let size = attrs[.size] as? NSNumber else { return false }
-        return size.intValue > 0
+    /// Whether an AI agent created or changed the scene. history.jsonl also records non-AI events
+    /// (clone, replace), so a non-empty file alone doesn't make a scene "AI".
+    static func hasAIHistory(package: URL) -> Bool {
+        load(package: package).contains(where: \.isAI)
     }
 
     /// ISO-8601 with or without fractional seconds.

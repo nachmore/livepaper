@@ -26,6 +26,18 @@ struct AISessionState: Equatable {
         }
     }
 
+    /// Short phase description for status pills and VoiceOver.
+    static func describe(_ phase: Phase) -> String {
+        switch phase {
+        case .starting: return "Starting"
+        case .running: return "Working"
+        case .validating: return "Checking the result"
+        case .succeeded: return "Ready to review"
+        case .failed: return "Didn\u{2019}t finish"
+        case .cancelled: return "Stopped"
+        }
+    }
+
     struct ToolCall: Equatable, Sendable {
         var name: String
         var detail: String
