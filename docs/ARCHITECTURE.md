@@ -24,8 +24,8 @@ This document is the contract between components. Keep it current when interface
   ⇒ **LivePaper's lock = start the saver first; the saver locks** (requires "Require password
   after screen saver begins: Immediately", which install verifies).
 * When the user touches a key/mouse while the saver runs, the lock UI (with Apple's own clock) is
-  drawn over the saver. Distributed notifications `com.apple.sessionagent.screenLockUIIsShowing`,
-  `…IsShown`, `…IsHidden` bracket that. ⇒ scenes must hide their own clock then (no double clock).
+  drawn over the saver. Distributed notifications `com.apple.screenLockUIIsShown` / `com.apple.screenLockUIIsHidden`
+  (object = uid string) bracket that (verified). ⇒ scenes must hide their own clock then (no double clock).
 * Video-call apps holding display-sleep assertions block every screen saver. Expected.
 * Idle time may be MDM-managed (e.g. 900 s); we never touch it.
 
@@ -187,7 +187,7 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   config injected as a user script, occlusion detection disabled, failure recovery with backoff.
 * **Video scenes:** native `AVPlayerLayer` + `AVPlayerLooper` (hardware decode, lowest power),
   native clock overlay (`CATextLayer`s) styled like the runtime clock.
-* Clock hand-off: observe `com.apple.sessionagent.screenLockUIIsShowing|IsShown|IsHidden` →
+* Clock hand-off: observe `com.apple.screenLockUIIsShown|IsHidden` →
   `lockUI(true/false)` (web) / fade native clock (video).
 * Power: pause on `screensDidSleep`, resume on wake; `Automatic` profile = battery saver on battery
   or Low Power Mode; exit host process on `com.apple.screensaver.willstop` (non-preview only).
