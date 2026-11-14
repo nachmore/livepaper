@@ -152,7 +152,7 @@ struct SceneCard: View {
             .aspectRatio(16.0 / 10.0, contentMode: .fit)
             .overlay {
                 ZStack {
-                    ThumbnailImage(url: entry.item.thumbnailURL, revision: model.thumbnailRevision[entry.id] ?? 0,
+                    ThumbnailImage(url: entry.thumbnail, revision: model.thumbnailRevision[entry.id] ?? 0,
                                    placeholderSymbol: entry.badge.symbolName)
                     if showLive {
                         ScenePreview(item: entry.item, quality: .hover, showClock: false)

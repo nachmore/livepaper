@@ -170,7 +170,7 @@ private struct PlaylistSceneRow<Trailing: View>: View {
 
     var body: some View {
         HStack(spacing: 12) {
-            ThumbnailImage(url: entry.item.thumbnailURL, revision: model.thumbnailRevision[entry.id] ?? 0, maxPixel: 160,
+            ThumbnailImage(url: entry.thumbnail, revision: model.thumbnailRevision[entry.id] ?? 0, maxPixel: 160,
                            placeholderSymbol: entry.badge.symbolName)
                 .frame(width: 64, height: 40)
                 .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))

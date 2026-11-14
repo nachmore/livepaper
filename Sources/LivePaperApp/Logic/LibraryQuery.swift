@@ -9,6 +9,8 @@ struct LibraryEntry: Identifiable, Equatable, Hashable, Sendable {
     var item: SceneItem
     var badge: SceneBadge
     var energy: EnergyClass
+    /// thumbnail.jpg when it exists (checked once here so grid cells never stat files).
+    var thumbnail: URL?
     var id: String { item.id }
     var manifest: SceneManifest { item.manifest }
 
@@ -16,6 +18,7 @@ struct LibraryEntry: Identifiable, Equatable, Hashable, Sendable {
         self.item = item
         self.badge = SceneBadge(kind: item.manifest.kind, hasAIHistory: hasAIHistory)
         self.energy = EnergyClass(manifest: item.manifest)
+        self.thumbnail = item.thumbnailURL
     }
 }
 

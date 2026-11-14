@@ -586,7 +586,7 @@ private struct FirstScenePage: View {
                 VStack(spacing: 6) {
                     Color.black
                         .aspectRatio(16.0 / 10.0, contentMode: .fit)
-                        .overlay { ThumbnailImage(url: entry.item.thumbnailURL, maxPixel: 400, placeholderSymbol: entry.badge.symbolName) }
+                        .overlay { ThumbnailImage(url: entry.thumbnail, maxPixel: 400, placeholderSymbol: entry.badge.symbolName) }
                         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                         .overlay(SelectionRing(selected: selected))
                     Text(entry.manifest.name).font(.callout.weight(selected ? .semibold : .regular)).lineLimit(1)

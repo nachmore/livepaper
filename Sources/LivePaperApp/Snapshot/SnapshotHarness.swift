@@ -59,34 +59,42 @@ enum SnapshotHarness {
         }
 
         // Onboarding first: it shows the initial (nothing installed) state.
-        shoot("onboarding-welcome", CGSize(width: 800, height: 580), dark: false, OnboardingView(initialStep: .welcome))
+        let sheet = CGSize(width: 800, height: 580)
+        shoot("onboarding-welcome-light", sheet, dark: false, OnboardingView(initialStep: .welcome))
         try? services.install.installSaver()
         wait { await model.refreshInstallStatus() }
-        shoot("onboarding-saver", CGSize(width: 800, height: 580), dark: true,
-              OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
-        shoot("onboarding-lock", CGSize(width: 800, height: 580), dark: false, OnboardingView(initialStep: .lock))
-        shoot("onboarding-scene", CGSize(width: 800, height: 580), dark: true, OnboardingView(initialStep: .firstScene))
+        shoot("onboarding-saver-dark", sheet, dark: true, OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
+        shoot("onboarding-lockkeys-light", sheet, dark: false, OnboardingView(initialStep: .lockKeys))
+        shoot("onboarding-scene-light", sheet, dark: false, OnboardingView(initialStep: .firstScene))
 
         model.section = .library
         model.banners.post(.success, "Screen saver updated", message: "9 scenes published.")
         shoot("library-light", main, dark: false, MainWindowView())
-        shoot("library-dark", main, dark: true, MainWindowView())
         model.banners.banners.forEach { model.banners.dismiss($0.id) }
         model.libraryPath = ["paper-lanterns"]
         shoot("detail-dark", main, dark: true, MainWindowView())
         model.libraryPath = []
         model.section = .create
         shoot("create-light", main, dark: false, MainWindowView())
-        shoot("create-dark", main, dark: true, MainWindowView())
+        shoot("create-narrow-dark", CGSize(width: 880, height: 760), dark: true, MainWindowView())
         if let running { model.section = .session(running.id) }
         shoot("session-running-dark", main, dark: true, MainWindowView())
         if let done { model.section = .session(done.id) }
         shoot("session-done-light", main, dark: false, MainWindowView())
+        // An explicit playlist: per-card markers and the ordered list with remove buttons.
+        wait {
+            await model.useAsScreenSaver("paper-lanterns")
+            await model.addToPlaylist("neon-rain")
+            await model.addToPlaylist("aurora-lake")
+        }
+        model.banners.banners.forEach { model.banners.dismiss($0.id) }
         model.section = .playlist
-        shoot("playlist-light", main, dark: false, MainWindowView())
-        shoot("settings-lock", CGSize(width: 640, height: 600), dark: false, SettingsView(initialTab: .lock))
-        shoot("settings-ai", CGSize(width: 640, height: 560), dark: true, SettingsView(initialTab: .ai))
-        shoot("uninstall", CGSize(width: 520, height: 470), dark: false, UninstallSheet())
+        shoot("playlist-dark", main, dark: true, MainWindowView())
+        model.section = .library
+        shoot("library-explicit-dark", main, dark: true, MainWindowView())
+        shoot("settings-saver-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .screenSaver))
+        shoot("settings-about-dark", CGSize(width: 640, height: 440), dark: true, SettingsView(initialTab: .about))
+        shoot("uninstall-dark", CGSize(width: 520, height: 470), dark: true, UninstallSheet())
 
         running?.cancel()
         print("snapshot: wrote PNGs to \(dir.path)")
@@ -95,10 +103,12 @@ enum SnapshotHarness {
     // MARK: rendering
 
     private static func render<V: View>(_ name: String, size: CGSize, dark: Bool, view: V, model: AppModel, into dir: URL) {
+        // cacheDisplay doesn't capture the window's own background, so paint it into the view.
         let root = view
             .environment(model)
             .environment(\.livePreviewsEnabled, false)
             .frame(width: size.width, height: size.height)
+            .background(Color(nsColor: .windowBackgroundColor))
         let hosting = NSHostingView(rootView: root)
         hosting.frame = CGRect(origin: .zero, size: size)
         let window = NSWindow(contentRect: hosting.frame, styleMask: [.borderless], backing: .buffered, defer: false)

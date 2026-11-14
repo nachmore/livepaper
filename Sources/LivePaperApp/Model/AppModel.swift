@@ -172,11 +172,12 @@ final class AppModel {
     /// service serialises work anyway; one request at a time keeps the machine responsive).
     func generateMissingThumbnails() async {
         let render = services.render
-        for entry in entries where !entry.item.isBuiltin && entry.item.thumbnailURL == nil && !thumbnailAttempts.contains(entry.id) {
+        for entry in entries where !entry.item.isBuiltin && entry.thumbnail == nil && !thumbnailAttempts.contains(entry.id) {
             thumbnailAttempts.insert(entry.id)
             let out = entry.item.packageURL.appendingPathComponent("thumbnail.jpg")
             let request = RenderRequest(op: .thumbnail, scene: entry.item.packageURL.path, out: out.path)
             if let response = try? await render.send(request, timeout: 60), response.ok {
+                if let i = entries.firstIndex(where: { $0.id == entry.id }) { entries[i].thumbnail = out }
                 thumbnailRevision[entry.id, default: 0] += 1
             }
         }
