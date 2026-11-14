@@ -19,7 +19,9 @@ public protocol HarnessStreamParser: AnyObject {
 enum StreamText {
     /// Removes ANSI escape sequences (colours, cursor movement) from terminal-style output.
     static func stripANSI(_ s: String) -> String {
-        s.replacingOccurrences(of: #"\u{1B}(\[[0-?]*[ -/]*[@-~]|\][^\u{07}\u{1B}]*(\u{07}|\u{1B}\\)|[@-Z\\-_])"#,
+        // ICU syntax: \x{..} (not Swift's \u{..}) inside the raw string. CSI sequences, OSC
+        // sequences (ended by BEL or ESC \), and two-character escapes.
+        s.replacingOccurrences(of: #"\x{1B}(\[[0-?]*[ -/]*[@-~]|\][^\x{07}\x{1B}]*(\x{07}|\x{1B}\\)|[@-Z\\-_])"#,
                                with: "", options: .regularExpression)
     }
 
@@ -40,12 +42,29 @@ enum StreamText {
         return oneLine.count <= limit ? oneLine : String(oneLine.prefix(limit - 1)) + "…"
     }
 
-    /// Shows workspace paths relative to the workspace ("scene/scene.js").
+    /// Shows workspace paths relative to the workspace ("scene/scene.js"). Agents report paths in
+    /// whatever form they resolved: as given, via the real path (/var → /private/var on macOS), or
+    /// as file:// URLs.
     static func relative(_ s: String, to root: URL) -> String {
-        let prefixes = [root.path + "/", root.resolvingSymlinksInPath().path + "/"]
+        var roots: Set<String> = [root.path, root.standardizedFileURL.path, root.resolvingSymlinksInPath().path]
+        for r in roots {
+            if r.hasPrefix("/private/") { roots.insert(String(r.dropFirst("/private".count))) }
+            else if ["/var/", "/tmp/", "/etc/"].contains(where: r.hasPrefix) { roots.insert("/private" + r) }
+        }
         var out = s
-        for p in prefixes { out = out.replacingOccurrences(of: p, with: "") }
+        // Longest first: "/private/var/…/" must go before "/var/…/" can match inside it.
+        for r in roots.sorted(by: { $0.count > $1.count }) {
+            out = out.replacingOccurrences(of: "file://" + r + "/", with: "").replacingOccurrences(of: r + "/", with: "")
+        }
         return out
+    }
+
+    /// `/bin/zsh -lc 'livepaper check scene'` → `livepaper check scene` (Codex wraps every command
+    /// in a login shell; the wrapper is noise in the UI).
+    static func unwrapShell(_ command: String) -> String {
+        guard let range = command.range(of: #"^(/usr)?(/bin/)?(zsh|bash|sh) -l?c "#, options: .regularExpression),
+              let tokens = try? CommandTemplate.tokenize(String(command[range.upperBound...])), tokens.count == 1 else { return command }
+        return tokens[0]
     }
 
     /// One-line description of a tool call's input: the command, path, pattern…
@@ -152,7 +171,8 @@ public final class CodexStreamParser: HarnessStreamParser {
         case "reasoning":
             return [.status("Thinking…")]
         case "command_execution":
-            return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.relative(item["command"] as? String ?? "", to: root)))]
+            let command = StreamText.unwrapShell(item["command"] as? String ?? "")
+            return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.relative(command, to: root)))]
         case "file_change":
             let paths = (item["changes"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
             return [.toolUse(name: "edit", detail: StreamText.truncate(paths.map { StreamText.relative($0, to: root) }.joined(separator: ", ")))]
@@ -177,7 +197,8 @@ public final class CodexStreamParser: HarnessStreamParser {
         case "agent_reasoning":
             return [.status("Thinking…")]
         case "exec_command_begin":
-            let command = (msg["command"] as? [String])?.joined(separator: " ") ?? (msg["command"] as? String ?? "")
+            let parts = msg["command"] as? [String]
+            let command = parts.map { $0.count == 3 && $0[1].hasSuffix("c") ? $0[2] : $0.joined(separator: " ") } ?? (msg["command"] as? String ?? "")
             return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.relative(command, to: root)))]
         case "patch_apply_begin":
             let paths = (msg["changes"] as? [String: Any])?.keys.sorted() ?? []
@@ -197,8 +218,11 @@ public final class CodexStreamParser: HarnessStreamParser {
 
 // MARK: - Kiro CLI (`--output-format stream-json`: Agent Client Protocol events)
 
-/// ACP `session/update` notifications, one per line. Message and thought text arrives in small
-/// chunks; they are coalesced into whole lines/paragraphs so the UI isn't flooded.
+/// kiro-cli 3.3 writes `{"type":"runStarted",…}`, then ACP session updates wrapped as
+/// `{"type":"sessionUpdate","data":{"sessionId":…,"update":{"sessionUpdate":"agent_message_chunk",…}}}`,
+/// then `{"type":"runFinished","data":{"status":"success","finalText":…}}`. Bare ACP
+/// `session/update` notifications (`params.update`) are accepted too. Message text arrives in small
+/// chunks; it is coalesced into paragraphs so the UI isn't flooded.
 public final class KiroStreamParser: HarnessStreamParser {
     private let root: URL
     private var text = ""
@@ -210,6 +234,20 @@ public final class KiroStreamParser: HarnessStreamParser {
 
     public func parse(line: String) -> [AISessionEvent] {
         guard let obj = StreamText.jsonObject(line) else { return flush() + (StreamText.plain(line).map { [$0] } ?? []) }
+        switch obj["type"] as? String {
+        case "runStarted":
+            return [.status("Kiro CLI started")]
+        case "runFinished":
+            let data = obj["data"] as? [String: Any] ?? [:]
+            let events = flush()
+            if let final = (data["finalText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !final.isEmpty { lastMessage = final }
+            let status = data["status"] as? String ?? "success"
+            guard status != "success" else { return events }
+            let reason = (data["error"] as? String) ?? (data["stopReason"] as? String) ?? status
+            return events + [.status("Kiro CLI stopped: \(StreamText.truncate(reason))")]
+        default:
+            break
+        }
         guard let update = Self.update(in: obj), let kind = (update["sessionUpdate"] ?? update["type"]) as? String else { return [] }
         switch kind {
         case "agent_message_chunk":
@@ -233,7 +271,9 @@ public final class KiroStreamParser: HarnessStreamParser {
             announcedTools.insert(id)
             return flush() + [toolEvent(update)]
         default:
-            return flush()
+            // session_info_update, available_commands_update, … arrive between message chunks;
+            // they must not split a paragraph.
+            return []
         }
     }
 
@@ -270,7 +310,9 @@ public final class KiroStreamParser: HarnessStreamParser {
 
     /// The `update` object of a `session/update` notification, wherever the envelope puts it.
     static func update(in obj: [String: Any]) -> [String: Any]? {
-        if let params = obj["params"] as? [String: Any], let u = params["update"] as? [String: Any] { return u }
+        for envelope in ["data", "params"] {
+            if let inner = obj[envelope] as? [String: Any], let u = inner["update"] as? [String: Any] { return u }
+        }
         if let u = obj["update"] as? [String: Any] { return u }
         if obj["sessionUpdate"] != nil { return obj }
         return nil

@@ -855,8 +855,134 @@ private func expectGroupDead(_ events: [AISessionEvent], _ sb: CoreSandbox) thro
 
 // MARK: - Stream parsers (recorded samples)
 
+/// stdout recorded from the smoke runs (claude 2.1.325 / codex 0.169 / kiro-cli 3.3.0, Nov 2026),
+/// scrubbed: workspace paths → /var/folders/lp/T/ws (as the agents reported them, often via
+/// /private), ids anonymised, fields the parsers don't read dropped.
+private enum Recorded {
+    static let workspace = URL(fileURLWithPath: "/var/folders/lp/T/ws")
+
+    static let claude = #"""
+    {"type":"system","subtype":"init","cwd":"/private/var/folders/lp/T/ws","session_id":"session-1","model":"claude-haiku-5-5","permissionMode":"acceptEdits"}
+    {"type":"system","subtype":"thinking_tokens","session_id":"session-1"}
+    {"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg-1","type":"message","role":"assistant","content":[{"type":"thinking","thinking":""}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg-1","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/private/var/folders/lp/T/ws/AGENTS.md"}}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"user","message":{"role":"user","content":[{"tool_use_id":"tool-1","type":"tool_result","content":"1\t# Writing LivePaper scenes\n2\t\n3\tA scene calls `LivePaper.scene({...})` exactly once.\n4\t\n5\t## This session\n6\t\n7\tYou are creating a **new** scene. `./scene` contains the starter template.\n8\t\n9\t1. Read `./TASK.md` (the user's request) and `sdk/SCENE_API.md`; `sdk/examples/` has complete scenes.\n10\t2.…"}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg-2","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool-2","name":"Edit","input":{"replace_all":false,"file_path":"/private/var/folders/lp/T/ws/scene/scene.js","old_string":"'#000000'","new_string":"'#102040'"}}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg-3","type":"message","role":"assistant","content":[{"type":"tool_use","id":"tool-3","name":"Bash","input":{"command":"livepaper check scene","description":"Run livepaper check on the scene once"}}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"user","message":{"role":"user","content":[{"tool_use_id":"tool-3","type":"tool_result","content":"livepaper check: passed (0 problems). Stills are in scene/.check/","is_error":false}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"assistant","message":{"model":"claude-haiku-5-5","id":"msg-4","type":"message","role":"assistant","content":[{"type":"text","text":"The scene's fill colour is now `#102040` in `scene/scene.js`, and `livepaper check scene` passed with 0 problems."}]},"parent_tool_use_id":null,"session_id":"session-1"}
+    {"type":"result","subtype":"success","is_error":false,"duration_ms":11528,"num_turns":5,"result":"The scene's fill colour is now `#102040` in `scene/scene.js`, and `livepaper check scene` passed with 0 problems.","stop_reason":"end_turn","session_id":"session-1","total_cost_usd":0.006574689999999999}
+    """#
+
+    static let codex = #"""
+    {"type":"thread.started","thread_id":"session-1"}
+    {"type":"turn.started"}
+    {"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll read the required instructions and scene file, make only the specified color replacement, then run the check exactly once."}}
+    {"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,220p' AGENTS.md && sed -n '1,220p' scene/scene.js\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+    {"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc \"sed -n '1,220p' AGENTS.md && sed -n '1,220p' scene/scene.js\"","aggregated_output":"# Writing LivePaper scenes\n\nA scene calls `LivePaper.scene({...})` exactly once.\n\n## This session\n\nYou are creating a **new** scene. `./scene` contains the starter template.\n\n1. Read `./TASK.md` (the user's request) and `sdk/SCENE_API.md`; `sdk/examples/` has complete scenes.\n2. Write the scene in `…","exit_code":0,"status":"completed"}}
+    {"type":"item.started","item":{"id":"item_2","type":"file_change","changes":[{"path":"/var/folders/lp/T/ws/scene/scene.js","kind":"update"}],"status":"in_progress"}}
+    {"type":"item.completed","item":{"id":"item_2","type":"file_change","changes":[{"path":"/var/folders/lp/T/ws/scene/scene.js","kind":"update"}],"status":"completed"}}
+    {"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'livepaper check scene'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+    {"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/zsh -lc 'livepaper check scene'","aggregated_output":"livepaper check: passed (0 problems). Stills are in scene/.check/\n","exit_code":0,"status":"completed"}}
+    {"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Replaced `#000000` with `#102040`; `livepaper check scene` passed."}}
+    {"type":"turn.completed"}
+    """#
+
+    static let kiro = #"""
+    {"type":"runStarted","data":{"payloadSchema":"acp","acpProtocolVersion":1,"engine":"v3"}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"session_info_update"}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":"I"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":" should"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_thought_chunk","content":{"type":"text","text":" start by re"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"Read File","kind":"read","locations":[{"path":"/private/var/folders/lp/T/ws/TASK.md"}],"rawInput":{"path":"TASK.md","offset":null,"limit":null}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","status":"in_progress","locations":[{"path":"/private/var/folders/lp/T/ws/TASK.md"}],"rawInput":{"path":"TASK.md","offset":null,"limit":null}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-1","title":"Read File","status":"completed","locations":[{"path":"/private/var/folders/lp/T/ws/TASK.md"}],"rawInput":{"path":"TASK.md","offset":null,"limit":null},"content":[{"type":"content","content":{"type":"text","text":"<file name=\"TASK.md\" language=\"markdown\" >\n<content>\n# LivePaper task\n\nCreate a new LivePaper scene. Read AGENTS.md firs"}}]}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-2","title":"Read File","kind":"read","locations":[{"path":"/private/var/folders/lp/T/ws/scene/scene.js"}],"rawInput":{"path":"scene/scene.js","offset":null,"limit":null}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-3","title":"Replace in File","kind":"edit","status":"in_progress","locations":[{"path":"/private/var/folders/lp/T/ws/scene/scene.js"}],"rawInput":{"path":"/private/var/folders/lp/T/ws/scene/scene.js","oldStr":"'#000000'","newStr":"'#102040'"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-3","status":"pending","rawInput":{"path":"/private/var/folders/lp/T/ws/scene/scene.js","oldStr":"'#000000'","newStr":"'#102040'","replace_all":false},"content":[{"type":"diff","path":"","oldText":"","newText":""}]}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-3","title":"Replace in File","status":"completed","locations":[{"path":"/private/var/folders/lp/T/ws/scene/scene.js"}],"rawInput":{"path":"/private/var/folders/lp/T/ws/scene/scene.js","oldStr":"'#000000'","newStr":"'#102040'","replace_all":false},"content":[{"type":"diff","path":"file:///private/var/folders/lp/T/ws/scene/scene.js","oldText":"LivePaper.scene({ draw(lp) { lp.ctx.fillStyle = '#000000'; lp.ctx.fillRect(0, 0,","newText":"LivePaper.scene({ draw(lp) { lp.ctx.fillStyle = '#102040'; lp.ctx.fillRect(0, 0,"}]}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call","toolCallId":"tool-4","title":"Run LivePaper scene check once","kind":"execute","rawInput":{"command":"livepaper check scene","description":"Run LivePaper scene check once","cwd":"/private/var/folders/lp/T/ws","run_in_background":false}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-4","status":"in_progress","rawInput":{"command":"livepaper check scene","description":"Run LivePaper scene check once","cwd":"/private/var/folders/lp/T/ws","run_in_background":false}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"tool_call_update","toolCallId":"tool-4","title":"Run LivePaper scene check once","status":"completed","rawInput":{"command":"livepaper check scene","description":"Run LivePaper scene check once","cwd":"/private/var/folders/lp/T/ws","run_in_background":false},"content":[{"type":"content","content":{"type":"text","text":"Output:\nlivepaper check: passed (0 problems). Stills are in scene/.check/\n\n\nExit Code: 0"}}]}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I changed the"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" f"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"ill colour in `scene/"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"scene.js` from `"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"available_commands_update"}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"#000000` to `#102"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"040`, and `livepa"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"per check scene` passed with"}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" "}}}}
+    {"type":"sessionUpdate","data":{"sessionId":"session-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"0 problems."}}}}
+    {"type":"runFinished","data":{"sessionId":"session-1","status":"success","stopReason":"end_turn","finalText":"I changed the fill colour in `scene/scene.js` from `#000000` to `#102040`, and `livepaper check scene` passed with 0 problems.","finalTextTruncated":false}}
+    """#
+}
+
+private func parseAll(_ parser: HarnessStreamParser, _ text: String) -> [AISessionEvent] {
+    text.split(separator: "\n").flatMap { parser.parse(line: String($0)) } + parser.finish()
+}
+
 extension SelfTests {
-    fileprivate static var coreParsers: [TestCase] { [] }
+    fileprivate static var coreParsers: [TestCase] { [
+        TestCase(name: "core.ai.parsers.claude") {
+            let parser = ClaudeStreamParser(workspaceRoot: Recorded.workspace)
+            let final = "The scene's fill colour is now `#102040` in `scene/scene.js`, and `livepaper check scene` passed with 0 problems."
+            try expectEqual(parseAll(parser, Recorded.claude), [
+                .status("Claude Code started (claude-haiku-5-5)"), .status("Thinking…"),
+                .toolUse(name: "Read", detail: "AGENTS.md"), .toolUse(name: "Edit", detail: "scene/scene.js"),
+                .toolUse(name: "Bash", detail: "livepaper check scene"), .assistantText(final)])
+            try expectEqual(parser.finalMessage, final)
+            // Fallbacks: plain text passes through, errors are reported, unknown events ignored.
+            try expectEqual(parser.parse(line: "\u{1B}[33mWarning: settings file ignored\u{1B}[0m"), [.assistantText("Warning: settings file ignored")])
+            try expectEqual(parser.parse(line: "{not json"), [.assistantText("{not json")])
+            try expectEqual(parser.parse(line: #"{"type":"result","subtype":"error_max_turns","is_error":true}"#),
+                            [.status("Claude Code stopped: error_max_turns")])
+            try expectEqual(parser.parse(line: #"{"type":"stream_event","event":{}}"#), [])
+            try expectEqual(parser.parse(line: "   "), [])
+        },
+        TestCase(name: "core.ai.parsers.codex") {
+            let parser = CodexStreamParser(workspaceRoot: Recorded.workspace)
+            try expectEqual(parseAll(parser, Recorded.codex), [
+                .status("Codex started"),
+                .assistantText("I’ll read the required instructions and scene file, make only the specified color replacement, then run the check exactly once."),
+                .toolUse(name: "shell", detail: "sed -n '1,220p' AGENTS.md && sed -n '1,220p' scene/scene.js"),
+                .toolUse(name: "edit", detail: "scene/scene.js"),
+                .toolUse(name: "shell", detail: "livepaper check scene"),
+                .assistantText("Replaced `#000000` with `#102040`; `livepaper check scene` passed.")])
+            try expectEqual(parser.finalMessage, "Replaced `#000000` with `#102040`; `livepaper check scene` passed.")
+            try expectEqual(parser.parse(line: #"{"type":"turn.failed","error":{"message":"rate limited"}}"#), [.status("Codex stopped: rate limited")])
+            // The pre-0.5 event format.
+            try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"exec_command_begin","command":["bash","-lc","ls scene"]}}"#),
+                            [.toolUse(name: "shell", detail: "ls scene")])
+            try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"agent_message","message":"Done."}}"#), [.assistantText("Done.")])
+            try expectEqual(parser.parse(line: "Reading prompt from stdin..."), [.assistantText("Reading prompt from stdin...")])
+        },
+        TestCase(name: "core.ai.parsers.kiro") {
+            let parser = KiroStreamParser(workspaceRoot: Recorded.workspace)
+            let final = "I changed the fill colour in `scene/scene.js` from `#000000` to `#102040`, and `livepaper check scene` passed with 0 problems."
+            try expectEqual(parseAll(parser, Recorded.kiro), [
+                .status("Kiro CLI started"), .status("Thinking…"),
+                .toolUse(name: "Read File", detail: "TASK.md"), .toolUse(name: "Read File", detail: "scene/scene.js"),
+                .toolUse(name: "Replace in File", detail: "scene/scene.js"),
+                .toolUse(name: "Run LivePaper scene check once", detail: "livepaper check scene"),
+                .assistantText(final)])
+            try expectEqual(parser.finalMessage, final)
+            // Bare ACP notifications; text is emitted per paragraph.
+            let acp = KiroStreamParser(workspaceRoot: Recorded.workspace)
+            try expectEqual(acp.parse(line: #"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"First.\n\nSecond"}}}}"#),
+                            [.assistantText("First.")])
+            try expectEqual(acp.finish(), [.assistantText("Second")])
+            try expectEqual(acp.parse(line: #"{"type":"runFinished","data":{"status":"error","error":"model unavailable"}}"#),
+                            [.status("Kiro CLI stopped: model unavailable")])
+        },
+        TestCase(name: "core.ai.parsers.plain") {
+            // kiro-cli text mode / custom harnesses (synthetic: the smoke run used stream-json).
+            let parser = PlainTextParser()
+            try expectEqual(parseAll(parser, "\u{1B}[38;5;141m> \u{1B}[0mI'll read TASK.md first.\n\nUsing tool: fs_write (trusted)\nAll done."), [
+                .assistantText("> I'll read TASK.md first."), .toolUse(name: "fs_write", detail: "(trusted)"), .assistantText("All done.")])
+            try expectEqual(parser.finalMessage, "All done.")
+        },
+    ] }
 }
 
 // MARK: - Install
