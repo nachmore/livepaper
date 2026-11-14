@@ -90,6 +90,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Double-clicking a .lpscene package (declared in Info.plist) imports it into the library.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let model = AppBootstrap.model
+        for url in urls where url.pathExtension == SceneManifest.packageExtension {
+            Task { await model.importPackage(at: url) }
+        }
+        WindowRouter.shared.openMainWindow?()
+    }
+
     /// Closing the main window keeps LivePaper running in the menu bar.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
