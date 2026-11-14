@@ -1,0 +1,121 @@
+// SystemActions — AppKit side effects triggered by explicit user actions (panels, Finder, System
+// Settings, locking, moving the app to the Trash). Kept out of AppModel so the model stays testable.
+import AppKit
+import LivePaperCore
+import UniformTypeIdentifiers
+
+@MainActor
+enum SystemActions {
+    static func revealInFinder(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Asks where to export a scene package.
+    static func chooseExportDestination(for entry: LibraryEntry) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "Export \u{201C}\(entry.manifest.name)\u{201D}"
+        panel.nameFieldStringValue = "\(entry.id).\(SceneManifest.packageExtension)"
+        panel.canCreateDirectories = true
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Asks for a .lpscene package to import (packages are directories).
+    static func chooseScenePackage() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Import Scene"
+        panel.message = "Choose a LivePaper scene (.\(SceneManifest.packageExtension))."
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Asks for a video file.
+    static func chooseVideo() -> URL? {
+        let panel = NSOpenPanel()
+        panel.title = "Choose a Video"
+        panel.allowedContentTypes = [.movie]
+        panel.allowsMultipleSelection = false
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// "Lock now": start the screen saver; with "require password immediately" the saver locks,
+    /// and loginwindow draws the lock UI over the running scene (ARCHITECTURE §1, §7).
+    static func lockNow(_ model: AppModel) {
+        if model.environment.isMock {
+            model.banners.post(.info, "Sample mode", message: "LivePaper would start the screen saver and lock now.")
+            return
+        }
+        if !model.installStatus.saverSelected {
+            model.banners.post(.warning, "LivePaper isn't your screen saver yet",
+                               message: "Locking will show the regular lock screen.",
+                               actions: [.init(title: "Set Up") { Task { await model.makeLivePaperScreenSaver() } }])
+        }
+        let engine = URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: engine, configuration: config) { _, error in
+            guard let error else { return }
+            Task { @MainActor in model.banners.error("Couldn't start the screen saver", error) }
+        }
+    }
+
+    /// System Settings › Lock Screen (for "Require password after screen saver begins").
+    static func openLockScreenSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Lock-Screen-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    static func open(_ url: URL) { NSWorkspace.shared.open(url) }
+
+    /// Final uninstall step: move the app bundle to the Trash and quit.
+    static func moveAppToTrashAndQuit(_ model: AppModel) {
+        guard let path = model.environment.appBundlePath else {
+            model.banners.post(.success, "LivePaper was uninstalled",
+                               message: "This copy isn't running from an app bundle, so there's nothing to move to the Trash.")
+            return
+        }
+        NSWorkspace.shared.recycle([URL(fileURLWithPath: path)]) { _, error in
+            Task { @MainActor in
+                if let error {
+                    model.banners.error("Couldn't move LivePaper to the Trash", error)
+                } else {
+                    NSApp.terminate(nil)
+                }
+            }
+        }
+    }
+}
+
+/// Shows the Dock icon only while the main window is open (the app otherwise lives in the menu
+/// bar). Switching to `.accessory` while active hands focus back to the previous app, which is the
+/// expected behaviour when the user closes the window.
+@MainActor
+final class DockIconPolicy {
+    static let shared = DockIconPolicy()
+    private var openMainWindows = Set<ObjectIdentifier>()
+    private var closeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
+
+    func mainWindowAppeared(_ window: NSWindow) {
+        let key = ObjectIdentifier(window)
+        guard !openMainWindows.contains(key) else { return }
+        openMainWindows.insert(key)
+        closeObservers[key] = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window,
+                                                                     queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.mainWindowClosed(key) }
+        }
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate()
+            window.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    private func mainWindowClosed(_ key: ObjectIdentifier) {
+        openMainWindows.remove(key)
+        if let o = closeObservers.removeValue(forKey: key) { NotificationCenter.default.removeObserver(o) }
+        if openMainWindows.isEmpty { NSApp.setActivationPolicy(.accessory) }
+    }
+}
