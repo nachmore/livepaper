@@ -73,7 +73,9 @@ final class AISessionModel: Identifiable {
             try? await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
             guard !Task.isCancelled, let self, self.isRunning else { return }
             self.handle.cancel()
-            self.state.apply(.failed("Stopped after \(Int(limit / 60)) minutes (the AI time limit in Settings \u{203A} AI)."))
+            let minutes = max(1, Int((limit / 60).rounded()))
+            let duration = minutes == 1 ? "1 minute" : "\(minutes) minutes"
+            self.state.apply(.failed("Stopped after \(duration) (the AI time limit in Settings \u{203A} AI)."))
             self.revision += 1
             self.consumer?.cancel()
             self.finish(onFinish)

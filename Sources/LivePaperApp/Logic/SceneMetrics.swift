@@ -143,8 +143,9 @@ enum LPFormat {
     /// Short summary of a check report: "Passed · 1.4 ms · 61 mW" / "2 problems".
     static func checkSummary(_ report: CheckReport) -> String {
         if !report.passed {
-            let n = report.problems.count + report.jsErrors.count
-            return n == 1 ? "1 problem" : "\(max(n, 1)) problems"
+            // A failed report always has at least one problem, even if it didn't list it.
+            let n = max(1, report.problems.count + report.jsErrors.count)
+            return n == 1 ? "1 problem" : "\(n) problems"
         }
         var parts = ["Passed"]
         if let bench = CheckReportFile.primaryBenchMs(report) { parts.append(milliseconds(bench)) }
