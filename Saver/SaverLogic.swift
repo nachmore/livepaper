@@ -2,8 +2,8 @@
 //
 // Everything that can be decided without AppKit lives here so it can be unit tested:
 // playlist validation, scene selection (shuffle / sequence / single with no-repeat across sessions
-// and agreement across displays), the cycle schedule, failure back-off, lock-UI state, clock layout
-// and formatting, the config injected into web scenes, and the Options sheet summary text.
+// and agreement across displays), the cycle schedule, failure back-off, the prewarm run gate,
+// lock-UI state, clock layout and formatting, the web scene bridge, and the Options sheet summary.
 //
 // This file is compiled twice:
 //   * into the saver bundle by scripts/build-saver.sh (same module as PlaylistModel.swift), and
