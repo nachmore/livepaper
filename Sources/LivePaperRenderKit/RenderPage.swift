@@ -15,6 +15,23 @@ struct RenderFailure: Error, CustomStringConvertible {
     var description: String { message }
 }
 
+/// Serves the pages' base URL scheme by refusing every request. Pages get a real origin
+/// (`livepaper-render://scene/`) instead of the opaque one `loadHTMLString(baseURL: nil)` gives:
+/// WebKit hides the details of errors from opaque-origin scripts ("Script error."), and the whole
+/// point of rendering for `livepaper check` is to report syntax errors with their message and line.
+/// Nothing can be loaded through the scheme, so scenes stay as offline as in the screen saver.
+private final class OfflineSchemeHandler: NSObject, WKURLSchemeHandler {
+    static let scheme = "livepaper-render"
+    static let baseURL = URL(string: "\(scheme)://scene/")
+
+    func webView(_ webView: WKWebView, start task: WKURLSchemeTask) {
+        task.didFailWithError(NSError(domain: NSURLErrorDomain, code: NSURLErrorResourceUnavailable, userInfo: [
+            NSLocalizedDescriptionKey: "scenes cannot load files; inline them with assets/ and LivePaper.asset(name)"]))
+    }
+
+    func webView(_ webView: WKWebView, stop task: WKURLSchemeTask) {}
+}
+
 /// Retains the page weakly: WKUserContentController retains its handlers strongly, which would
 /// otherwise form a cycle page → web view → configuration → controller → page.
 private final class MessageProxy: NSObject, WKScriptMessageHandler {
@@ -48,6 +65,7 @@ final class RenderPage: NSObject, WKNavigationDelegate {
         conf.websiteDataStore = .nonPersistent()
         conf.suppressesIncrementalRendering = true
         conf.mediaTypesRequiringUserActionForPlayback = .all
+        conf.setURLSchemeHandler(OfflineSchemeHandler(), forURLScheme: OfflineSchemeHandler.scheme)
         let json = try JSONSerialization.data(withJSONObject: config, options: [.sortedKeys])
         // devicePixelRatio is also overridden natively below; the JS override keeps the page right
         // should that private setter ever disappear.
@@ -68,7 +86,7 @@ final class RenderPage: NSObject, WKNavigationDelegate {
         window.setContentSize(size)
         window.setFrameOrigin(SceneRenderer.offscreenOrigin)
         window.contentView = webView
-        webView.loadHTMLString(html, baseURL: nil)
+        webView.loadHTMLString(html, baseURL: OfflineSchemeHandler.baseURL)
     }
 
     private static func callPrivate(_ view: WKWebView, _ name: String, _ value: Bool) {

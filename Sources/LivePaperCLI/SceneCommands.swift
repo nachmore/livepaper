@@ -30,7 +30,7 @@ enum SceneCommands {
         if !json { checker.progress = { line in stderr("  … \(line)") } }
         let report = try await checker.check(package: pkg, options: CheckOptions(quick: args.flag("quick"), power: args.flag("power")))
         if json {
-            print(String(decoding: try SceneManifest.encoder().encode(report), as: UTF8.self))
+            print(String(decoding: try SceneChecker.reportEncoder().encode(report), as: UTF8.self))
         } else {
             printSummary(report, package: pkg, seconds: Date().timeIntervalSince(started))
         }
@@ -42,15 +42,12 @@ enum SceneCommands {
         let name = (try? SceneManifest.load(package: package))?.name ?? package.lastPathComponent
         print("livepaper check: \(r.passed ? "PASSED" : "FAILED") — \(name) (\(displayPath(package))) in \(Int(seconds.rounded())) s")
         let budgets = CheckBudgets()
-        let benches = r.benchMs.filter { k, _ in
-            k.hasPrefix(CheckPlan.ultraWide.sizeLabel + " ") || k == r.benchMs.filter { $0.key.hasPrefix(CheckPlan.primary.sizeLabel + " ") }
-                .max { $0.value < $1.value }?.key
-        }
+        let benches = SceneChecker.fullBenches(r)
         if !benches.isEmpty {
             let parts = benches.sorted { $0.key < $1.key }.map { k, v in
                 "\(k): \(fmt(v, 2)) ms (budget \(fmt(k.hasPrefix(CheckPlan.ultraWide.sizeLabel) ? budgets.wideBenchMs : budgets.benchMs, 1)))"
             }
-            print("  frame time   heaviest " + parts.joined(separator: "  ·  "))
+            print("  frame time   " + parts.joined(separator: "  ·  "))
         }
         let frame = r.stills.compactMap(\.meanLuma), clock = r.stills.compactMap(\.clockLuma)
         if let lo = frame.min(), let hi = frame.max() {

@@ -23,7 +23,7 @@ const HORIZON = 0.68;          // where sky meets lake
 const AURORA_SCALE = 6;        // CSS px per aurora-canvas pixel (bigger = softer and cheaper)
 const RIBBONS = [
   // base: lower edge of the curtain; height: how far it reaches up; drift: horizontal speed
-  { base: 0.57, height: 0.30, drift: 0.018, wave: 0.085, seed: 1, alpha: 0.78, low: '#4dffb0', high: '#3ab8ff' },
+  { base: 0.57, height: 0.30, drift: 0.018, wave: 0.060, seed: 1, alpha: 0.78, low: '#4dffb0', high: '#3ab8ff' },
   { base: 0.47, height: 0.22, drift: 0.011, wave: 0.050, seed: 2, alpha: 0.40, low: '#3ce8d0', high: '#9a7cff' },
 ];
 
@@ -107,21 +107,30 @@ function drawAurora(layer, rayStrip, t) {
       bottom.push(x, yb);
       top.push(x, yb - lift);
     }
-    const path = new Path2D();
-    path.moveTo(top[0], top[1]);
-    for (let i = 2; i < top.length; i += 2) path.lineTo(top[i], top[i + 1]);
-    for (let i = bottom.length - 2; i >= 0; i -= 2) path.lineTo(bottom[i], bottom[i + 1] + 1.5);
-    path.closePath();
-    // Bright lower edge fading upwards: the classic curtain.
-    const grad = g.createLinearGradient(0, base - reach, 0, base + 2);
+    const body = new Path2D(), rim = new Path2D();
+    body.moveTo(top[0], top[1]);
+    for (let i = 2; i < top.length; i += 2) body.lineTo(top[i], top[i + 1]);
+    for (let i = bottom.length - 2; i >= 0; i -= 2) body.lineTo(bottom[i], bottom[i + 1]);
+    body.closePath();
+    rim.moveTo(bottom[0], bottom[1]);
+    for (let i = 2; i < bottom.length; i += 2) rim.lineTo(bottom[i], bottom[i + 1]);
+    // Curtain body: transparent at the top, brightest at the base line, then a gentle continuous
+    // ramp below it so lower folds never meet a hard edge in the gradient.
+    const fold = r.wave / HORIZON * h * 1.2;
+    const pb = reach / (reach + fold);
+    const grad = g.createLinearGradient(0, base - reach, 0, base + fold);
     grad.addColorStop(0, U.rgba(r.high, 0));
-    grad.addColorStop(0.4, U.rgba(r.high, alpha * 0.05));
-    grad.addColorStop(0.65, U.rgba(r.high, alpha * 0.25));
-    grad.addColorStop(0.88, U.rgba(r.low, alpha * 0.8));
-    grad.addColorStop(0.97, U.rgba(r.low, alpha));
-    grad.addColorStop(1, U.rgba(r.low, alpha * 0.35));
+    grad.addColorStop(pb * 0.4, U.rgba(r.high, alpha * 0.05));
+    grad.addColorStop(pb * 0.65, U.rgba(r.high, alpha * 0.25));
+    grad.addColorStop(pb * 0.88, U.rgba(r.low, alpha * 0.8));
+    grad.addColorStop(pb, U.rgba(r.low, alpha));
+    grad.addColorStop(1, U.rgba(r.low, alpha * 0.6));
     g.fillStyle = grad;
-    g.fill(path);
+    g.fill(body);
+    // The bright lower rim follows the folds exactly.
+    g.strokeStyle = U.rgba(r.low, alpha * 0.4);
+    g.lineWidth = 1.2;
+    g.stroke(rim);
   }
   // Cut vertical rays out of the curtains; the strip scrolls slowly so the rays shimmer.
   g.globalCompositeOperation = 'destination-out';

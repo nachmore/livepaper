@@ -200,35 +200,47 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         func collectErrors(_ r: RenderResponse) {
             for e in r.errors where !jsErrors.contains(e) { jsErrors.append(e) }
         }
-        func renderFailed(_ r: RenderResponse, _ what: String, _ label: String) {
+        // Findings that repeat across frames are grouped into one sentence each.
+        var failures: [String: [CheckFrame]] = [:], failureOrder: [String] = []
+        var neverStarted = false
+        func renderFailed(_ r: RenderResponse, _ what: String, _ frame: CheckFrame) {
             let why = r.note ?? "no reason given"
+            // The runtime gave up because of JS errors (reported on their own below).
+            if !r.ready && !r.errors.isEmpty && why.hasPrefix(startFailureNote) { neverStarted = true; return }
+            let key: String
             if !r.ready && why.contains("timed out") {
-                problems.append("The scene did not finish loading for the \(what) at \(label) (\(why)). Stills replay update() in " +
-                                "1/30 s steps up to t, so t=600 runs it 18,000 times: keep update() cheap, or compute state from lp.t.")
+                key = "The scene did not finish loading for the \(what) (\(why)). Stills replay update() in 1/30 s steps up " +
+                      "to t, so t=600 runs it 18,000 times: keep update() cheap, or compute state from lp.t."
             } else {
-                problems.append("The \(what) at \(label) failed: \(why).")
+                key = "The \(what) failed: \(why)."
             }
+            if failures[key] == nil { failureOrder.append(key) }
+            failures[key, default: []].append(frame)
         }
 
         // Stills + luminance.
+        var tooBright: [(CheckFrame, Double)] = [], clockTooBright: [(CheckFrame, Double)] = []
         var clockLumas: [(CheckFrame, Double)] = []
         for (frame, path, r) in results.stills {
             collectErrors(r)
-            guard r.ok else { renderFailed(r, "still", frame.label); continue }
+            guard r.ok else { renderFailed(r, "still", frame); continue }
             stills.append(.init(path: path, width: frame.width, height: frame.height, dpr: frame.dpr, t: frame.t,
                                 meanLuma: r.meanLuma, clockLuma: r.clockLuma))
-            if let luma = r.meanLuma, luma > b.maxMeanLuma {
-                problems.append("The frame is too bright for a lock screen at \(frame.label): mean brightness \(fmt(luma))/255 " +
-                                "(max \(fmt(b.maxMeanLuma))). Use darker backgrounds and keep bright colours to small accents.")
-            }
+            if let luma = r.meanLuma, luma > b.maxMeanLuma { tooBright.append((frame, luma)) }
             if let c = r.clockLuma {
                 clockLumas.append((frame, c))
-                if c > b.maxClockLuma {
-                    problems.append("The area behind the clock is too bright at \(frame.label): mean \(fmt(c))/255 (max " +
-                                    "\(fmt(b.maxClockLuma))), so the white clock is hard to read. Keep the clock region (lp.clockRect; " +
-                                    "top centre for Apple's lock-screen clock) dark and calm, or move bright content away from it.")
-                }
+                if c > b.maxClockLuma { clockTooBright.append((frame, c)) }
             }
+        }
+        if let worst = tooBright.map(\.1).max() {
+            problems.append("The frame is too bright for a lock screen: mean brightness up to \(fmt(worst))/255 (max " +
+                            "\(fmt(b.maxMeanLuma))) at \(frameList(tooBright.map(\.0))). Use darker backgrounds and keep bright " +
+                            "colours to small accents.")
+        }
+        if let worst = clockTooBright.map(\.1).max() {
+            problems.append("The area behind the clock is too bright: mean up to \(fmt(worst))/255 (max \(fmt(b.maxClockLuma))) at " +
+                            "\(frameList(clockTooBright.map(\.0))), so the white clock is hard to read. Keep the clock region " +
+                            "(lp.clockRect; top centre for Apple's lock-screen clock) dark and calm, or move bright content away from it.")
         }
         let rendered = results.stills.filter { $0.response.ok }
         let lumas = rendered.compactMap { $0.response.meanLuma }
@@ -237,9 +249,10 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                             "that draw(lp) paints the canvas and look at the PNGs in .check/.")
         } else {
             let longRun = rendered.filter { $0.frame.t == plan.times.last && ($0.response.meanLuma ?? 99) < b.blackLuma }
-            if let lr = longRun.first {
-                problems.append("At \(lr.frame.label) the frame is black although earlier stills are not: the scene decays over long " +
-                                "runs. Keep state bounded (wrap phases with % or derive them from lp.t; never accumulate without limit).")
+            if !longRun.isEmpty {
+                problems.append("At \(frameList(longRun.map(\.frame))) the frame is black although earlier stills are not: the scene " +
+                                "decays over long runs. Keep state bounded (wrap phases with % or derive them from lp.t; never " +
+                                "accumulate without limit).")
             }
         }
         if let lo = clockLumas.min(by: { $0.1 < $1.1 }), let hi = clockLumas.max(by: { $0.1 < $1.1 }), hi.1 - lo.1 > b.clockLumaSpread,
@@ -248,14 +261,14 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                             "and \(hi.0.label)). Prefer calm, low-contrast motion behind the clock.")
         }
 
-        // Benches.
+        // Benches. Probes are short runs that only locate the heaviest phase.
         for (frame, r) in results.probes {
             collectErrors(r)
-            if r.ok, let ms = r.benchMs { benchMs[frame.label] = ms }
+            if r.ok, let ms = r.benchMs { benchMs[frame.label + probeSuffix] = ms }
         }
         for (frame, r) in results.benches {
             collectErrors(r)
-            guard r.ok, let ms = r.benchMs else { renderFailed(r, "benchmark", frame.label); continue }
+            guard r.ok, let ms = r.benchMs else { renderFailed(r, "benchmark", frame); continue }
             benchMs[frame.label] = ms
             let budget = frame.width == CheckPlan.ultraWide.width && frame.dpr == CheckPlan.ultraWide.dpr ? b.wideBenchMs : b.benchMs
             if ms > budget {
@@ -287,13 +300,18 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                     warnings.append("Only reached \(fmt(fps, 1)) of \(p.fps) fps while running live \(where_): frames take too long.")
                 }
             } else {
-                renderFailed(live, "live power measurement", "1512x982@2")
+                renderFailed(live, "live power measurement", CheckPlan.primary)
             }
         }
 
+        for key in failureOrder { problems.append(key.dropLast() + " (at \(frameList(failures[key] ?? [])))." ) }
+        if neverStarted {
+            problems.append("Because of the JavaScript errors above the scene never started, so nothing could be rendered or measured.")
+        }
         // JavaScript errors first: they usually explain everything else.
-        var errorProblems = jsErrors.prefix(5).map {
-            "JavaScript error: \($0). Fix it in scene.js (errors also appear in red at the bottom of the PNG stills)."
+        var errorProblems = jsErrors.prefix(5).map { e -> String in
+            let sentence = e.hasSuffix(".") ? e : e + "."
+            return "JavaScript error: \(sentence) Fix it in scene.js (errors also appear in red at the bottom of the PNG stills)."
         }
         if jsErrors.count > 5 { errorProblems.append("…and \(jsErrors.count - 5) more JavaScript errors (see jsErrors in report.json).") }
         problems = errorProblems + problems
@@ -346,12 +364,31 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
     }
 
     static func write(_ report: CheckReport, to url: URL) throws {
-        try SceneManifest.encoder().encode(report).write(to: url, options: .atomic)
+        try reportEncoder().encode(report).write(to: url, options: .atomic)
     }
 
-    /// Heaviest bench at the primary size (the number scene.json and the library show).
+    /// Pretty, sorted, ISO-8601 dates, and paths without escaped slashes (agents read this file).
+    public static func reportEncoder() -> JSONEncoder {
+        let e = SceneManifest.encoder()
+        e.outputFormatting.insert(.withoutEscapingSlashes)
+        return e
+    }
+
+    /// RenderResponse.note when the runtime reported that the scene could not start (RenderKit).
+    public static let startFailureNote = "the scene failed to start"
+
+    /// Key suffix of the short probe benches in `CheckReport.benchMs` ("1512x982@2 t=30 probe").
+    public static let probeSuffix = " probe"
+
+    /// Full (non-probe) benches, keyed like "1512x982@2 t=30".
+    public static func fullBenches(_ report: CheckReport) -> [String: Double] {
+        report.benchMs.filter { !$0.key.hasSuffix(probeSuffix) }
+    }
+
+    /// The full bench at the primary size, run at the heaviest sampled phase: the number scene.json
+    /// and the library show.
     public static func headlineBenchMs(_ report: CheckReport) -> Double? {
-        report.benchMs.filter { $0.key.hasPrefix(CheckPlan.primary.sizeLabel + " ") }.values.max()
+        fullBenches(report).filter { $0.key.hasPrefix(CheckPlan.primary.sizeLabel + " ") }.values.max()
     }
 
     /// Writes `performance` into scene.json, keeping every other key exactly as the author wrote it.
@@ -368,4 +405,11 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
     }
 
     static func fmt(_ x: Double, _ digits: Int = 0) -> String { String(format: "%.\(digits)f", x) }
+
+    /// "1512x982@2 t=4, 1512x982@2 t=30 and 3 more"
+    static func frameList(_ frames: [CheckFrame]) -> String {
+        let labels = frames.map(\.label)
+        guard labels.count > 3 else { return labels.joined(separator: ", ") }
+        return labels.prefix(3).joined(separator: ", ") + " and \(labels.count - 3) more"
+    }
 }

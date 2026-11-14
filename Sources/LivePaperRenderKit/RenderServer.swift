@@ -36,6 +36,8 @@ extension LivePaperRenderKit {
         public let role: Role
         public let files: RenderServiceFiles
 
+        /// Called on the main thread whenever this server starts listening (at once, or after taking over).
+        @MainActor public var onStart: (() -> Void)?
         /// Called on the main thread once the server has stopped (after `stop()` or a `shutdown` request).
         @MainActor public var onStop: (() -> Void)?
 
@@ -88,12 +90,15 @@ extension LivePaperRenderKit {
             return server
         }
 
-        /// Starts serving in LivePaperRenderd. Throws `.alreadyServing` if another process serves.
+        /// Starts serving in LivePaperRenderd. Throws `.alreadyServing` if another process serves —
+        /// unless `replacingExisting`, in which case it takes over like the embedded server does
+        /// (`LivePaperRenderd --replace`, e.g. after installing a new LivePaper version).
         @MainActor
-        public static func startDaemonServer() throws -> RenderServer {
+        public static func startDaemonServer(replacingExisting: Bool = false) throws -> RenderServer {
             let server = RenderServer(role: .daemon, files: RenderServiceFiles())
-            guard try server.tryAcquireServerLock() else {
-                throw RenderServerError.alreadyServing(server.files.serverLock.path)
+            if try !server.tryAcquireServerLock() {
+                guard replacingExisting else { throw RenderServerError.alreadyServing(server.files.serverLock.path) }
+                server.takeOverWhenFree()
             }
             return server
         }
@@ -116,8 +121,8 @@ extension LivePaperRenderKit {
             return true
         }
 
-        /// Standby for the embedded server: politely ask the current server to exit, then block a
-        /// background thread in flock() — zero cost while waiting — and start serving once it's ours.
+        /// Standby: politely ask the current server to exit, then block a background thread in
+        /// flock() — zero cost while waiting — and start serving once the lock is ours.
         @MainActor
         private func takeOverWhenFree() {
             let files = self.files
@@ -165,6 +170,7 @@ extension LivePaperRenderKit {
             acceptSource = source
             source.resume()
             lastActivity = Date()
+            onStart?()
         }
 
         // MARK: - Stopping

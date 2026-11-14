@@ -25,6 +25,9 @@ public enum SceneSourceScanner {
     /// Network APIs that are never allowed (as globals or via window./self./globalThis.).
     static let networkGlobals: Set<String> = ["fetch", "XMLHttpRequest", "WebSocket", "EventSource", "importScripts",
                                               "WebTransport", "RTCPeerConnection"]
+    /// Persistent storage: the screen saver loads scenes into a throwaway, opaque-origin page where
+    /// these throw or forget everything, so a scene that relies on them breaks only on the lock screen.
+    static let storageGlobals: Set<String> = ["localStorage", "sessionStorage", "indexedDB"]
     static let globalObjects: Set<String> = ["window", "self", "globalThis", "top", "parent", "frames"]
     /// XML namespace identifiers look like URLs but are never fetched.
     static let allowedURLPrefixes = ["http://www.w3.org/", "https://www.w3.org/"]
@@ -54,6 +57,11 @@ public enum SceneSourceScanner {
                 if networkGlobals.contains(t.text), !declared.contains(t.text),
                    !isMember || globalObjects.contains(memberOf ?? "") {
                     issue(t, "network access is not allowed (\(t.text)). \(offlineHint)")
+                } else if storageGlobals.contains(t.text), !declared.contains(t.text),
+                          !isMember || globalObjects.contains(memberOf ?? "") {
+                    issue(t, "\(t.text) is not available to scenes (the screen saver keeps no storage). Derive state from lp.t and lp.rand instead.")
+                } else if t.text == "cookie", memberOf == "document" {
+                    issue(t, "document.cookie is not available to scenes (the screen saver keeps no storage).")
                 } else if t.text == "sendBeacon", memberOf == "navigator" {
                     issue(t, "network access is not allowed (navigator.sendBeacon). \(offlineHint)")
                 } else if t.text == "import", !isMember {

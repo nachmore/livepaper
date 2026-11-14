@@ -149,7 +149,8 @@ func stderr(_ s: String) { FileHandle.standardError.write(Data((s + "\n").utf8))
 
 /// `path` relative to the working directory when it is inside it (shorter, and what agents type).
 func displayPath(_ url: URL) -> String {
-    let cwd = FileManager.default.currentDirectoryPath
-    let p = url.standardizedFileURL.path
-    return p.hasPrefix(cwd + "/") ? String(p.dropFirst(cwd.count + 1)) : p
+    // Compare resolved paths: /tmp vs /private/tmp and friends.
+    let cwd = URL(fileURLWithPath: FileManager.default.currentDirectoryPath).resolvingSymlinksInPath().path
+    let p = url.standardizedFileURL.resolvingSymlinksInPath().path
+    return p.hasPrefix(cwd + "/") ? String(p.dropFirst(cwd.count + 1)) : url.standardizedFileURL.path
 }

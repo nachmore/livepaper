@@ -3,8 +3,9 @@
 // Started on demand by RenderClient (the `livepaper` CLI, AI checks) when LivePaper.app isn't
 // serving the render socket. One instance at most: it exits at once if another server holds the
 // socket, after a `shutdown` request (e.g. the app taking over), on SIGTERM/SIGINT, or after
-// 15 minutes without requests. It registers with the window server once (WebKit needs an
-// NSApplication), with the `.prohibited` activation policy: no Dock icon, no menu bar, never active.
+// 15 minutes without requests. `--replace` asks a running server to hand over instead of exiting.
+// It registers with the window server once (WebKit needs an NSApplication), with the `.prohibited`
+// activation policy: no Dock icon, no menu bar, never active.
 import AppKit
 import Foundation
 import LivePaperCore
@@ -29,7 +30,7 @@ app.setActivationPolicy(.prohibited)
 MainActor.assumeIsolated {
     let server: RenderServer
     do {
-        server = try RenderServer.startDaemonServer()
+        server = try RenderServer.startDaemonServer(replacingExisting: CommandLine.arguments.contains("--replace"))
     } catch RenderServerError.alreadyServing(let detail) {
         log("another render server is already running (\(detail)); exiting")
         exit(0)
@@ -38,12 +39,18 @@ MainActor.assumeIsolated {
         exit(1)
     }
     let pidFile = server.files.pidFile
-    try? "\(getpid())\n".write(to: pidFile, atomically: true, encoding: .utf8)
-    log("serving \(server.files.socket.path)")
+    server.onStart = {
+        try? "\(getpid())\n".write(to: pidFile, atomically: true, encoding: .utf8)
+        log("serving \(server.files.socket.path)")
+    }
+    if server.isServing { server.onStart?() } else { log("waiting for the running server to hand over \(server.files.socket.path)") }
 
     func shutDown(_ reason: String) -> Never {
         log(reason)
-        try? FileManager.default.removeItem(at: pidFile)
+        // A successor (--replace) may already have written its own pid.
+        if let s = try? String(contentsOf: pidFile, encoding: .utf8), s.trimmingCharacters(in: .whitespacesAndNewlines) == "\(getpid())" {
+            try? FileManager.default.removeItem(at: pidFile)
+        }
         exit(0)
     }
     server.onStop = { shutDown("stopped") }

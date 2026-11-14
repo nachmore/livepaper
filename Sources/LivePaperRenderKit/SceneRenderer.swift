@@ -202,7 +202,7 @@ final class SceneRenderer {
             throw PageFailure(message: "\(error)", ready: false, errors: page.errors)
         }
         if (info["failed"] as? Bool) == true {
-            throw PageFailure(message: "the scene failed to start (see errors)", ready: false, errors: page.errors)
+            throw PageFailure(message: SceneChecker.startFailureNote + " (see errors)", ready: false, errors: page.errors)
         }
         try await verifyViewport(page, deadline: deadline)
         do { return try await body(page, info) } catch let f as PageFailure { throw f } catch {
