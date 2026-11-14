@@ -6,13 +6,15 @@
 //
 //   1. prewarm gate   — a started, non-preview instance loads nothing while the session is unlocked
 //   2. web scene      — loads on "screen locked", config injected, clock hand-off (lock UI shown →
-//                       hidden), display sleep pauses frames, unlock pauses, Options sheet
+//                       hidden), display sleep pauses frames, a second display agrees on the
+//                       scene, unlock pauses, session bookkeeping isolated, Options sheet
 //   3. queued state   — lock UI already up before the page is ready → scene starts with its clock hidden
 //   4. publish after signing — rewrites Playlist/ inside the signed bundle, a new view plays it
 //   5. video scene    — AVPlayerLayer plays, native clock fades out/in with the lock UI, sleep pauses
 //   6. preview        — small preview instance renders immediately without a lock
 //   7. fallback       — empty playlist → built-in fallback; lock UI hides its hint and clock
-//   8. willstop       — ignored by previews; a real instance exits the host (exit code 0)
+//   8. recovery       — an undecodable video is retried with back-off, then skipped
+//   9. willstop       — ignored by previews; a real instance exits the host (exit code 0)
 //
 //   xcrun swiftc -O -o build/dev/saverhost-lp scripts/dev/saverhost-lp.swift
 //   LIVEPAPER_SAVER_STATE_FILE=/tmp/x/state.json build/dev/saverhost-lp build/LivePaper.saver /tmp/x
@@ -279,6 +281,19 @@ func writePlaylist(mode: String, generation: Int, scenes: [[String: String]]) th
     let awake = await pageState(page)
     check("web: wake resumes", awake["paused"] as? Bool == false && (awake["frames"] as? Int ?? 0) > (asleep2["frames"] as? Int ?? 0))
 
+    // A second display starting a moment later joins the same session and shows the same scene.
+    if let second = harness.makeView(size: NSSize(width: 1280, height: 800), preview: false) {
+        second.startAnimation()
+        deliver("com.apple.screenIsLocked", to: second)
+        let ready = await waitUntil(8) { (currentDiag(second)["ready"] as? Bool) == true }
+        let a = diagnostics(web), b = diagnostics(second)
+        check("displays: second display agrees on session, deck and scene",
+              ready && a["session"] as? Int == b["session"] as? Int && a["deck"] as? [String] == b["deck"] as? [String]
+                && a["scene"] as? String == b["scene"] as? String,
+              "session \(a["session"] ?? "?")/\(b["session"] ?? "?"), scene \(a["scene"] ?? "?")/\(b["scene"] ?? "?")")
+        harness.dispose(second)
+    }
+
     deliver("com.apple.screenIsUnlocked", to: web)
     await delay(0.3)
     let unlocked = await pageState(page)
@@ -394,7 +409,30 @@ func writePlaylist(mode: String, generation: Int, scenes: [[String: String]]) th
     let hidden = currentDiag(fallback)
     check("fallback: lock UI hides hint and clock", hidden["messageOpacity"] as? Float == 0 && hidden["clockOpacity"] as? Float == 0, "\(hidden)")
 
-    // 8. willstop -------------------------------------------------------------------------------
+    // 8. Failure recovery: an undecodable video is retried, then skipped -------------------------
+    let broken = playlistDir.appendingPathComponent("broken.mov")
+    try? Data(repeating: 0x5A, count: 4096).write(to: broken)
+    try? FileManager.default.removeItem(atPath: statePath)
+    do {
+        try writePlaylist(mode: "sequence", generation: 4, scenes: [
+            ["id": "broken", "name": "Broken video", "kind": "video", "file": "broken.mov", "clock": "top"],
+            ["id": "test-web", "name": "Test web scene", "kind": "web", "file": "test-web.html", "clock": "top"],
+        ])
+    } catch { check("broken playlist", false, "\(error)") }
+    if let recovering = harness.makeView(size: fullSize, preview: false) {
+        recovering.startAnimation()
+        deliver("com.apple.screenIsLocked", to: recovering)
+        let recovered = await waitUntil(30) {
+            (currentDiag(recovering)["kind"] as? String) == "web" && (currentDiag(recovering)["ready"] as? Bool) == true
+        }
+        let d = diagnostics(recovering)
+        check("recovery: failing scene retried, then skipped", recovered && d["skipOffset"] as? Int == 1,
+              "scene \(d["scene"] ?? "?"), skipOffset \(d["skipOffset"] ?? "?")")
+        harness.dispose(recovering)
+    }
+    try? FileManager.default.removeItem(at: broken)
+
+    // 9. willstop -------------------------------------------------------------------------------
     deliver("com.apple.screensaver.willstop", to: preview)
     await delay(1.0)
     check("willstop: preview instance keeps running", true, "host still alive 1 s after willstop")
