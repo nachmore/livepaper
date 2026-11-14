@@ -1,0 +1,235 @@
+// WorkspaceBuilder — prepares the directory an AI harness works in (ARCHITECTURE §10):
+//
+//   <Workspaces>/<session-id>/
+//     AGENTS.md, CLAUDE.md   identical: Runtime/AGENTS.md + a section describing this session's task
+//     TASK.md                the user's request (the prompt reaches the harness only through this file)
+//     sdk/                   livepaper.d.ts, SCENE_API.md, templates/, examples/<built-in scenes>
+//     scene/                 the template (create) or a copy of the scene being modified
+//     bin/livepaper          shim that execs the bundled CLI (first on the harness's PATH)
+//     .livepaper/            LivePaper's own files: harness logs, codex's last message
+import Foundation
+
+/// Locations inside one AI session workspace.
+public struct AIWorkspace: Sendable, Equatable {
+    public let root: URL
+    public init(root: URL) { self.root = root }
+    public var scene: URL { root.appendingPathComponent("scene") }
+    public var sdk: URL { root.appendingPathComponent("sdk") }
+    public var bin: URL { root.appendingPathComponent("bin") }
+    /// The user's request; passed to harnesses on stdin or by reference, never on a command line.
+    public var taskFile: URL { root.appendingPathComponent("TASK.md") }
+    /// LivePaper's bookkeeping (logs); agents are told not to touch it.
+    public var internalDirectory: URL { root.appendingPathComponent(".livepaper") }
+    public var stdoutLog: URL { internalDirectory.appendingPathComponent("stdout.log") }
+    public var stderrLog: URL { internalDirectory.appendingPathComponent("stderr.log") }
+    public var lastMessageFile: URL { internalDirectory.appendingPathComponent("last-message.txt") }
+}
+
+public enum AIError: Error, LocalizedError, Sendable, Equatable {
+    case missingResource(String)
+    case unsupported(String)
+    case invalidTemplate(String)
+    case harnessNotFound(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingResource(let s): return "LivePaper is missing a resource it needs for AI sessions: \(s)"
+        case .unsupported(let s): return s
+        case .invalidTemplate(let s): return "Invalid custom harness command: \(s)"
+        case .harnessNotFound(let s): return "Could not find the AI tool \(s). Check that it is installed."
+        }
+    }
+}
+
+public final class WorkspaceBuilder: @unchecked Sendable {
+    /// How many built-in scenes are copied into sdk/examples.
+    public static let exampleCount = 3
+    /// Workspaces are kept this long for debugging, then pruned.
+    public static let retention: TimeInterval = 7 * 86_400
+
+    public let runtimeDirectory: URL
+    public let builtinScenesDirectory: URL
+    public let workspacesDirectory: URL
+    /// The `livepaper` CLI the shim execs.
+    public let cliPath: URL
+    private let library: LibraryServicing
+
+    public init(library: LibraryServicing, runtimeDirectory: URL = LPPaths.runtimeDir,
+                builtinScenesDirectory: URL = LPPaths.builtinScenesDir, workspacesDirectory: URL = LPPaths.workspaces,
+                cliPath: URL = WorkspaceBuilder.defaultCLIPath()) {
+        self.library = library; self.runtimeDirectory = runtimeDirectory; self.builtinScenesDirectory = builtinScenesDirectory
+        self.workspacesDirectory = workspacesDirectory; self.cliPath = cliPath
+    }
+
+    /// LIVEPAPER_CLI, else the CLI bundled next to the app's other helpers.
+    public static func defaultCLIPath() -> URL {
+        if let o = ProcessInfo.processInfo.environment["LIVEPAPER_CLI"], !o.isEmpty { return URL(fileURLWithPath: o) }
+        return LPPaths.appResources.deletingLastPathComponent().appendingPathComponent("Helpers/livepaper")
+    }
+
+    /// Creates the workspace for `request`. The returned scene/ directory is the candidate package.
+    public func build(_ request: AISessionRequest, sessionID: String) throws -> AIWorkspace {
+        let fm = FileManager.default
+        let guide = runtimeDirectory.appendingPathComponent("AGENTS.md")
+        guard let guideText = try? String(contentsOf: guide, encoding: .utf8) else {
+            throw AIError.missingResource(guide.path)
+        }
+        let modified: SceneItem?
+        switch request {
+        case .create: modified = nil
+        case .modify(let id, _):
+            guard let item = try library.scene(id: id) else { throw LibraryError.notFound(id) }
+            guard item.manifest.kind == .web else { throw AIError.unsupported("Only web scenes can be changed with AI; \(item.manifest.name) is a video.") }
+            modified = item
+        }
+
+        try fm.createDirectory(at: workspacesDirectory, withIntermediateDirectories: true)
+        let ws = AIWorkspace(root: workspacesDirectory.appendingPathComponent(sessionID))
+        guard !FileOps.entryExists(ws.root) else { throw LibraryError.exists(sessionID) }
+        try fm.createDirectory(at: ws.root, withIntermediateDirectories: true)
+        do {
+            try fm.createDirectory(at: ws.internalDirectory, withIntermediateDirectories: true)
+            // scene/
+            if let modified {
+                try FileOps.copyTree(from: modified.packageURL, to: ws.scene, excluding: Self.excludedFromSceneCopy)
+            } else {
+                let template = runtimeDirectory.appendingPathComponent("templates/web")
+                guard FileOps.isDirectory(template) else { throw AIError.missingResource(template.path) }
+                try FileOps.copyTree(from: template, to: ws.scene, excluding: Self.excludedFromSceneCopy)
+            }
+            // sdk/
+            try buildSDK(in: ws.sdk, excluding: modified?.id)
+            // bin/livepaper
+            try writeShim(in: ws.bin)
+            // AGENTS.md == CLAUDE.md, TASK.md
+            let instructions = guideText.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + Self.taskSection(for: request, scene: modified)
+            for name in ["AGENTS.md", "CLAUDE.md"] {
+                try Data(instructions.utf8).write(to: ws.root.appendingPathComponent(name), options: .atomic)
+            }
+            try Data(Self.taskFile(for: request, scene: modified).utf8).write(to: ws.taskFile, options: .atomic)
+            return ws
+        } catch {
+            try? fm.removeItem(at: ws.root)
+            throw error
+        }
+    }
+
+    /// Deletes workspaces older than `retention` (by modification date).
+    public func pruneWorkspaces(now: Date = Date(), retention: TimeInterval = WorkspaceBuilder.retention) {
+        let fm = FileManager.default
+        guard let entries = try? fm.contentsOfDirectory(at: workspacesDirectory, includingPropertiesForKeys: [.contentModificationDateKey],
+                                                        options: [.skipsHiddenFiles]) else { return }
+        for url in entries {
+            guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
+                  now.timeIntervalSince(date) > retention else { continue }
+            try? fm.removeItem(at: url)
+        }
+    }
+
+    // MARK: - Pieces
+
+    /// Not given to the agent: check output and thumbnails would be stale, and history is the
+    /// library's business (replaceContents merges it back).
+    static let excludedFromSceneCopy: Set<String> = LibraryService.transientEntries
+        .union(LibraryService.historyEntries).union(["thumbnail.jpg"])
+
+    private func buildSDK(in sdk: URL, excluding modifiedID: String?) throws {
+        let fm = FileManager.default
+        try fm.createDirectory(at: sdk, withIntermediateDirectories: true)
+        for name in ["livepaper.d.ts", "SCENE_API.md"] {
+            let source = runtimeDirectory.appendingPathComponent(name)
+            if FileOps.isRegularFile(source) { try fm.copyItem(at: source, to: sdk.appendingPathComponent(name)) }
+        }
+        let templates = runtimeDirectory.appendingPathComponent("templates")
+        if FileOps.isDirectory(templates) { try fm.copyItem(at: templates, to: sdk.appendingPathComponent("templates")) }
+
+        // A few built-in web scenes as worked examples (deterministic choice: first ids).
+        let builtins = (try? fm.contentsOfDirectory(at: builtinScenesDirectory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])) ?? []
+        let examples = builtins
+            .filter { $0.pathExtension == SceneManifest.packageExtension && $0.deletingPathExtension().lastPathComponent != modifiedID }
+            .filter { (try? SceneManifest.load(package: $0))?.kind == .web && FileOps.isRegularFile($0.appendingPathComponent("scene.js")) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+            .prefix(Self.exampleCount)
+        guard !examples.isEmpty else { return }
+        let dir = sdk.appendingPathComponent("examples")
+        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        for example in examples {
+            try FileOps.copyTree(from: example, to: dir.appendingPathComponent(example.deletingPathExtension().lastPathComponent),
+                                 excluding: Self.excludedFromSceneCopy)
+        }
+    }
+
+    private func writeShim(in bin: URL) throws {
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        let cli = Self.shellQuote(cliPath.path)
+        let script = """
+        #!/bin/sh
+        # Generated by LivePaper: runs the livepaper CLI bundled with the app.
+        if [ ! -x \(cli) ]; then
+          echo "livepaper: the LivePaper CLI was not found at "\(cli) >&2
+          exit 127
+        fi
+        exec \(cli) "$@"
+
+        """
+        let shim = bin.appendingPathComponent("livepaper")
+        try Data(script.utf8).write(to: shim, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: shim.path)
+    }
+
+    /// Single-quotes a string for /bin/sh.
+    static func shellQuote(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+
+    static func taskSection(for request: AISessionRequest, scene: SceneItem?) -> String {
+        var lines = ["## This session", ""]
+        switch request {
+        case .create:
+            lines += [
+                "You are creating a **new** scene. `./scene` contains the starter template.",
+                "",
+                "1. Read `./TASK.md` (the user's request) and `sdk/SCENE_API.md`; `sdk/examples/` has complete scenes.",
+                "2. Write the scene in `./scene/scene.js`. In `./scene/scene.json` set `name`, `description` and `tags`;",
+                "   leave `id`, `kind` and `runtime` as they are.",
+            ]
+        case .modify:
+            let name = scene?.manifest.name ?? "the scene"
+            lines += [
+                "You are **changing** the existing scene \"\(name)\". `./scene` contains its current version.",
+                "",
+                "1. Read `./TASK.md` (the requested change) and `sdk/SCENE_API.md`; `sdk/examples/` has complete scenes.",
+                "2. Edit `./scene/scene.js` (and `name`/`description`/`tags` in `./scene/scene.json` if they no longer fit).",
+                "   Keep `id`, `kind` and `runtime` as they are, and keep what the user didn't ask to change.",
+            ]
+        }
+        lines += [
+            "3. Run `livepaper check scene` and fix every problem it reports. Look at the PNG stills it writes to",
+            "   `scene/.check/` to judge how the scene looks.",
+            "4. Repeat until the check passes, then reply with a short paragraph describing the scene.",
+            "",
+            "Only edit files inside `./scene`. Do not modify `sdk/`, `bin/`, `.livepaper/`, `AGENTS.md`, `CLAUDE.md` or `TASK.md`.",
+            "LivePaper re-runs the check itself when you finish; a scene that fails it is discarded.",
+            "",
+        ]
+        return lines.joined(separator: "\n")
+    }
+
+    static func taskFile(for request: AISessionRequest, scene: SceneItem?) -> String {
+        let mode: String, prompt: String
+        switch request {
+        case .create(let p):
+            mode = "Create a new LivePaper scene."; prompt = p
+        case .modify(let id, let p):
+            mode = "Change the existing LivePaper scene \"\(scene?.manifest.name ?? id)\" (id `\(id)`) in ./scene."; prompt = p
+        }
+        return """
+        # LivePaper task
+
+        \(mode) Read AGENTS.md first and follow it exactly; work only inside ./scene.
+
+        ## The user's request
+
+        \(prompt.trimmingCharacters(in: .whitespacesAndNewlines))
+
+        """
+    }
+}
