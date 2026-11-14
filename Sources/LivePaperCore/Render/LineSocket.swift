@@ -66,6 +66,26 @@ public enum LineSocket {
         return fd
     }
 
+    /// Binds a non-blocking listening socket at `path`, replacing any existing socket file.
+    /// Only call this while holding `RenderServiceFiles.serverLock`: the lock is what proves an
+    /// existing file is stale. The socket is private to the user (0600): it is local IPC only and is
+    /// never reachable from the network.
+    public static func listen(path: String, backlog: Int32 = 32) throws -> Int32 {
+        var addr = try address(for: path)
+        let fd = try makeSocket()
+        unlink(path)
+        // umask makes the file 0600 from the moment it exists (no window between bind and chmod).
+        let oldMask = umask(0o077)
+        let r = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(fd, $0, socklen_t(MemoryLayout<sockaddr_un>.size)) }
+        }
+        umask(oldMask)
+        guard r == 0 else { let e = errno; close(fd); throw LineSocketError.system("bind(\(path))", e) }
+        guard Darwin.listen(fd, backlog) == 0 else { let e = errno; close(fd); unlink(path); throw LineSocketError.system("listen()", e) }
+        _ = fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK)
+        return fd
+    }
+
     /// True if something accepts connections on `path` right now.
     public static func isListening(path: String) -> Bool {
         guard let fd = try? connect(path: path) else { return false }

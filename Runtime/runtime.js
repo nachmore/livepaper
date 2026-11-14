@@ -32,14 +32,14 @@
     still: 'bool', t: 'num', bench: 'num', manual: 'bool',
     clock: 'bool', clockPosition: 'str', hour12: 'bool?', clockTime: 'str',
     fps: 'num', scale: 'num', dprMax: 'num', performance: 'str',
-    power: 'str', lowPower: 'bool', reducedMotion: 'bool',
+    power: 'str', lowPower: 'bool', reducedMotion: 'bool', preview: 'bool', lockUI: 'bool',
     seed: 'num', debug: 'bool', governor: 'bool', budgetMs: 'num', statsEvery: 'num'
   };
   var cfg = {
     still: false, t: 0, bench: 0, manual: false,
     clock: true, clockPosition: null, hour12: null, clockTime: null,
     fps: null, scale: null, dprMax: 2, performance: 'automatic',
-    power: 'ac', lowPower: false, reducedMotion: false,
+    power: 'ac', lowPower: false, reducedMotion: false, preview: false, lockUI: false,
     seed: 1, debug: false, governor: true, budgetMs: 0, statsEvery: 0
   };
   function coerce(type, v) {
@@ -70,10 +70,11 @@
   // Environment the scene can adapt to (lp.env). The host keeps it current via LivePaper.host.power().
   var reducedMotionQuery = null;
   try { reducedMotionQuery = window.matchMedia('(prefers-reduced-motion: reduce)'); } catch (e) { /* old engine */ }
-  var env = { power: 'ac', lowPower: false, reducedMotion: false };
+  var env = { power: 'ac', lowPower: false, reducedMotion: false, preview: false };
   function refreshEnv() {
     env.power = cfg.power === 'battery' ? 'battery' : 'ac';
     env.lowPower = !!cfg.lowPower;
+    env.preview = !!cfg.preview;
     env.reducedMotion = !!cfg.reducedMotion || !!(reducedMotionQuery && reducedMotionQuery.matches);
   }
   refreshEnv();
@@ -385,7 +386,8 @@
 
   var scene = null, lp = null, booted = false;
   var raf = 0, running = false, hostPaused = false, lastFrame = 0, lastRaf = 0, vsyncMs = 1000 / 60;
-  var clockTimer = 0, clockText = '', lockUIShowing = false, overlayForcedHidden = false;
+  // cfg.lockUI: the host loads us while the lock UI is already up (start with the clock hidden).
+  var clockTimer = 0, clockText = '', lockUIShowing = !!cfg.lockUI, overlayForcedHidden = false;
   var fade = { from: 1, to: 1, start: 0 };
   var targets = profileTargets();
   var stats = { fps: 0, frameMs: 0, framesInWindow: 0, windowStart: 0, sinceStart: 0 };
@@ -724,6 +726,7 @@
       Object.keys(obj || {}).forEach(function (k) { if (k !== 'still' && k !== 'bench' && k !== 'manual' && k !== 't') o[k] = obj[k]; });
       applyConfig(o);
       if ('hour12' in o) TIME_FMT = null;
+      if ('lockUI' in o) lockUIShowing = !!cfg.lockUI;
       refreshEnv();
       retarget();
       if (!lp) return;

@@ -124,14 +124,11 @@ private final class CancelToken: @unchecked Sendable {
 
 // MARK: - Daemon launch
 
-/// Finds and starts LivePaperRenderd, serialised across processes by an flock on `renderd.lock`
-/// next to the socket (flock locks vanish with their process, so there are no stale locks).
+/// Finds and starts LivePaperRenderd. Clients serialise on `RenderServiceFiles.launchLock` (an
+/// flock, so it vanishes with its process and can never go stale).
 struct DaemonLauncher {
-    let socket: URL
-    var directory: URL { socket.deletingLastPathComponent() }
-    var lockFile: URL { directory.appendingPathComponent("renderd.lock") }
-    var pidFile: URL { directory.appendingPathComponent("renderd.pid") }
-    var logFile: URL { directory.appendingPathComponent("Logs/renderd.log") }
+    let files: RenderServiceFiles
+    init(socket: URL) { files = RenderServiceFiles(socket: socket) }
 
     static let executableName = "LivePaperRenderd"
     private static let processLock = NSLock()
@@ -143,32 +140,37 @@ struct DaemonLauncher {
     func ensureRunning(deadline: Date) throws {
         Self.processLock.lock()
         defer { Self.processLock.unlock() }
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let lockFD = open(lockFile.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
-        guard lockFD >= 0 else { throw RenderClientError.daemonFailed("cannot open \(lockFile.path): \(String(cString: strerror(errno)))") }
+        let socketPath = files.socket.path
+        try FileManager.default.createDirectory(at: files.directory, withIntermediateDirectories: true)
+        let lockFD = open(files.launchLock.path, O_CREAT | O_RDWR | O_CLOEXEC, 0o600)
+        guard lockFD >= 0 else {
+            throw RenderClientError.daemonFailed("cannot open \(files.launchLock.path): \(String(cString: strerror(errno)))")
+        }
         defer { close(lockFD) } // releases the flock
         while flock(lockFD, LOCK_EX | LOCK_NB) != 0 {
             guard Date() < deadline else { throw RenderClientError.daemonFailed("timed out waiting for another client to start the render server") }
             usleep(50_000)
         }
-        if LineSocket.isListening(path: socket.path) { return }
-        // A daemon that is alive but not (yet) listening is starting up or busy binding: wait for it.
-        if let pid = runningDaemonPID() {
-            if waitUntilListening(deadline: min(deadline, Date().addingTimeInterval(20)), child: nil) { return }
-            throw RenderClientError.daemonFailed("LivePaperRenderd (pid \(pid)) is running but not accepting connections on \(socket.path)")
+        if LineSocket.isListening(path: socketPath) { return }
+        // Somebody holds the server lock: a server is starting up, or the app is taking over from a
+        // daemon that just exited. Wait for it rather than launching a second process.
+        if files.isServerLockHeld() {
+            if waitUntilListening(deadline: min(deadline, Date().addingTimeInterval(30)), child: nil) { return }
+            throw RenderClientError.daemonFailed("a render server holds \(files.serverLock.path) but is not accepting connections on \(socketPath)")
         }
         guard Self.launchedPID == 0 else {
-            throw RenderClientError.daemonFailed("it already exited once in this session; see \(logFile.path)")
+            throw RenderClientError.daemonFailed("it already exited once in this session; see \(files.daemonLog.path)")
         }
         let exe = try Self.locateExecutable()
         let pid = try spawn(exe)
         Self.launchedPID = pid
         if waitUntilListening(deadline: min(deadline, Date().addingTimeInterval(30)), child: pid) { return }
-        throw RenderClientError.daemonFailed("it did not start listening on \(socket.path). Last log lines:\n\(logTail())")
+        throw RenderClientError.daemonFailed("it did not start listening on \(socketPath). Last log lines:\n\(logTail())")
     }
 
-    /// Search order: $LIVEPAPER_RENDERD, the app bundle's Contents/Helpers, next to this executable,
-    /// then ./.build/debug (swift run during development).
+    /// Search order: $LIVEPAPER_RENDERD, the app bundle's Contents/Helpers, next to this executable
+    /// (the CLI lives in Contents/Helpers too; `swift build` puts both in .build/<config>), then
+    /// ./.build/debug for `swift run` from the repository root.
     static func locateExecutable() throws -> URL {
         let fm = FileManager.default
         var candidates: [URL] = []
@@ -183,19 +185,9 @@ struct DaemonLauncher {
         throw RenderClientError.daemonNotFound(candidates.map(\.path))
     }
 
-    /// The pid in renderd.pid if that process is alive and really is LivePaperRenderd (pids get reused).
-    func runningDaemonPID() -> pid_t? {
-        guard let s = try? String(contentsOf: pidFile, encoding: .utf8),
-              let pid = pid_t(s.trimmingCharacters(in: .whitespacesAndNewlines)), pid > 0, kill(pid, 0) == 0 else { return nil }
-        var buf = [CChar](repeating: 0, count: Int(MAXPATHLEN) * 4)
-        guard proc_pidpath(pid, &buf, UInt32(buf.count)) > 0 else { return nil }
-        let path = String(decoding: buf.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-        return path.hasSuffix("/" + Self.executableName) ? pid : nil
-    }
-
     private func waitUntilListening(deadline: Date, child: pid_t?) -> Bool {
         while Date() < deadline {
-            if LineSocket.isListening(path: socket.path) { return true }
+            if LineSocket.isListening(path: files.socket.path) { return true }
             if let child, kill(child, 0) != 0 { return false }
             usleep(100_000)
         }
@@ -203,6 +195,7 @@ struct DaemonLauncher {
     }
 
     private func spawn(_ exe: URL) throws -> pid_t {
+        let logFile = files.daemonLog
         try FileManager.default.createDirectory(at: logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
         var attr: posix_spawnattr_t?
         posix_spawnattr_init(&attr)
@@ -225,7 +218,7 @@ struct DaemonLauncher {
 
         var env = ProcessInfo.processInfo.environment
         // A non-default socket location is passed on via LIVEPAPER_HOME (the daemon binds LPPaths.renderSocket).
-        if socket.standardizedFileURL != LPPaths.renderSocket.standardizedFileURL { env["LIVEPAPER_HOME"] = directory.path }
+        if files.socket.standardizedFileURL != LPPaths.renderSocket.standardizedFileURL { env["LIVEPAPER_HOME"] = files.directory.path }
         let argv: [UnsafeMutablePointer<CChar>?] = [strdup(exe.path), nil]
         let envp: [UnsafeMutablePointer<CChar>?] = env.map { strdup("\($0.key)=\($0.value)") } + [nil]
         defer { (argv + envp).forEach { free($0) } }
@@ -241,6 +234,7 @@ struct DaemonLauncher {
     }
 
     private func logTail() -> String {
+        let logFile = files.daemonLog
         guard let s = try? String(contentsOf: logFile, encoding: .utf8) else { return "(no log at \(logFile.path))" }
         return s.split(separator: "\n").suffix(8).joined(separator: "\n")
     }
