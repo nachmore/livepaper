@@ -286,7 +286,7 @@ struct SaverRecoveryPolicy: Equatable {
 
 /// Everything the saver reacts to, decoupled from where it came from (distributed notifications,
 /// NSWorkspace, or the in-process test hook).
-enum SaverSystemEvent: String, CaseIterable {
+enum SaverSystemEvent: String {
     /// loginwindow drew its lock UI (clock + password field) over the running saver.
     case lockUIShown
     /// …and removed it again.
@@ -470,7 +470,6 @@ struct SaverRect: Equatable {
     var minX: Double { x }
     var maxX: Double { x + width }
     var minY: Double { y }
-    var maxY: Double { y + height }
 }
 
 /// Geometry of the native clock. Mirrors the runtime clock (Runtime/runtime.js `clockSizes` /

@@ -134,6 +134,8 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         loggedWaitingForLock = false
         recovery.reset()
         skipOffset = 0
+        // A prewarmed instance may have waited for a long time; re-read what may have gone stale.
+        gate.displaysAsleep = saverDisplayIsAsleep
         power = SaverPowerSource.current()
         if powerMonitor == nil { powerMonitor = SaverPowerMonitor { [weak self] in self?.powerChanged() } }
 

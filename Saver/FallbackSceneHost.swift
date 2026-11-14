@@ -15,9 +15,6 @@ final class FallbackSceneHost: SceneHost {
         }
     }
 
-    /// Layer name of the hint text (the dev host checks for it).
-    static let messageLayerName = "livepaper.fallback.message"
-
     let entryID = ""
     let kind = "fallback"
     weak var delegate: SceneHostDelegate?
@@ -51,7 +48,6 @@ final class FallbackSceneHost: SceneHost {
         glow.startPoint = CGPoint(x: 0.5, y: 0.5)
         glow.endPoint = CGPoint(x: 1, y: 1)
 
-        message.name = Self.messageLayerName
         message.string = reason.message
         message.alignmentMode = .center
         message.isWrapped = true

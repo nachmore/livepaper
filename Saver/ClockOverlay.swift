@@ -9,8 +9,6 @@ import AppKit
 import QuartzCore
 
 final class ClockOverlay {
-    /// Layer name the dev host uses to find the clock in snapshots.
-    static let layerName = "livepaper.clock"
     /// Duration of the lock-UI hand-off fade (same as the runtime's).
     static let fadeDuration: CFTimeInterval = 0.3
 
@@ -32,7 +30,6 @@ final class ClockOverlay {
         self.position = position
         formatter.locale = .autoupdatingCurrent
         formatter.timeZone = .autoupdatingCurrent
-        layer.name = Self.layerName
         for text in [dateLayer, timeLayer] {
             text.foregroundColor = Self.textColor
             text.isWrapped = false
