@@ -56,6 +56,10 @@ private struct SessionHeader: View {
                     if let source = session.clonedFrom { Text("\u{00B7}"); Text("copy of \(source)") }
                     Text("\u{00B7}")
                     Text(AISessionState.describe(session.state.phase)).lineLimit(1)
+                    if session.state.toolCallCount > 0 {
+                        Text("\u{00B7}")
+                        Text(session.state.toolCallCount == 1 ? "1 tool call" : "\(session.state.toolCallCount) tool calls")
+                    }
                 }
                 .font(.callout)
                 .foregroundStyle(.secondary)
@@ -343,7 +347,8 @@ private struct SessionDecisionBar: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .disabled(accepting)
-                .keyboardShortcut(.defaultAction)
+                // Not Return: that would accept while the user is typing feedback below.
+                .keyboardShortcut(.return, modifiers: .command)
                 feedbackBox(buttonTitle: "Try Again with Feedback")
                 Button("Discard", role: .destructive) { model.discard(session) }
                     .buttonStyle(.link)

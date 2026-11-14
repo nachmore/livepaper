@@ -60,5 +60,4 @@ final class BannerCenter {
     }
 
     func dismiss(_ id: UUID) { banners.removeAll { $0.id == id } }
-    func dismissAll() { banners.removeAll() }
 }

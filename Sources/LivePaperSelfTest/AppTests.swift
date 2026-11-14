@@ -214,7 +214,6 @@ extension SelfTests {
                                   customCommand: "mytool --prompt {prompt_file} --dir {workspace}")
             p.save(to: store)
             try expectEqual(AIPreferences.load(from: store), p)
-            try expectEqual(p.trimmedModel, "opus")
             try expectEqual(p.timeout, 1800)
             try expectEqual(p.customHarness?.executable, "mytool")
             p.customCommand = "mytool --dir {workspace}"
@@ -357,6 +356,17 @@ extension SelfTests {
                 try expect(model.banners.banners.contains { $0.style == .info && $0.title.contains("already") })
                 try awaitMain { await model.setPerformance(.battery) }
                 try expectEqual(model.lastPublished?.performance, .battery)
+            }
+        },
+        TestCase(name: "app.model.playlist-store-only") {
+            try withModel("store-only") { model, fx in
+                var ok = false
+                try awaitMain { ok = await model.savePlaylist(PlaylistSettings(mode: .single, sceneIDs: ["ink-bloom"]),
+                                                              announce: false, publishNow: false) }
+                try expect(ok)
+                try expectEqual(model.playlist.sceneIDs, ["ink-bloom"])
+                try expect(model.lastPublished == nil, "nothing published without a saver")
+                try expectEqual(fx.services.publish.loadSettings().sceneIDs, ["ink-bloom"])
             }
         },
         TestCase(name: "app.model.publish-failure-banner") {

@@ -281,20 +281,6 @@ final class AppModel {
         }
     }
 
-    func rename(_ id: String, to name: String) async {
-        guard var manifest = entry(id: id)?.manifest, let valid = SceneNaming.validated(name) else { return }
-        manifest.name = valid
-        manifest.updated = Date()
-        let library = services.library
-        let m = manifest
-        do {
-            try await offMain { try library.update(m) }
-            await reloadLibrary()
-        } catch {
-            banners.error("Couldn't rename the scene", error)
-        }
-    }
-
     func export(_ id: String, to url: URL) async {
         let library = services.library
         do {
@@ -365,18 +351,21 @@ final class AppModel {
         playlist = (try? await offMain { publish.loadSettings() }) ?? PlaylistSettings()
     }
 
-    /// Saves the settings and publishes them into the installed screen saver.
+    /// Saves the settings and publishes them into the installed screen saver. With
+    /// `publishNow: false` (no saver installed yet) the settings are only stored; installing the
+    /// saver publishes them.
     @discardableResult
-    func savePlaylist(_ settings: PlaylistSettings, announce: Bool = true) async -> Bool {
+    func savePlaylist(_ settings: PlaylistSettings, announce: Bool = true, publishNow: Bool = true) async -> Bool {
         isPublishing = true
         defer { isPublishing = false }
         let publish = services.publish
         do {
-            let published = try await offMain { () -> LPPlaylist in
+            let published = try await offMain { () -> LPPlaylist? in
                 try publish.saveSettings(settings)
-                return try publish.publish()
+                return publishNow ? try publish.publish() : nil
             }
             playlist = settings
+            guard let published else { return true }
             lastPublished = published
             if announce {
                 let n = published.scenes.count
@@ -385,7 +374,7 @@ final class AppModel {
             return true
         } catch {
             banners.error("Couldn't update the screen saver", error) { [weak self] in
-                Task { await self?.savePlaylist(settings, announce: announce) }
+                Task { await self?.savePlaylist(settings, announce: announce, publishNow: publishNow) }
             }
             return false
         }
@@ -463,10 +452,6 @@ final class AppModel {
             }
             return false
         }
-    }
-
-    func installSaverOnly() async {
-        await runInstallStep("Couldn't install the screen saver") { try $0.installSaver() }
     }
 
     func registerHelper() async {

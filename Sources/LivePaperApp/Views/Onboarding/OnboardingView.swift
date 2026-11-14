@@ -105,15 +105,19 @@ struct OnboardingView: View {
 
     private func finish() {
         finishing = true
+        var settings = model.playlist
+        if let id = firstSceneID {
+            var draft = PlaylistDraft(settings)
+            draft.useOnly(id)
+            settings = draft.settings
+        } else {
+            settings.mode = .shuffle
+            settings.sceneIDs = []
+        }
+        // Without an installed saver there is nothing to publish into yet; installing publishes.
+        let publish = model.installStatus.saverInstalled
         Task {
-            if let id = firstSceneID {
-                await model.useAsScreenSaver(id)
-            } else if model.installStatus.saverInstalled {
-                var all = model.playlist
-                all.mode = .shuffle
-                all.sceneIDs = []
-                await model.savePlaylist(all, announce: false)
-            }
+            await model.savePlaylist(settings, announce: false, publishNow: publish)
             finishing = false
             model.completeOnboarding()
         }

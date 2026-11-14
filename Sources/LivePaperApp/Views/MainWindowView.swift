@@ -23,6 +23,7 @@ struct MainWindowView: View {
             OnboardingView()
         }
         .background(WindowAccessor { DockIconPolicy.shared.mainWindowAppeared($0) })
+        .refreshesInstallStatusOnActivation()
         .frame(minWidth: 860, minHeight: 560)
     }
 }

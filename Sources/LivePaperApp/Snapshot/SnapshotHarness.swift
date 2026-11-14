@@ -60,7 +60,8 @@ enum SnapshotHarness {
 
         // Onboarding first: it shows the initial (nothing installed) state.
         shoot("onboarding-welcome", CGSize(width: 800, height: 580), dark: false, OnboardingView(initialStep: .welcome))
-        wait { await model.installSaverOnly() }
+        try? services.install.installSaver()
+        wait { await model.refreshInstallStatus() }
         shoot("onboarding-saver", CGSize(width: 800, height: 580), dark: true,
               OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
         shoot("onboarding-lock", CGSize(width: 800, height: 580), dark: false, OnboardingView(initialStep: .lock))
@@ -70,7 +71,7 @@ enum SnapshotHarness {
         model.banners.post(.success, "Screen saver updated", message: "9 scenes published.")
         shoot("library-light", main, dark: false, MainWindowView())
         shoot("library-dark", main, dark: true, MainWindowView())
-        model.banners.dismissAll()
+        model.banners.banners.forEach { model.banners.dismiss($0.id) }
         model.libraryPath = ["paper-lanterns"]
         shoot("detail-dark", main, dark: true, MainWindowView())
         model.libraryPath = []

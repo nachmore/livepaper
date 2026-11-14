@@ -44,10 +44,6 @@ struct AIPreferences: Codable, Equatable, Sendable {
     }
 
     var timeout: TimeInterval { TimeInterval(max(1, timeoutMinutes)) * 60 }
-    var trimmedModel: String? {
-        let t = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        return t.isEmpty ? nil : t
-    }
 
     /// The custom harness, when a valid template is configured.
     var customHarness: AIHarness? {

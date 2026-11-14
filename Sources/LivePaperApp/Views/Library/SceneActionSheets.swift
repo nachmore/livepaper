@@ -212,7 +212,7 @@ struct HarnessPickerRow: View {
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
             GridRow {
                 Text("Agent").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                if model.isDetectingHarnesses && harnesses.isEmpty {
+                if harnesses.isEmpty && (model.isDetectingHarnesses || !model.hasDetectedHarnesses) {
                     HStack(spacing: 6) {
                         ProgressView().controlSize(.small)
                         Text("Looking for AI tools\u{2026}").foregroundStyle(.secondary)
