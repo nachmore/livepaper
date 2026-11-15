@@ -388,6 +388,15 @@ final class MockRenderClient: RenderClienting, @unchecked Sendable {
             return RenderResponse(ok: true, ready: true, benchMs: 1.4)
         case .live:
             return RenderResponse(ok: true, ready: true, fps: request.fps ?? 30, cpuPct: 4.2, cpuMW: 61, seconds: request.seconds)
+        case .motion:
+            // Gently alive everywhere: every tile changes a little within 2 s and 5 s.
+            let (cols, rows) = MotionAnalysis.grid(width: Int(request.width ?? 1280), height: Int(request.height ?? 720))
+            let tiles = { (level: Double) in MotionTiles(level: Array(repeating: level, count: cols * rows), area: Array(repeating: 0.1, count: cols * rows)) }
+            let samples = (request.times ?? MotionAnalysis.defaultTimes).map { t in
+                MotionSample(t: t, gaps: [MotionGap(gap: 0.5, tiles: tiles(0.4)), MotionGap(gap: 2, tiles: tiles(1.5)), MotionGap(gap: 5, tiles: tiles(3))],
+                             flicker: tiles(0.2))
+            }
+            return RenderResponse(ok: true, ready: true, motion: MotionMeasurement(width: cols * 40, height: rows * 40, cols: cols, rows: rows, samples: samples))
         case .ping, .shutdown:
             return RenderResponse(ok: true, ready: true)
         }

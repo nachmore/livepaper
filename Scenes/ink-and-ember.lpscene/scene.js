@@ -67,9 +67,23 @@ let farKarst = null;
 let karst = null;
 let foreground = null;
 let mists = [];
+let clouds = [];
+let skyMottles = [];
 let sun = null;
 let overlay = null;
 let tiles = null;
+let trees = [];        // swaying trees drawn after the crag (main pine, small pine)
+let ridgeTrees = [];   // per ridge index: list of trees standing on it
+let water = null;
+let boat = null;
+let sunDab = null;
+let warmDab = null;
+let fogSprite = null;
+let crag = null;
+
+/* Ridge parallax: amplitude (CSS px, never scaled up), period (s), phase. Near moves more,
+   but the nearest range travels at most ~10 px so the mountains feel solid. */
+const PARALLAX = [[1.2, 109, 0.4], [1.8, 97, 1.9], [2.6, 83, 3.1], [3.6, 73, 4.6], [4.8, 61, 0.9]];
 
 LivePaper.scene({
   context: '2d',
@@ -84,14 +98,24 @@ LivePaper.scene({
     farKarst = buildKarstGroup(lp, FAR_TOWERS, lp.aspect > 2.25 ? 0.245 : 0.275, 0.650, '#64716f', 0.61);
     karst = buildKarstGroup(lp, PRIMARY_TOWERS, lp.aspect > 2.25 ? 0.735 : 0.705, 0.735, '#303b38', 0.93);
     foreground = buildForeground(lp);
+    const sp = lp.w / 1512;
+    // Mist bands: two textures each, cross-fading on long unrelated periods.
     mists = [
-      buildMist(lp, 0.548, 0.078, 0.36, 0.42, 0.13),
-      buildMist(lp, 0.620, 0.086, 0.44, -0.31, 0.31),
-      buildMist(lp, 0.690, 0.094, 0.54, 0.24, 0.49),
-      buildMist(lp, 0.755, 0.104, 0.60, -0.18, 0.68),
-      buildMist(lp, 0.820, 0.112, 0.58, 0.12, 0.87)
+      buildMistLayer(lp, 0.548, 0.090, 0.58, 2.6 * sp, 23, 41, 0.13, 101),
+      buildMistLayer(lp, 0.620, 0.090, 0.56, -4.2 * sp, 29, 47, 0.31, 202),
+      buildMistLayer(lp, 0.690, 0.094, 0.56, 6.0 * sp, 26, 53, 0.49, 303),
+      buildMistLayer(lp, 0.755, 0.104, 0.58, -8.5 * sp, 33, 43, 0.68, 404),
+      buildMistLayer(lp, 0.820, 0.112, 0.56, 12 * sp, 27, 59, 0.87, 505)
     ];
+    clouds = buildWisps(lp);
+    skyMottles = [skyMottle(lp, 1201), skyMottle(lp, 1307)];
     sun = buildSun(lp);
+    buildTrees(lp);
+    water = buildWater(lp, Math.round(lp.h * 0.85));
+    boat = buildBoat(lp);
+    sunDab = buildDab('#c45a40', '#e08a63');
+    warmDab = buildDab('#d98a4a', '#f2c08a');
+    fogSprite = U.glowSprite('#a9b1aa', 128, 1.6);
   },
 
   draw(lp) {
@@ -102,32 +126,47 @@ LivePaper.scene({
     const sunX = lp.w * (0.34 + 0.36 * phase);
     const sunY = lp.h * (0.555 - 0.070 * arc);
     const sunSize = lp.min * 0.235;
+    const sp = lp.w / 1512;
+    const ox = [];
+    for (let i = 0; i < PARALLAX.length; i++) {
+      ox.push(PARALLAX[i][0] * Math.min(1, sp) * Math.sin(t * TAU / PARALLAX[i][1] + PARALLAX[i][2]));
+    }
 
     ctx.drawImage(paper.canvas, 0, 0, lp.w, lp.h);
+    drawSkyMottle(ctx, lp, t);
+    drawWisps(ctx, lp, t);
     ctx.globalAlpha = 0.94;
     ctx.drawImage(sun.canvas, sunX - sunSize * 0.5, sunY - sunSize * 0.5, sunSize, sunSize);
     ctx.globalAlpha = 1;
     drawBirds(ctx, lp, t);
 
-    drawBlock(ctx, ridges[0]);
-    drawBlock(ctx, farKarst);
-    drawMist(ctx, lp, mists[0], t);
-    drawBlock(ctx, ridges[1]);
-    drawMist(ctx, lp, mists[1], t);
-    drawBlock(ctx, ridges[2]);
-    drawBlock(ctx, karst);
-    drawMist(ctx, lp, mists[2], t);
-    drawBlock(ctx, ridges[3]);
-    drawMist(ctx, lp, mists[3], t);
-    drawBlock(ctx, ridges[4]);
-    drawMist(ctx, lp, mists[4], t);
+    drawBlock(ctx, ridges[0], ox[0]);
+    drawBlock(ctx, farKarst, (ox[0] + ox[1]) * 0.5);
+    drawDrift(ctx, lp, mists[0], t);
+    drawBlock(ctx, ridges[1], ox[1]);
+    drawDrift(ctx, lp, mists[1], t);
+    drawBlock(ctx, ridges[2], ox[2]);
+    drawTreeList(ctx, ridgeTrees[2], t, ox[2]);
+    drawBlock(ctx, karst, (ox[2] + ox[3]) * 0.5);
+    drawDrift(ctx, lp, mists[2], t);
+    drawBlock(ctx, ridges[3], ox[3]);
+    drawTreeList(ctx, ridgeTrees[3], t, ox[3]);
+    drawDrift(ctx, lp, mists[3], t);
+    drawBlock(ctx, ridges[4], ox[4]);
+    drawTreeList(ctx, ridgeTrees[4], t, ox[4]);
+    drawWater(ctx, lp, t, sunX, sunSize);
+    drawBoat(ctx, lp, t);
+    drawDrift(ctx, lp, mists[4], t);
     ctx.drawImage(foreground.canvas, 0, 0, lp.w, lp.h);
+    drawTreeList(ctx, trees, t, 0);
+    drawFogBank(ctx, lp, t);
+    drawLantern(ctx, lp, t);
     ctx.drawImage(overlay.canvas, 0, 0, lp.w, lp.h);
   }
 });
 
-function drawBlock(ctx, b) {
-  ctx.drawImage(b.canvas, b.x, b.y, b.w, b.h);
+function drawBlock(ctx, b, dx) {
+  ctx.drawImage(b.canvas, b.x + (dx || 0), b.y, b.w, b.h);
 }
 
 /* ---------- ink & paper textures (built once) ---------- */
@@ -387,9 +426,11 @@ function buildPaper(lp) {
 function sampleRidge(lp, spec) {
   const points = [];
   const step = Math.max(3, lp.min / 190);
-  const count = Math.ceil(lp.w / step);
-  for (let i = 0; i <= count; i++) {
-    const x = Math.min(lp.w, i * step);
+  const pad = ridgePad(lp);
+  const first = -Math.ceil(pad / step);
+  const count = Math.ceil((lp.w + pad) / step);
+  for (let i = first; i <= count; i++) {
+    const x = i * step;
     const u = x / Math.max(1, lp.w);
     const world = x / Math.max(1, lp.min);
     const broad = U.fbm2(world * spec.scale + spec.seed, spec.seed * 0.137, 4);
@@ -454,7 +495,23 @@ function addSmoothSide(path, points, move) {
   path.lineTo(last.x, last.y);
 }
 
-function drawPine(g, lp, x, ground) {
+/* Pre-rendered sprite of whatever fn draws inside the CSS-px box (x0, y0)–(x1, y1). */
+function makeSprite(lp, x0, y0, x1, y1, fn) {
+  x0 = Math.floor(x0);
+  y0 = Math.floor(y0);
+  const w = Math.max(2, Math.ceil(x1 - x0));
+  const h = Math.max(2, Math.ceil(y1 - y0));
+  const L = U.layer(w, h, lp.dpr);
+  L.ctx.translate(-x0, -y0);
+  fn(L.ctx);
+  return { canvas: L.canvas, x: x0, y: y0, w: w, h: h };
+}
+
+/*
+ * The leaning pine, split into a trunk sprite (skewed about its fixed base) and
+ * four branch + needle-pad sprites (each rotated about its root, with a lag).
+ */
+function buildPine(lp, x, ground) {
   const m = lp.min * 0.86;
   const ink = '#080c0b';
   const base = { x: x, y: ground + m * 0.010 };
@@ -472,8 +529,10 @@ function drawPine(g, lp, x, ground) {
   trunk.bezierCurveTo(shoulder.x - m * 0.002, shoulder.y + m * 0.032, knot.x + m * 0.016, knot.y - m * 0.038, knot.x + m * 0.012, knot.y + m * 0.005);
   trunk.bezierCurveTo(knot.x + m * 0.008, knot.y + m * 0.045, base.x + m * 0.012, base.y - m * 0.065, base.x + m * 0.012, base.y);
   trunk.closePath();
-  g.fillStyle = ink;
-  g.fill(trunk);
+  const trunkSprite = makeSprite(lp, x - m * 0.04, tip.y - m * 0.03, tip.x + m * 0.04, base.y + 2, function (g) {
+    g.fillStyle = ink;
+    g.fill(trunk);
+  });
 
   const branches = [
     [knot.x, knot.y + m * 0.010, x - m * 0.030, ground - m * 0.175, x - m * 0.090, ground - m * 0.166, m * 0.0080, m * 0.0020],
@@ -481,11 +540,6 @@ function drawPine(g, lp, x, ground) {
     [shoulder.x + m * 0.020, shoulder.y - m * 0.025, x + m * 0.155, ground - m * 0.292, x + m * 0.235, ground - m * 0.288, m * 0.0065, m * 0.0018],
     [tip.x - m * 0.008, tip.y + m * 0.012, x + m * 0.180, ground - m * 0.342, x + m * 0.225, ground - m * 0.350, m * 0.0048, m * 0.0014]
   ];
-  for (let i = 0; i < branches.length; i++) {
-    const b = branches[i];
-    g.fill(taperedBranch(b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]));
-  }
-
   const clusters = [
     { x: x - m * 0.078, y: ground - m * 0.177, rx: m * 0.082, ry: m * 0.027 },
     { x: x + m * 0.150, y: ground - m * 0.243, rx: m * 0.105, ry: m * 0.032 },
@@ -493,31 +547,299 @@ function drawPine(g, lp, x, ground) {
     { x: x + m * 0.205, y: ground - m * 0.294, rx: m * 0.073, ry: m * 0.027 },
     { x: x + m * 0.218, y: ground - m * 0.351, rx: m * 0.056, ry: m * 0.024 }
   ];
-  const pads = new Path2D();
-  const cores = new Path2D();
-  const ragged = new Path2D();
+  // branch i carries these clusters; root = branch start
+  const groups = [[0], [1, 2], [3], [4]];
+  const gains = [0.011, 0.009, 0.012, 0.015];
+  const lags = [0.18, 0.30, 0.42, 0.55];
   const rnd = U.mulberry32(991);
+  const parts = [];
+  const pathSets = groups.map(function () {
+    return { pads: new Path2D(), cores: new Path2D(), ragged: new Path2D() };
+  });
   for (let c = 0; c < clusters.length; c++) {
     const cluster = clusters[c];
-    addCloudPad(pads, cluster.x, cluster.y, cluster.rx, cluster.ry, rnd, 1);
-    addCloudPad(cores, cluster.x - cluster.rx * 0.12, cluster.y + cluster.ry * 0.03, cluster.rx * 0.52, cluster.ry * 0.54, rnd, 0.68);
-    addCloudPad(cores, cluster.x + cluster.rx * 0.24, cluster.y - cluster.ry * 0.04, cluster.rx * 0.42, cluster.ry * 0.46, rnd, 0.62);
+    let gi = 0;
+    for (let k = 0; k < groups.length; k++) if (groups[k].indexOf(c) >= 0) gi = k;
+    const ps = pathSets[gi];
+    addCloudPad(ps.pads, cluster.x, cluster.y, cluster.rx, cluster.ry, rnd, 1);
+    addCloudPad(ps.cores, cluster.x - cluster.rx * 0.12, cluster.y + cluster.ry * 0.03, cluster.rx * 0.52, cluster.ry * 0.54, rnd, 0.68);
+    addCloudPad(ps.cores, cluster.x + cluster.rx * 0.24, cluster.y - cluster.ry * 0.04, cluster.rx * 0.42, cluster.ry * 0.46, rnd, 0.62);
     for (let i = 0; i < 10; i++) {
       const side = rnd() < 0.5 ? -1 : 1;
       const px = cluster.x + side * cluster.rx * (0.62 + rnd() * 0.42);
       const py = cluster.y + (rnd() - 0.5) * cluster.ry * 1.55;
-      addDab(ragged, px, py, m * (0.008 + rnd() * 0.015), m * (0.0018 + rnd() * 0.0023), (rnd() - 0.5) * 0.26);
+      addDab(ps.ragged, px, py, m * (0.008 + rnd() * 0.015), m * (0.0018 + rnd() * 0.0023), (rnd() - 0.5) * 0.26);
     }
   }
-  g.globalAlpha = 0.91;
-  g.fillStyle = '#111815';
-  g.fill(pads);
-  g.globalAlpha = 0.90;
-  g.fillStyle = ink;
-  g.fill(cores);
-  g.globalAlpha = 0.90;
-  g.fill(ragged);
-  g.globalAlpha = 1;
+  for (let k = 0; k < groups.length; k++) {
+    const b = branches[k];
+    let x0 = Math.min(b[0], b[4]) - m * 0.02;
+    let x1 = Math.max(b[0], b[4]) + m * 0.02;
+    let y0 = Math.min(b[1], b[5]) - m * 0.02;
+    let y1 = Math.max(b[1], b[5]) + m * 0.02;
+    for (let j = 0; j < groups[k].length; j++) {
+      const cl = clusters[groups[k][j]];
+      x0 = Math.min(x0, cl.x - cl.rx * 1.12 - m * 0.014);
+      x1 = Math.max(x1, cl.x + cl.rx * 1.12 + m * 0.014);
+      y0 = Math.min(y0, cl.y - cl.ry * 1.25 - m * 0.006);
+      y1 = Math.max(y1, cl.y + cl.ry * 1.05 + m * 0.006);
+    }
+    const ps = pathSets[k];
+    const sprite = makeSprite(lp, x0, y0, x1, y1, function (g) {
+      g.fillStyle = ink;
+      g.fill(taperedBranch(b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]));
+      g.globalAlpha = 0.91;
+      g.fillStyle = '#111815';
+      g.fill(ps.pads);
+      g.globalAlpha = 0.90;
+      g.fillStyle = ink;
+      g.fill(ps.cores);
+      g.fill(ps.ragged);
+      g.globalAlpha = 1;
+    });
+    parts.push({ s: sprite, ax: b[0], ay: b[1], gain: gains[k], lag: lags[k] });
+  }
+  return { bx: base.x, by: base.y, xn: x / lp.w, skew: 0.0042, trunk: trunkSprite, parts: parts };
+}
+
+/*
+ * A smaller sumi-e pine in the hand of the hero pine: a crooked, tapering trunk
+ * that kinks as it climbs, a branch or two reaching downwind, and flat layered
+ * needle pads with bristly dry-brush edges. Its foot sits in a small ink mound
+ * of rock so it is rooted in the ridge or crag it stands on.
+ */
+function buildSmallPine(lp, x, ground, size, seed, ink, padInk, flex, dir, rockInk) {
+  const rnd = U.mulberry32(seed);
+  const qs = [0, 0.22, 0.45, 0.68, 0.86, 1.0];
+  const kink = [0, -0.065, 0.035, 0.125, 0.150, 0.235];
+  const spine = qs.map(function (q, i) {
+    return {
+      x: x + dir * size * (kink[i] + (i ? (rnd() - 0.5) * 0.035 : 0)),
+      y: ground - size * 0.70 * q
+    };
+  });
+  const L = [];
+  const R = [];
+  for (let i = 0; i < spine.length; i++) {
+    const w = size * 0.058 * (1 - qs[i] * 0.74) * (i === 0 ? 1.45 : 1);
+    L.push({ x: spine[i].x - w, y: spine[i].y });
+    R.push({ x: spine[i].x + w, y: spine[i].y });
+  }
+  const trunkPath = new Path2D();
+  addSmoothSide(trunkPath, L, true);
+  addSmoothSide(trunkPath, R.slice().reverse(), false);
+  trunkPath.closePath();
+  const bark = new Path2D();
+  for (let i = 1; i < 4; i++) {
+    const a = spine[i], b = spine[i + 1];
+    dryBrush(bark, a.x, a.y, a.x + (b.x - a.x) * 0.7, a.y + (b.y - a.y) * 0.7, size * 0.012, rnd);
+  }
+  const mound = new Path2D();
+  addCloudPad(mound, x + dir * size * 0.02, ground + size * 0.035, size * 0.20, size * 0.050, rnd, 1.6);
+  const roots = new Path2D();
+  for (let k = 0; k < 5; k++) {
+    const side = k % 2 ? 1 : -1;
+    addDab(roots, x + side * size * (0.10 + rnd() * 0.14), ground + size * (0.018 + rnd() * 0.03),
+      size * (0.07 + rnd() * 0.09), size * (0.008 + rnd() * 0.008), (rnd() - 0.5) * 0.25);
+  }
+  const top = spine[spine.length - 1];
+  const trunk = makeSprite(lp, x - size * 0.30, top.y - size * 0.05, x + size * 0.34, ground + size * 0.10, function (g) {
+    g.fillStyle = rockInk;
+    g.fill(mound);
+    g.globalAlpha = 0.85;
+    g.fill(roots);
+    g.globalAlpha = 1;
+    g.fillStyle = ink;
+    g.fill(trunkPath);
+    g.globalAlpha = 0.55;
+    g.fillStyle = '#2b3430';
+    g.fill(bark);
+    g.globalAlpha = 1;
+  });
+
+  const at = function (q) {
+    for (let i = 1; i < spine.length; i++) {
+      if (q <= qs[i]) {
+        const f = (q - qs[i - 1]) / (qs[i] - qs[i - 1]);
+        return { x: spine[i - 1].x + (spine[i].x - spine[i - 1].x) * f, y: spine[i - 1].y + (spine[i].y - spine[i - 1].y) * f };
+      }
+    }
+    return top;
+  };
+  // [height on trunk, direction, reach, pad width] — low branch, long downwind limb, a back limb, the crown
+  const limbs = [
+    [0.38, -dir, 0.24, 0.19],
+    [0.56, dir, 0.42, 0.25],
+    [0.77, -dir, 0.15, 0.18],
+    [0.97, dir, 0.10, 0.19]
+  ];
+  const parts = [];
+  for (let i = 0; i < limbs.length; i++) {
+    const lb = limbs[i];
+    const root = at(lb[0]);
+    const reach = size * lb[2] * (0.85 + rnd() * 0.3);
+    const end = { x: root.x + lb[1] * reach, y: root.y - size * (0.02 + rnd() * 0.04) };
+    const ctl = { x: root.x + lb[1] * reach * 0.45, y: root.y + size * 0.035 };
+    const rx = size * lb[3] * (0.9 + rnd() * 0.2);
+    const ry = rx * (0.29 + rnd() * 0.06);
+    const cx = end.x + lb[1] * rx * 0.25;
+    const cy = end.y - ry * 0.35;
+    const pads = new Path2D();
+    const cores = new Path2D();
+    const needles = new Path2D();
+    // two flat tiers: the main pad and a smaller one layered beneath and inward
+    addCloudPad(pads, cx, cy, rx, ry, rnd, 0.9);
+    addCloudPad(pads, cx - lb[1] * rx * 0.22, cy + ry * 1.05, rx * 0.70, ry * 0.75, rnd, 0.8);
+    addCloudPad(cores, cx - rx * 0.08, cy + ry * 0.10, rx * 0.55, ry * 0.50, rnd, 0.6);
+    // bristly needle tufts along the top and at the ends of each pad
+    const tufts = 12 + Math.floor(rnd() * 6);
+    for (let k = 0; k < tufts; k++) {
+      const u = (k + rnd() * 0.8) / tufts;
+      const px = cx - rx + u * rx * 2;
+      const arch = Math.sin(u * Math.PI);
+      const py = cy - ry * (0.15 + arch * 0.55);
+      const lean = (u - 0.5) * 0.9 + (rnd() - 0.5) * 0.5;
+      const ln = size * (0.020 + rnd() * 0.025) * (0.6 + arch * 0.6);
+      addBrushSlash(needles, px, py + ry * 0.2, px + Math.sin(lean) * ln, py - Math.cos(lean) * ln * 0.6, size * 0.0035);
+    }
+    for (let k = 0; k < 7; k++) {
+      const side = rnd() < 0.5 ? -1 : 1;
+      addDab(needles, cx + side * rx * (0.75 + rnd() * 0.40), cy + (rnd() - 0.3) * ry * 1.6,
+        size * (0.035 + rnd() * 0.05), size * (0.004 + rnd() * 0.005), side * (rnd() - 0.3) * 0.25);
+    }
+    const dry = new Path2D();
+    dryBrush(dry, cx - rx * 0.9, cy - ry * 0.05, cx + rx * 0.9, cy + ry * 0.05, ry * 0.55, rnd);
+    const branch = taperedBranch(root.x, root.y, ctl.x, ctl.y, end.x, end.y, size * 0.016, size * 0.005);
+    const sprite = makeSprite(lp,
+      Math.min(root.x, cx - rx * 1.25) - size * 0.05, Math.min(root.y, cy - ry * 1.4) - size * 0.05,
+      Math.max(root.x, cx + rx * 1.25) + size * 0.05, Math.max(root.y, cy + ry * 2.2) + size * 0.03,
+      function (g) {
+        g.fillStyle = ink;
+        g.fill(branch);
+        g.globalAlpha = 0.92;
+        g.fillStyle = padInk;
+        g.fill(pads);
+        g.globalAlpha = 0.9;
+        g.fillStyle = ink;
+        g.fill(cores);
+        g.globalAlpha = 0.8;
+        g.fill(needles);
+        // dry-brush streaks: paper showing through the pads
+        g.globalCompositeOperation = 'destination-out';
+        g.globalAlpha = 0.45;
+        g.fill(dry);
+        g.globalCompositeOperation = 'source-over';
+        g.globalAlpha = 1;
+      });
+    parts.push({ s: sprite, ax: root.x, ay: root.y, gain: flex * (1 + i * 0.35), lag: 0.15 * (i + 1) });
+  }
+  return { bx: x, by: ground, xn: x / lp.w, skew: flex * 0.35, trunk: trunk, parts: parts };
+}
+
+/* Distant trees: a few short, soft horizontal dabs of ink that melt into the ridge wash. */
+function buildInkDabTree(lp, x, ground, hgt, color, alpha, seed) {
+  const rnd = U.mulberry32(seed);
+  const x0 = Math.floor(x - hgt * 0.8);
+  const y0 = Math.floor(ground - hgt * 1.15);
+  const w = Math.ceil(hgt * 1.7);
+  const h = Math.ceil(hgt * 1.35);
+  const L = U.layer(w, h, Math.min(1, lp.dpr) * 0.8);   // low-res: the upscale softens the edges
+  const g = L.ctx;
+  g.translate(-x0, -y0);
+  const p = new Path2D();
+  const n = 3 + Math.floor(rnd() * 2);
+  const lean = hgt * (rnd() - 0.3) * 0.15;
+  for (let k = 0; k < n; k++) {
+    const q = (k + 0.4) / n;
+    const len = hgt * (0.95 - 0.55 * q) * (0.8 + rnd() * 0.4);
+    addDab(p, x + lean * q + (rnd() - 0.5) * hgt * 0.12, ground - hgt * q * 0.9, len, hgt * (0.09 + rnd() * 0.05), (rnd() - 0.5) * 0.18);
+  }
+  softPuff(g, x, ground - hgt * 0.40, hgt * 0.55, hgt * 0.45, U.hexToRgb(color).join(','), alpha * 0.35, 1e6, 0);
+  g.fillStyle = U.rgba(color, alpha);
+  g.fill(p);
+  return { bx: x, by: ground, xn: x / lp.w, skew: 0.018, trunk: { canvas: L.canvas, x: x0, y: y0, w: w, h: h }, parts: [] };
+}
+
+/* Highest point of a ridge within ±span of x: trees are planted on crests. */
+function crestNear(points, x, span) {
+  let best = { x: x, y: ridgeAt(points, x) };
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+    if (Math.abs(p.x - x) <= span && p.y < best.y) best = { x: p.x, y: p.y };
+  }
+  return best;
+}
+
+function buildTrees(lp) {
+  const pts = crag.points;
+  const anchorX = crag.reach * 0.27;
+  const ground = ridgeAt(pts, anchorX) - lp.min * 0.002;
+  const smallX = crag.reach * 0.64;
+  trees = [
+    buildSmallPine(lp, smallX, ridgeAt(pts, smallX) + lp.min * 0.006, lp.min * 0.105, 77, '#080c0b', '#111815', 0.020, 1, '#0b0f0e'),
+    buildPine(lp, anchorX, ground)
+  ];
+  ridgeTrees = [[], [], [], [], []];
+  const tiny = [
+    [2, 0.290, 0.020], [2, 0.312, 0.016], [2, 0.622, 0.018],
+    [3, 0.432, 0.024], [3, 0.452, 0.019], [3, 0.808, 0.022], [3, 0.950, 0.018]
+  ];
+  for (let i = 0; i < tiny.length; i++) {
+    const r = tiny[i][0];
+    const spec = RIDGE_SPECS[r];
+    const c = crestNear(ridges[r].points, lp.w * tiny[i][1], lp.w * 0.012);
+    ridgeTrees[r].push(buildInkDabTree(lp, c.x, c.y + lp.min * 0.006, lp.min * tiny[i][2], spec.color, spec.alpha * 0.62, 500 + i * 13));
+  }
+  // two small pines on the crests of the nearest middle ridge
+  const mid = [[0.70, 0.060, 31, 1], [0.37, 0.046, 43, -1]];
+  for (let i = 0; i < mid.length; i++) {
+    const c = crestNear(ridges[4].points, lp.w * mid[i][0], lp.w * 0.03);
+    ridgeTrees[4].push(buildSmallPine(lp, c.x, c.y + lp.min * 0.010, lp.min * mid[i][1], mid[i][2],
+      '#121816', '#18201d', 0.026, mid[i][3], '#1a211e'));
+  }
+}
+
+/* ---------- wind ---------- */
+
+function gust(t) {
+  const P = 26;
+  const k = Math.floor(t / P);
+  const u = t - k * P - U.hash2(k, 7) * 10;
+  const strength = 0.55 + 0.45 * U.hash2(k, 13);
+  return U.smoothstep(0, 4.5, u) * (1 - U.smoothstep(6, 13, u)) * strength;
+}
+
+/* Wind at screen position xn (0..1): gusts travel left to right over ~3 s. */
+function wind(t, xn) {
+  const tt = t - xn * 3.2;
+  const base = 0.55 * Math.sin(tt * 0.997) + 0.30 * Math.sin(tt * 1.70 + 1.3) + 0.15 * Math.sin(tt * 2.73 + 0.4);
+  const g = gust(tt);
+  return base * (0.7 + 1.1 * g) + 2.4 * g;
+}
+
+function drawTreeList(ctx, list, t, ox) {
+  if (!list) return;
+  for (let i = 0; i < list.length; i++) drawTree(ctx, list[i], t, ox);
+}
+
+function drawTree(ctx, tree, t, ox) {
+  const k = wind(t, tree.xn) * tree.skew;
+  const tr = tree.trunk;
+  ctx.save();
+  ctx.translate(tree.bx + ox, tree.by);
+  ctx.transform(1, 0, -k, 1, 0, 0);
+  ctx.drawImage(tr.canvas, tr.x - tree.bx, tr.y - tree.by, tr.w, tr.h);
+  ctx.restore();
+  for (let i = 0; i < tree.parts.length; i++) {
+    const p = tree.parts[i];
+    const s = p.s;
+    const a = wind(t - p.lag, tree.xn) * p.gain;
+    ctx.save();
+    ctx.translate(p.ax + ox + k * (tree.by - p.ay), p.ay);
+    ctx.rotate(a);
+    ctx.drawImage(s.canvas, s.x - p.ax, s.y - p.ay, s.w, s.h);
+    ctx.restore();
+  }
 }
 
 function taperedBranch(x0, y0, cx, cy, x1, y1, w0, w1) {
@@ -581,64 +903,245 @@ function addCloudPad(path, cx, cy, rx, ry, rnd, fullness) {
   path.closePath();
 }
 
-function buildMist(lp, yFactor, heightFactor, alpha, speed, phase) {
-  const targetW = Math.max(lp.w * 0.68, lp.min * 1.45);
-  const targetH = Math.max(40, lp.min * heightFactor);
-  const L = U.layer(Math.ceil(targetW / 4.2), Math.ceil(targetH / 3.2), 1);
+/* Soft elliptical puff (radial falloff), drawn with horizontal wrap copies. */
+function softPuff(g, cx, cy, rx, ry, rgb, alpha, wrapW, tilt) {
+  for (let k = -1; k <= 1; k++) {
+    const x = cx + k * wrapW;
+    if (x + rx < 0 || x - rx > wrapW) continue;
+    g.save();
+    g.translate(x, cy);
+    if (tilt) g.rotate(tilt);
+    g.scale(rx, ry);
+    const grad = g.createRadialGradient(0, 0, 0, 0, 0, 1);
+    grad.addColorStop(0, 'rgba(' + rgb + ',' + alpha + ')');
+    grad.addColorStop(0.45, 'rgba(' + rgb + ',' + (alpha * 0.62) + ')');
+    grad.addColorStop(1, 'rgba(' + rgb + ',0)');
+    g.fillStyle = grad;
+    g.beginPath();
+    g.arc(0, 0, 1, 0, TAU);
+    g.fill();
+    g.restore();
+  }
+}
+
+/* A horizontally seamless low-res mist band, one screen wide (tiled twice when drawn). */
+function mistTexture(lp, hCss, seed) {
+  const cw = Math.max(32, Math.ceil(lp.w / 4));
+  const ch = Math.max(10, Math.ceil(hCss / 3));
+  const L = U.layer(cw, ch, 1);
   const g = L.ctx;
-  const w = L.w;
-  const h = L.h;
-  const veil = g.createLinearGradient(0, 0, 0, h);
+  const veil = g.createLinearGradient(0, 0, 0, ch);
   veil.addColorStop(0, 'rgba(218,222,211,0)');
-  veil.addColorStop(0.22, 'rgba(220,224,213,0.10)');
-  veil.addColorStop(0.50, 'rgba(229,226,211,0.27)');
-  veil.addColorStop(0.76, 'rgba(207,216,210,0.11)');
+  veil.addColorStop(0.30, 'rgba(220,224,213,0.05)');
+  veil.addColorStop(0.52, 'rgba(229,226,211,0.10)');
+  veil.addColorStop(0.74, 'rgba(207,216,210,0.05)');
   veil.addColorStop(1, 'rgba(202,211,205,0)');
   g.fillStyle = veil;
-  g.fillRect(0, 0, w, h);
-
-  const rnd = U.mulberry32(Math.floor(phase * 1000) + 51);
-  for (let i = 0; i < 9; i++) {
-    const cx = w * (-0.05 + i / 8 * 1.10) + (rnd() - 0.5) * w * 0.06;
-    const cy = h * (0.43 + (rnd() - 0.5) * 0.18);
-    const rx = w * (0.10 + rnd() * 0.08);
-    const ry = h * (0.22 + rnd() * 0.16);
-    g.fillStyle = 'rgba(232,230,216,' + (0.030 + rnd() * 0.030) + ')';
-    g.beginPath();
-    g.ellipse(cx, cy, rx, ry, 0, 0, TAU);
-    g.fill();
+  g.fillRect(0, 0, cw, ch);
+  const rnd = U.mulberry32(seed);
+  const n = 10 + Math.round(lp.aspect * 4);
+  const narrow = Math.min(1.6, 1.78 / lp.aspect + 0.4);
+  for (let i = 0; i < n; i++) {
+    const cx = (i + rnd() * 0.8) / n * cw;
+    const cy = ch * (0.50 + (rnd() - 0.5) * 0.22);
+    const rx = cw * (0.05 + rnd() * 0.09) * narrow;
+    const ry = ch * (0.20 + rnd() * 0.16);
+    softPuff(g, cx, cy, rx, ry, '232,230,216', 0.10 + rnd() * 0.20, cw, 0);
+    // smaller wisps give the drift visible texture
+    softPuff(g, cx + rx * (rnd() - 0.5) * 1.6, cy + ry * (rnd() - 0.5), rx * 0.32, ry * 0.45, '236,234,222', 0.08 + rnd() * 0.12, cw, 0);
   }
+  return L.canvas;
+}
 
-  const mask = g.createLinearGradient(0, 0, w, 0);
-  mask.addColorStop(0, 'rgba(0,0,0,0)');
-  mask.addColorStop(0.12, 'rgba(0,0,0,0.96)');
-  mask.addColorStop(0.50, 'rgba(0,0,0,1)');
-  mask.addColorStop(0.88, 'rgba(0,0,0,0.96)');
-  mask.addColorStop(1, 'rgba(0,0,0,0)');
-  g.globalCompositeOperation = 'destination-in';
-  g.fillStyle = mask;
-  g.fillRect(0, 0, w, h);
-  g.globalCompositeOperation = 'source-over';
-
+function buildMistLayer(lp, yFactor, heightFactor, alpha, speed, periodA, periodB, phase, seed) {
+  const h = Math.max(40, lp.min * heightFactor * 1.15);
   return {
-    canvas: L.canvas,
-    w: targetW,
-    h: targetH,
-    y: lp.h * yFactor - targetH * 0.52,
-    alpha: alpha,
-    speed: speed,
-    offset: targetW * (0.21 + phase),
-    phase: phase * 5.7,
-    breathe: 0.006 + phase * 0.002
+    a: mistTexture(lp, h, seed),
+    b: mistTexture(lp, h, seed + 37),
+    w: lp.w, h: h, y: lp.h * yFactor - h * 0.52,
+    alpha: alpha, speed: speed, speedB: speed * 1.32,
+    pa: periodA, pb: periodB, ph: phase * 5.7, off: lp.w * phase
   };
 }
 
-function drawMist(ctx, lp, mist, t) {
-  const span = lp.w + mist.w;
-  const x = wrap(t * mist.speed + mist.offset, span) - mist.w;
-  ctx.globalAlpha = mist.alpha * (0.88 + 0.12 * Math.sin(t * mist.breathe + mist.phase));
-  ctx.drawImage(mist.canvas, x, mist.y, mist.w, mist.h);
-  ctx.drawImage(mist.canvas, x + span, mist.y, mist.w, mist.h);
+/*
+ * Sky: a handful of separate ink-wash cloud wisps. Each is one dry-brush stroke
+ * (a soft feathered wash under broken bristle marks) with its own length,
+ * thickness, curve and tilt; it drifts at its own pace and slowly forms and
+ * dissolves on its own long cycle, so only three to five show at a time.
+ */
+const WISPS = [
+  // y (share of sky), length, thickness, speed (px/s), cycle (s), phase, alpha, seed
+  [0.10, 0.62, 0.045, 1.6, 131, 0.10, 0.55, 11],
+  [0.21, 0.44, 0.060, 2.4, 97, 0.55, 0.60, 23],
+  [0.33, 0.78, 0.040, 1.9, 149, 0.80, 0.62, 37],
+  [0.46, 0.52, 0.070, 3.1, 113, 0.30, 0.72, 41],
+  [0.58, 0.36, 0.055, 3.8, 89, 0.68, 0.78, 53],
+  [0.70, 0.66, 0.050, 2.8, 127, 0.05, 0.82, 67],
+  [0.80, 0.42, 0.065, 4.4, 103, 0.42, 0.80, 79],
+  [0.27, 0.30, 0.080, 2.1, 79, 0.92, 0.58, 83]
+];
+
+function buildWisp(lp, spec, index) {
+  const rnd = U.mulberry32(spec[7] * 31 + 5);
+  const len = lp.min * spec[1] * (lp.aspect > 2.2 ? 0.85 : 1);
+  const thick = len * spec[2];
+  const bow = (rnd() < 0.5 ? -1 : 1) * thick * (0.8 + rnd() * 1.6);
+  const tilt = (rnd() - 0.5) * 0.16;
+  const W = Math.ceil(len * 1.08);
+  const H = Math.ceil(thick * 4.6 +Math.abs(bow) * 2 + len * Math.abs(tilt));
+  const L = U.layer(W, H, 1);
+  const g = L.ctx;
+  const head = 0.12 + rnd() * 0.22;   // where the brush is fullest
+  const cy = H * 0.5;
+  const mid = function (u) {
+    return cy + bow * Math.sin(Math.PI * u) + (u - 0.5) * len * tilt +
+      (U.noise1(u * 3.1 + index * 7.7) - 0.5) * thick * 0.9;
+  };
+  const width = function (u) {
+    const s = u < head ? u / head : 1 - (u - head) / (1 - head);
+    return thick * Math.pow(Math.max(0, s), u < head ? 0.45 : 0.8) * (0.55 + 0.7 * U.noise1(u * 6.3 + index * 3.3));
+  };
+  const x0 = len * 0.04;
+  // feathered, lumpy wash: dense at the loaded head, thinning along the drag
+  for (let i = 0; i < 24; i++) {
+    const u = Math.pow((i + rnd() * 0.8) / 24, 1.15);
+    const wv = width(u);
+    if (wv < 0.6) continue;
+    softPuff(g, x0 + u * len, mid(u) + (rnd() - 0.5) * wv * 0.6, len * (0.035 + rnd() * 0.05), wv * (0.8 + rnd() * 0.6),
+      '150,158,154', (0.10 + rnd() * 0.10) * (1 - u * 0.45), 1e6, tilt + (rnd() - 0.5) * 0.1);
+  }
+  // dry-brush bristles: broken streaks at the frayed edges and the drying tail
+  const strokes = [new Path2D(), new Path2D(), new Path2D()];
+  const bristles = 9 + Math.floor(rnd() * 6);
+  for (let b = 0; b < bristles; b++) {
+    const off = (b + 0.5) / bristles * 2 - 1 + (rnd() - 0.5) * 0.15;
+    const p = strokes[Math.floor(rnd() * 3)];
+    let u = head * (0.5 + rnd() * 1.5) + Math.abs(off) * 0.1;
+    const uEnd = 1 - rnd() * 0.22 * (0.5 + Math.abs(off));
+    while (u < uEnd) {
+      const seg = 0.03 + rnd() * 0.14 * (1 - u * 0.6);
+      const e = Math.min(uEnd, u + seg);
+      if (rnd() < 0.80 - u * 0.30) {
+        const n = Math.max(2, Math.ceil((e - u) * 18));
+        for (let k = 0; k <= n; k++) {
+          const v = u + (e - u) * k / n;
+          const x = x0 + v * len;
+          const y = mid(v) + off * width(v) * (1.05 + 0.15 * v);
+          if (k === 0) p.moveTo(x, y);
+          else p.lineTo(x, y);
+        }
+      }
+      u = e + 0.01 + rnd() * 0.05 * (0.5 + u);
+    }
+  }
+  g.lineCap = 'round';
+  const widths = [0.7, 1.1, 1.7];
+  const alphas = [0.24, 0.17, 0.10];
+  for (let k = 0; k < 3; k++) {
+    g.lineWidth = widths[k] * Math.max(0.7, lp.min / 900);
+    g.strokeStyle = 'rgba(158,166,161,' + alphas[k] + ')';
+    g.stroke(strokes[k]);
+  }
+  return {
+    canvas: L.canvas, w: W, h: H,
+    yq: spec[0], speed: spec[3], cycle: spec[4], phase: spec[5], alpha: spec[6],
+    off: rnd()
+  };
+}
+
+/* Quiet tonal mottling of the dusk paper: round, soft blotches (never bands), very low contrast. */
+function skyMottle(lp, seed) {
+  const k = 10;
+  const cw = Math.max(16, Math.ceil(lp.w / k));
+  const ch = Math.max(8, Math.ceil(lp.h * 0.56 / k));
+  const L = U.layer(cw, ch, 1);
+  const g = L.ctx;
+  const rnd = U.mulberry32(seed);
+  const n = Math.round(cw * ch / 90) + 8;
+  for (let i = 0; i < n; i++) {
+    const r = ch * (0.10 + rnd() * 0.16);
+    const light = rnd() < 0.55;
+    softPuff(g, rnd() * cw, rnd() * ch, r * (1.1 + rnd() * 0.6), r, light ? '150,158,152' : '0,3,4',
+      light ? 0.06 + rnd() * 0.06 : 0.08 + rnd() * 0.08, cw, 0);
+  }
+  // fade out towards the ridges
+  g.globalCompositeOperation = 'destination-in';
+  const fade = g.createLinearGradient(0, 0, 0, ch);
+  fade.addColorStop(0, 'rgba(0,0,0,1)');
+  fade.addColorStop(0.7, 'rgba(0,0,0,0.8)');
+  fade.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = fade;
+  g.fillRect(0, 0, cw, ch);
+  g.globalCompositeOperation = 'source-over';
+  return L.canvas;
+}
+
+function drawSkyMottle(ctx, lp, t) {
+  const h = lp.h * 0.56;
+  const sp = Math.min(1.4, lp.w / 1512);
+  const cross = 0.5 + 0.5 * Math.sin(t * TAU / 26 + 0.6);
+  const xa = -wrap(t * 1.6 * sp, lp.w);
+  const xb = -wrap(t * 2.3 * sp + lp.w * 0.4, lp.w);
+  ctx.globalAlpha = cross;
+  ctx.drawImage(skyMottles[0], xa, 0, lp.w, h);
+  ctx.drawImage(skyMottles[0], xa + lp.w, 0, lp.w, h);
+  ctx.globalAlpha = 1 - cross;
+  ctx.drawImage(skyMottles[1], xb, 0, lp.w, h);
+  ctx.drawImage(skyMottles[1], xb + lp.w, 0, lp.w, h);
+  ctx.globalAlpha = 1;
+}
+
+function buildWisps(lp) {
+  return WISPS.map(function (spec, i) { return buildWisp(lp, spec, i); });
+}
+
+function drawWisps(ctx, lp, t) {
+  const sp = Math.min(1.4, lp.w / 1512);
+  const skyH = lp.h * 0.47;
+  const cr = lp.clockRect;
+  for (let i = 0; i < clouds.length; i++) {
+    const c = clouds[i];
+    const life = wrap(t / c.cycle + c.phase, 1);
+    const env = U.smoothstep(0.0, 0.32, life) * (1 - U.smoothstep(0.62, 1.0, life));
+    if (env < 0.01) continue;
+    const grow = 0.86 + 0.20 * life;           // the stroke spreads as it forms and fades
+    const w = c.w * grow;
+    const h = c.h * (0.9 + 0.25 * life);
+    const span = lp.w + w;
+    const x = wrap(c.off * span + t * c.speed * sp, span) - w;
+    // a slow rise and fall (a few px over ~20 s) so the horizontal bristles visibly drift
+    const y = skyH * c.yq + Math.sin(t * TAU / (17 + i * 2.3) + i * 1.7) * lp.min * 0.007 - h * 0.5;
+    let a = c.alpha * env;
+    if (cr) {
+      // behind the clock the wisps stay very faint
+      const pad = lp.min * 0.05;
+      const ox = Math.max(0, Math.min(x + w, cr.x + cr.w + pad) - Math.max(x, cr.x - pad));
+      const oy = Math.max(0, Math.min(y + h, cr.y + cr.h + pad) - Math.max(y, cr.y - pad));
+      const share = Math.min(1, ox / Math.max(1, Math.min(w, cr.w + pad * 2))) * (oy > 0 ? Math.min(1, oy / h * 1.5) : 0);
+      a *= 1 - 0.72 * share;
+    }
+    ctx.globalAlpha = a;
+    ctx.drawImage(c.canvas, x, y, w, h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+/* Two textures drifting at different speeds, cross-fading; overall density breathes. */
+function drawDrift(ctx, lp, m, t) {
+  const cross = 0.5 + 0.5 * Math.sin(t * TAU / m.pa + m.ph);
+  const dens = 0.78 + 0.22 * Math.sin(t * TAU / m.pb + m.ph * 1.9);
+  const xa = -wrap(t * m.speed + m.off, m.w);
+  const xb = -wrap(t * m.speedB + m.off * 1.7 + m.w * 0.5, m.w);
+  // the veils breathe: each texture rises and settles a little on its own slow swell
+  const ya = m.y + Math.sin(t * TAU / (m.pa * 0.71) + m.ph) * lp.min * 0.008;
+  const yb = m.y + Math.sin(t * TAU / (m.pb * 0.43) + m.ph * 2.3) * lp.min * 0.008;
+  ctx.globalAlpha = m.alpha * dens * (0.08 + 0.92 * cross);
+  ctx.drawImage(m.a, xa, ya, m.w, m.h);
+  ctx.drawImage(m.a, xa + m.w, ya, m.w, m.h);
+  ctx.globalAlpha = m.alpha * dens * (0.08 + 0.92 * (1 - cross));
+  ctx.drawImage(m.b, xb, yb, m.w, m.h);
+  ctx.drawImage(m.b, xb + m.w, yb, m.w, m.h);
   ctx.globalAlpha = 1;
 }
 
@@ -708,29 +1211,261 @@ function makeSunPath(cx, cy, radius, seed, roughness) {
   return p;
 }
 
+/* A small flock crosses about once a minute (each 64 s cycle: one flight at a varied time). */
 function drawBirds(ctx, lp, t) {
-  const cycle = 172;
-  const phase = (t % cycle) / cycle;
-  const fade = U.smoothstep(0.02, 0.12, phase) * (1 - U.smoothstep(0.84, 0.98, phase));
-  if (fade <= 0.001) return;
-  const travel = U.smoothstep(0, 1, phase);
-  const leadX = lp.w * (0.92 - travel * 0.80);
-  const baseY = lp.h * 0.335;
-  ctx.save();
-  ctx.strokeStyle = 'rgba(9,13,12,' + (0.34 * fade) + ')';
-  ctx.lineWidth = Math.max(0.65, lp.min * 0.00085);
-  ctx.lineCap = 'round';
-  for (let i = 0; i < 3; i++) {
-    const x = leadX + lp.min * (i * 0.024);
-    const y = baseY + lp.min * (i * 0.010 + Math.sin(phase * TAU + i * 1.7) * 0.004);
-    const wing = lp.min * (0.0065 + i * 0.0006);
-    ctx.beginPath();
-    ctx.moveTo(x - wing, y);
-    ctx.quadraticCurveTo(x - wing * 0.42, y - wing * 0.42, x, y);
-    ctx.quadraticCurveTo(x + wing * 0.43, y - wing * 0.34, x + wing, y + wing * 0.04);
-    ctx.stroke();
+  const P = 64;
+  const k = Math.floor(t / P);
+  const dur = 27 + U.hash2(k, 5) * 9;
+  const start = U.hash2(k, 3) * (P - dur - 1);
+  const p = (t - k * P - start) / dur;
+  if (p <= 0 || p >= 1) return;
+  const dir = U.hash2(k, 11) < 0.5 ? 1 : -1;
+  const count = 3 + Math.floor(U.hash2(k, 17) * 5);
+  const size = lp.min * (0.0062 + U.hash2(k, 23) * 0.0045);
+  let yTop = lp.h * 0.33;
+  if (lp.clockRect) yTop = Math.max(yTop, lp.clockRect.y + lp.clockRect.h + lp.h * 0.04);
+  const baseY = yTop + U.hash2(k, 29) * lp.h * 0.08;
+  const span = lp.w + lp.min * 0.4;
+  const lead = dir > 0 ? -lp.min * 0.2 + p * span : lp.w + lp.min * 0.2 - p * span;
+  const fade = U.smoothstep(0, 0.12, p) * (1 - U.smoothstep(0.88, 1, p));
+  const path = new Path2D();
+  for (let i = 0; i < count; i++) {
+    const row = Math.ceil(i / 2);
+    const side = i % 2 ? 1 : -1;
+    const x = lead - dir * row * size * (3.2 + U.hash2(k * 7 + i, 41));
+    const y = baseY + side * row * size * 1.6 + Math.sin(t * 0.55 + i * 1.9) * size * 0.6;
+    const flap = Math.sin(t * TAU * (0.85 + 0.08 * i) + i * 2.1);
+    const s = size * (0.85 + U.hash2(i, k) * 0.3);
+    const tipY = y - s * (0.10 + 0.42 * flap);
+    path.moveTo(x - s, tipY);
+    path.quadraticCurveTo(x - s * 0.45, y - s * 0.20 * flap - s * 0.12, x, y);
+    path.quadraticCurveTo(x + s * 0.45, y - s * 0.20 * flap - s * 0.12, x + s, tipY);
   }
+  ctx.save();
+  ctx.strokeStyle = 'rgba(9,13,12,' + (0.55 * fade) + ')';
+  ctx.lineWidth = Math.max(0.8, size * 0.16);
+  ctx.lineCap = 'round';
+  ctx.stroke(path);
   ctx.restore();
+}
+
+/* ---------- water ---------- */
+
+function buildWater(lp, top) {
+  const W = Math.ceil(lp.w);
+  const H = Math.ceil(lp.h - top) + 2;
+  const L = U.layer(W, H, 1);
+  const g = L.ctx;
+  const grad = g.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, 'rgba(54,56,51,0)');
+  grad.addColorStop(0.04, 'rgba(54,56,51,0.90)');
+  grad.addColorStop(0.20, 'rgba(43,46,42,0.97)');
+  grad.addColorStop(0.60, 'rgba(27,31,29,0.99)');
+  grad.addColorStop(1, 'rgba(16,20,18,1)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, W, H);
+  const rnd = U.mulberry32(909);
+  // mist reflected on the water
+  for (let i = 0; i < 16; i++) {
+    const cy = H * (0.05 + Math.pow(rnd(), 1.6) * 0.55);
+    softPuff(g, rnd() * W, cy, W * (0.05 + rnd() * 0.12), H * (0.025 + rnd() * 0.05), '200,206,196', 0.06 + rnd() * 0.08, W, 0);
+  }
+  // ripple lines: thin horizontal dabs, denser and finer towards the far shore
+  const light = new Path2D();
+  const dark = new Path2D();
+  const n = Math.round(150 + 70 * lp.aspect);
+  for (let i = 0; i < n; i++) {
+    const q = Math.pow(rnd(), 1.3);
+    const y = H * (0.05 + q * 0.92);
+    const len = lp.min * (0.012 + 0.05 * q * rnd() + 0.012 * rnd());
+    const wid = 0.35 + q * 1.1;
+    const x = rnd() * W;
+    const path = rnd() < 0.6 ? light : dark;
+    for (let k = -1; k <= 1; k++) addDab(path, x + k * W, y, len, wid, (rnd() - 0.5) * 0.015);
+  }
+  g.fillStyle = 'rgba(176,184,174,0.16)';
+  g.fill(light);
+  g.fillStyle = 'rgba(5,8,7,0.36)';
+  g.fill(dark);
+  // perspective strips, integer edges
+  const N = 22;
+  const edges = [];
+  for (let j = 0; j <= N; j++) edges.push(Math.round(H * Math.pow(j / N, 1.35)));
+  return { canvas: L.canvas, w: W, h: H, top: top, edges: edges };
+}
+
+function drawWater(ctx, lp, t, sunX, sunSize) {
+  const wt = water;
+  const sp = lp.w / 1512;
+  const N = wt.edges.length - 1;
+  const step = lp.quality < 0.8 ? 2 : 1;
+  for (let j = 0; j < N; j += step) {
+    const y0 = wt.edges[j];
+    const y1 = wt.edges[Math.min(N, j + step)];
+    const hh = Math.min(wt.h - y0, y1 - y0 + 1);
+    if (hh <= 0) continue;
+    const q = (j + 0.5) / N;
+    const wob = (U.noise1(j * 1.37 + t * 0.19) - 0.5) * sp * (4 + 16 * q);
+    const x = wrap(t * sp * (1.2 + 6.5 * q) + wob + j * 97, wt.w);
+    ctx.drawImage(wt.canvas, 0, y0, wt.w, hh, x - wt.w, wt.top + y0, wt.w, hh);
+    ctx.drawImage(wt.canvas, 0, y0, wt.w, hh, x, wt.top + y0, wt.w, hh);
+  }
+  // the sun's vermilion reflection, broken into shimmering brush strokes
+  const n = 12;
+  for (let j = 0; j < n; j++) {
+    const q = (j + 0.5) / n;
+    const y = wt.top + wt.h * (0.035 + 0.52 * Math.pow(q, 1.25));
+    const w = sunSize * (0.40 - 0.16 * q) * (0.55 + 0.8 * U.noise1(j * 2.3 + t * 0.21));
+    const h = Math.max(1.6, wt.h * (0.013 + 0.012 * q));
+    const x = sunX + (U.noise1(j * 1.91 + t * 0.33 + 4) - 0.5) * sunSize * 0.32 * (0.4 + q);
+    const a = 0.85 * (1 - q * 0.5) * U.smoothstep(0.18, 0.68, U.noise1(j * 3.7 + t * 0.42 + 9));
+    if (a < 0.01) continue;
+    ctx.globalAlpha = a;
+    ctx.drawImage(sunDab, x - w * 0.5, y - h * 0.5, w, h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function buildDab(color, core) {
+  const L = U.layer(96, 16, 1);
+  const g = L.ctx;
+  const lg = g.createLinearGradient(0, 0, 96, 0);
+  lg.addColorStop(0, U.rgba(color, 0));
+  lg.addColorStop(0.18, U.rgba(color, 0.85));
+  lg.addColorStop(0.55, U.rgba(core, 1));
+  lg.addColorStop(0.85, U.rgba(color, 0.8));
+  lg.addColorStop(1, U.rgba(color, 0));
+  g.fillStyle = lg;
+  g.beginPath();
+  g.ellipse(48, 8, 47, 5.5, 0, 0, TAU);
+  g.fill();
+  g.globalCompositeOperation = 'destination-out';
+  g.fillStyle = 'rgba(0,0,0,0.55)';
+  g.fillRect(10, 6.5, 30, 0.8);
+  g.fillRect(52, 9, 34, 0.8);
+  g.globalCompositeOperation = 'source-over';
+  return L.canvas;
+}
+
+/* ---------- boat with a lantern ---------- */
+
+function buildBoat(lp) {
+  const len = lp.min * 0.052;
+  const x = lp.w * (lp.aspect < 1.5 ? 0.76 : 0.80);
+  const y = water.top + water.h * 0.30;
+  const lantern = { x: len * 0.36, y: -len * 0.50 };
+  const s = makeSprite(lp, -len * 0.62, -len * 0.62, len * 0.62, len * 0.16, function (g) {
+    const hull = new Path2D();
+    hull.moveTo(-len * 0.55, -len * 0.10);
+    hull.quadraticCurveTo(-len * 0.20, len * 0.10, len * 0.30, len * 0.07);
+    hull.quadraticCurveTo(len * 0.50, len * 0.03, len * 0.58, -len * 0.09);
+    hull.quadraticCurveTo(len * 0.10, -len * 0.02, -len * 0.55, -len * 0.10);
+    hull.closePath();
+    g.fillStyle = '#0a0e0d';
+    g.fill(hull);
+    // a seated figure in a broad hat
+    const fig = new Path2D();
+    fig.moveTo(-len * 0.10, -len * 0.04);
+    fig.quadraticCurveTo(-len * 0.11, -len * 0.16, -len * 0.04, -len * 0.20);
+    fig.lineTo(len * 0.02, -len * 0.04);
+    fig.closePath();
+    fig.moveTo(-len * 0.16, -len * 0.19);
+    fig.quadraticCurveTo(-len * 0.05, -len * 0.30, len * 0.06, -len * 0.19);
+    fig.closePath();
+    g.fill(fig);
+    // pole with hanging lantern
+    g.fill(taperedBranch(len * 0.30, -len * 0.04, len * 0.33, -len * 0.30, len * 0.40, -len * 0.58, len * 0.012, len * 0.006));
+    g.fillRect(lantern.x - len * 0.004, -len * 0.57, len * 0.008, len * 0.05);
+    g.fillStyle = '#2b1d14';
+    g.fillRect(lantern.x - len * 0.022, lantern.y - len * 0.028, len * 0.044, len * 0.056);
+  });
+  return { x: x, y: y, len: len, sprite: s, lantern: lantern };
+}
+
+function boatPose(lp, t) {
+  return {
+    x: boat.x + Math.sin(t * TAU / 151) * lp.w * 0.012,
+    y: boat.y + Math.sin(t * TAU / 4.7) * boat.len * 0.016,
+    a: Math.sin(t * TAU / 5.9 + 0.7) * 0.022
+  };
+}
+
+function lanternFlicker(t) {
+  return 0.80 + 0.20 * (0.7 * U.noise1(t * 1.1) + 0.3 * U.noise1(t * 2.3 + 5));
+}
+
+function drawBoat(ctx, lp, t) {
+  const p = boatPose(lp, t);
+  const s = boat.sprite;
+  const f = lanternFlicker(t);
+  // reflection: flipped, faint, gently wavering
+  ctx.save();
+  ctx.globalAlpha = 0.20;
+  ctx.translate(p.x + Math.sin(t * 1.3) * 0.6, p.y + boat.len * 0.10);
+  ctx.rotate(-p.a);
+  ctx.scale(1, -0.8);
+  ctx.drawImage(s.canvas, s.x, s.y, s.w, s.h);
+  ctx.restore();
+  // lantern light on the water
+  for (let j = 0; j < 4; j++) {
+    const q = (j + 0.5) / 4;
+    const w = boat.len * (0.30 - 0.12 * q) * (0.6 + 0.7 * U.noise1(j * 3.1 + t * 0.5));
+    const h = Math.max(1.2, boat.len * 0.035);
+    const x = p.x + boat.lantern.x + (U.noise1(j * 2.7 + t * 0.6) - 0.5) * boat.len * 0.12;
+    const y = p.y + boat.len * (0.16 + 0.17 * j);
+    ctx.globalAlpha = 0.5 * f * (1 - q * 0.6) * U.smoothstep(0.2, 0.7, U.noise1(j * 5.3 + t * 0.55 + 2));
+    ctx.drawImage(warmDab, x - w * 0.5, y - h * 0.5, w, h);
+  }
+  ctx.globalAlpha = 1;
+  ctx.save();
+  ctx.translate(p.x, p.y);
+  ctx.rotate(p.a);
+  ctx.drawImage(s.canvas, s.x, s.y, s.w, s.h);
+  ctx.restore();
+}
+
+/* Lantern glow and a few embers drifting up on the wind, fading out. */
+function drawLantern(ctx, lp, t) {
+  const p = boatPose(lp, t);
+  const ca = Math.cos(p.a), sa = Math.sin(p.a);
+  const lx = p.x + boat.lantern.x * ca - boat.lantern.y * sa;
+  const ly = p.y + boat.lantern.x * sa + boat.lantern.y * ca;
+  const f = lanternFlicker(t);
+  U.glow(ctx, lx, ly, lp.min * 0.034 * (0.9 + 0.1 * f), '#d9824a', 0.30 * f);
+  U.glow(ctx, lx, ly, lp.min * 0.010, '#ffd39c', 0.75 * f);
+  const n = lp.quality < 0.8 ? 4 : 7;
+  const life = 10;
+  for (let i = 0; i < n; i++) {
+    const age = wrap(t + i * life / 7, life);
+    const cyc = Math.floor((t + i * life / 7) / life);
+    const q = age / life;
+    const seed = U.hash2(i, cyc);
+    const g = gust(t - 1);
+    const ex = lx + lp.min * (q * (0.03 + 0.04 * seed + 0.03 * g) + Math.sin(q * 6.5 + i * 2.1) * 0.006);
+    const ey = ly - lp.min * 0.01 - q * lp.min * (0.09 + 0.05 * seed);
+    const a = U.smoothstep(0, 0.1, q) * Math.pow(1 - q, 1.6) * 0.75;
+    U.glow(ctx, ex, ey, lp.min * (0.0035 + 0.002 * seed), '#ff9a52', a);
+  }
+}
+
+/* ---------- low fog bank curling around the base of the near crag ---------- */
+
+function drawFogBank(ctx, lp, t) {
+  const reach = crag.reach;
+  const n = lp.quality < 0.8 ? 7 : 11;
+  const life = 52;
+  for (let i = 0; i < n; i++) {
+    const age = wrap(t + i * life / n, life);
+    const q = age / life;
+    const seed = U.hash2(i, 71);
+    const x = -reach * 0.25 + q * reach * 1.75;
+    const y = lp.h * (0.80 + 0.16 * seed) + lp.min * 0.028 * Math.sin(q * 5.2 + i * 2.3);
+    const r = lp.min * (0.09 + 0.06 * seed) * (0.85 + 0.3 * q);
+    const a = Math.pow(Math.sin(Math.PI * q), 1.3) * (0.20 + 0.10 * seed);
+    ctx.globalAlpha = a;
+    ctx.drawImage(fogSprite, x - r * 1.6, y - r * 0.7, r * 3.2, r * 1.4);
+  }
+  ctx.globalAlpha = 1;
 }
 function buildRidge(lp, spec, index) {
   const points = sampleRidge(lp, spec);
@@ -760,17 +1495,20 @@ function buildRidge(lp, spec, index) {
   sg.fillRect(0, 0, 1, 256);
 
   const ext = lp.min * 0.03;
+  const pad = ridgePad(lp);
+  const px0 = points[0].x;
+  const px1 = points[points.length - 1].x;
   const paint = function (g) {
     const body = g.createLinearGradient(0, topY, 0, footY);
     body.addColorStop(0, U.rgba(spec.color, a * 0.36));
     body.addColorStop(0.5, U.rgba(spec.color, a * 0.24));
     body.addColorStop(1, U.rgba(spec.color, 0));
     g.fillStyle = body;
-    g.fillRect(-ext, by, lp.w + ext * 2, lp.h - by);
+    g.fillRect(-pad - ext, by, lp.w + (pad + ext) * 2, lp.h - by);
     const step = 2;
     let k = 1;
-    for (let x = -Math.ceil(ext / step) * step; x < lp.w + ext; x += step) {
-      const px = Math.min(lp.w, Math.max(0, x + step * 0.5));
+    for (let x = -Math.ceil((pad + ext) / step) * step; x < lp.w + pad + ext; x += step) {
+      const px = Math.min(px1, Math.max(px0, x + step * 0.5));
       while (k < points.length - 1 && points[k].x < px) k++;
       const p0 = points[k - 1];
       const p1 = points[k];
@@ -778,7 +1516,7 @@ function buildRidge(lp, spec, index) {
       const y = p0.y + (p1.y - p0.y) * q;
       g.drawImage(strip, x, y - lead, step, depth);
     }
-    granulate(g, lp, -ext, by, lp.w + ext * 2, lp.h - by, 300 + index * 17, 0.8 + index * 0.08);
+    granulate(g, lp, -pad - ext, by, lp.w + (pad + ext) * 2, lp.h - by, 300 + index * 17, 0.8 + index * 0.08);
 
     const rnd = U.mulberry32(400 + index * 31);
     const dry = new Path2D();
@@ -816,7 +1554,13 @@ function buildRidge(lp, spec, index) {
     };
   });
   const bleed = { path: jitterPolyPath(points, lp.min, index * 7 + 9.1, 0, -0.001 * m, 1, lp.w * 0.5, 0.003 * m, ext, ext, lp.h + 4), alpha: 0.18 };
-  return inkBlock(lp, 0, by, lp.w, lp.h - by, paint, passes, bleed);
+  const block = inkBlock(lp, -pad, by, lp.w + pad * 2, lp.h - by, paint, passes, bleed);
+  block.points = points;
+  return block;
+}
+
+function ridgePad(lp) {
+  return Math.ceil(Math.max(lp.min * 0.03, lp.w * 0.0125));
 }
 
 /* Polyline silhouette closed to `bottom`, with organic edge wobble. */
@@ -1059,12 +1803,9 @@ function buildForeground(lp) {
     return { path: jitterPolyPath(points, lp.min, 41 + i * 2.3, p[0] * m, p[1] * m, 1, 0, p[3] * m, ext, 0, lp.h + 4), alpha: p[2] };
   });
   const bleed = { path: jitterPolyPath(points, lp.min, 47, 0, 0, 1, 0, 0.002 * m, ext, 0, lp.h + 4), alpha: 0.22 };
-  const crag = inkBlock(lp, 0, by, bw, lp.h - by, paint, passes, bleed);
-  g.drawImage(crag.canvas, crag.x, crag.y, crag.w, crag.h);
-
-  const anchorX = reach * 0.27;
-  const ground = ridgeAt(points, anchorX) - lp.min * 0.002;
-  drawPine(g, lp, anchorX, ground);
+  const block = inkBlock(lp, 0, by, bw, lp.h - by, paint, passes, bleed);
+  g.drawImage(block.canvas, block.x, block.y, block.w, block.h);
+  crag = { points: points, reach: reach };
   return L;
 }
 

@@ -3,6 +3,8 @@
 //
 //   swift run LivePaperSelfTest runtime.
 //   swift build && LIVEPAPER_SELFTEST_E2E=1 swift run LivePaperSelfTest runtime.e2e
+//   (runtime.e2e.motionBuiltins prints the motion numbers of Scenes/*; LIVEPAPER_MOTION_DUMP=<dir>
+//   also saves their raw tile maps there, for recalibrating MotionBudgets offline)
 //
 // Only the e2e test starts a GUI-registered process (one LivePaperRenderd), so it never runs unless
 // LIVEPAPER_SELFTEST_E2E=1. With LIVEPAPER_HOME set it uses the render server already serving
@@ -32,7 +34,12 @@ extension SelfTests {
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
             TestCase(name: "runtime.client.spoolFallback", run: RuntimeTests.clientSpoolFallback),
             TestCase(name: "runtime.client.waitsForServerHoldingLock", run: RuntimeTests.clientWaitsForLockHolder),
+            TestCase(name: "runtime.motion.tileDiff", run: RuntimeTests.motionTileDiff),
+            TestCase(name: "runtime.motion.syntheticScenes", run: RuntimeTests.motionSyntheticScenes),
+            TestCase(name: "runtime.motion.checkVerdicts", run: RuntimeTests.motionCheckVerdicts),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
+            TestCase(name: "runtime.e2e.motionScenes", run: RuntimeTests.endToEndMotion),
+            TestCase(name: "runtime.e2e.motionBuiltins", run: RuntimeTests.endToEndMotionBuiltins),
         ]
     }
 }
@@ -232,9 +239,11 @@ enum RuntimeTests {
 
     /// Results for a whole plan with every render succeeding; `adjust` tweaks individual responses.
     static func results(_ plan: CheckPlan, still: (CheckFrame) -> RenderResponse = { _ in ok() },
-                        bench benchFor: (CheckFrame) -> RenderResponse = { _ in bench(1.2) }) -> CheckResults {
+                        bench benchFor: (CheckFrame) -> RenderResponse = { _ in bench(1.2) },
+                        motion motionFor: (CheckFrame) -> RenderResponse = { aliveMotion($0) }) -> CheckResults {
         var r = CheckResults()
         r.stills = plan.stills.map { ($0, "/tmp/\($0.fileName)", still($0)) }
+        r.motion = plan.motionSizes.map { ($0, motionFor($0)) }
         r.probes = plan.probeTimes.map { t in var f = CheckPlan.primary; f.t = t; return (f, benchFor(f)) }
         r.benches = plan.benchSizes.map { var f = $0; f.t = 30; return (f, benchFor(f)) }
         return r
@@ -310,6 +319,10 @@ enum RuntimeTests {
             case .still: return RenderResponse(ok: true, ready: true, out: request.out, meanLuma: 25, clockLuma: 10)
             case .bench: return RenderResponse(ok: true, ready: true, benchMs: request.t == 12 ? 2.5 : 1.0)
             case .live: return RenderResponse(ok: true, ready: true, fps: 30, cpuPct: 9, cpuMW: 70, seconds: 10)
+            case .motion:
+                var r = RuntimeTests.aliveMotion(CheckFrame(Int(request.width ?? 1280), Int(request.height ?? 720), dpr: request.dpr ?? 0.5, t: 0))
+                r.out = request.out
+                return r
             default: return RenderResponse(ok: true, ready: true)
             }
         }
@@ -689,5 +702,385 @@ enum RuntimeTests {
         check(!navCheck.passed && navCheck.jsErrors.contains { $0.contains("tried to navigate to https://lpnav.invalid/leak") },
               "check fails a navigating scene: \(navCheck.problems)")
         if !failures.isEmpty { throw TestFailure(description: failures.joined(separator: "\n    ")) }
+    }
+}
+
+// MARK: - Motion (liveliness)
+
+extension RuntimeTests {
+    /// A synthetic scene: the colour of pixel (x, y) at time t (sRGB code values).
+    typealias SyntheticScene = (_ x: Int, _ y: Int, _ t: Double) -> (Double, Double, Double)
+
+    /// Renders `scene` the way the render server samples a real one (MotionAnalysis.offsets after
+    /// each moment) and returns the measurement.
+    static func measure(_ scene: SyntheticScene, width: Int = 320, height: Int = 180,
+                        times: [Double] = MotionAnalysis.defaultTimes, gaps: [Double] = MotionAnalysis.defaultGaps) -> MotionMeasurement {
+        let (cols, rows) = MotionAnalysis.grid(width: width, height: height)
+        func frame(_ t: Double) -> [UInt8] {
+            var px = [UInt8](repeating: 255, count: width * height * 4)
+            for y in 0..<height { for x in 0..<width {
+                let (r, g, b) = scene(x, y, t), i = (y * width + x) * 4
+                px[i] = UInt8(max(0, min(255, r.rounded()))); px[i + 1] = UInt8(max(0, min(255, g.rounded()))); px[i + 2] = UInt8(max(0, min(255, b.rounded())))
+            } }
+            return px
+        }
+        let samples = times.map { t -> MotionSample in
+            var frames: [Int: [UInt8]] = [:]
+            for o in MotionAnalysis.offsets(gaps: gaps) { frames[o] = frame(t + Double(o) / MotionAnalysis.frameRate) }
+            return MotionAnalysis.sample(t: t, gaps: gaps, frames: frames, width: width, height: height, cols: cols, rows: rows)
+        }
+        return MotionMeasurement(width: width, height: height, cols: cols, rows: rows, samples: samples)
+    }
+
+    /// The synthetic scenes of the motion tests (and their JavaScript twins in the e2e test).
+    enum Synthetic {
+        /// A dusk gradient with a fixed ridge line: nothing moves.
+        static let still: SyntheticScene = { x, y, _ in
+            let ridge = 120 + 14 * sin(Double(x) * 0.05)
+            return Double(y) > ridge ? (20, 26, 34) : (12 + Double(y) * 0.08, 16 + Double(y) * 0.12, 32 + Double(y) * 0.2)
+        }
+        /// The same, plus one small moon slowly circling in the top-left (Ringed Giant's problem).
+        static let oneSmallMover: SyntheticScene = { x, y, t in
+            let cx = 48 + 12 * cos(t * 0.35), cy = 34 + 8 * sin(t * 0.35)
+            let d = ((Double(x) - cx) * (Double(x) - cx) + (Double(y) - cy) * (Double(y) - cy)).squareRoot()
+            return d < 7 ? (210, 200, 180) : still(x, y, t)
+        }
+        /// Soft fog drifting across the whole frame at different speeds (gently alive everywhere).
+        static let everywhere: SyntheticScene = { x, y, t in
+            let fx = Double(x), fy = Double(y)
+            let fog = 0.5 + 0.25 * sin(fx * 0.045 - t * 0.5 + 1.3 * sin(fy * 0.05 + t * 0.21)) + 0.25 * sin(fy * 0.07 + t * 0.33 + fx * 0.012)
+            let (r, g, b) = still(x, y, t)
+            return (r + 26 * fog, g + 30 * fog, b + 34 * fog)
+        }
+        /// The whole frame flashes three times a second.
+        static let strobing: SyntheticScene = { x, y, t in
+            let (r, g, b) = still(x, y, t)
+            return Int((t * 6).rounded(.down)) % 2 == 0 ? (r + 70, g + 70, b + 70) : (r, g, b)
+        }
+        /// High-contrast stripes panning fast across the whole frame.
+        static let fastPan: SyntheticScene = { x, y, t in
+            let v = sin((Double(x) + Double(y) * 0.4 - t * 160) * 0.12) > 0 ? 90.0 : 20.0
+            return (v, v * 0.9, v * 1.1)
+        }
+    }
+
+    static func motionTileDiff() throws {
+        let w = 32, h = 18
+        let (cols, rows) = MotionAnalysis.grid(width: w, height: h)
+        try expect(cols == 16 && rows == 9, "16x9 for 16:9: \(cols)x\(rows)")
+        try expect(MotionAnalysis.grid(width: 512, height: 410) == (16, 13), "about square tiles for 5:4")
+        let a = [UInt8](repeating: 40, count: w * h * 4)
+        try expect(MotionAnalysis.tiles(a, a, width: w, height: h, cols: cols, rows: rows).level.allSatisfy { $0 == 0 }, "identical frames")
+        // Tile (0, 0) is 2×2 px: change all four by 12 in one channel, and one pixel of tile (1, 0) by 2 (noise).
+        var b = a
+        for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] { b[(y * w + x) * 4 + 2] = 52 }
+        b[(0 * w + 2) * 4] = 42
+        let d = MotionAnalysis.tiles(a, b, width: w, height: h, cols: cols, rows: rows)
+        try expectEqual(d.level[0], 10)      // 12 − noise floor 2
+        try expectEqual(d.area[0], 1)
+        try expectEqual(d.level[1], 0)       // within the noise floor
+        try expectEqual(d.area[1], 0)
+        try expect(d.level.dropFirst().allSatisfy { $0 == 0 }, "only the changed tile")
+        // A change of 5 on a quarter of a tile: counted in level, not as a visible pixel.
+        var c = a
+        c[(3 * w + 4) * 4 + 1] = 45
+        let e = MotionAnalysis.tiles(a, c, width: w, height: h, cols: cols, rows: rows)
+        try expectEqual(e.level[16 + 2], 0.75)
+        try expectEqual(e.area[16 + 2], 0)
+        // Offsets: the flicker burst plus every gap, ascending.
+        try expectEqual(MotionAnalysis.offsets(gaps: [0.5, 2, 5]), [0, 1, 3, 7, 15, 60, 150])
+        // Regions by tile centre: thirds of a 16x9 grid.
+        try expectEqual(MotionAnalysis.region(col: 0, row: 0, cols: 16, rows: 9), 0)
+        try expectEqual(MotionAnalysis.region(col: 8, row: 4, cols: 16, rows: 9), 4)
+        try expectEqual(MotionAnalysis.region(col: 15, row: 8, cols: 16, rows: 9), 8)
+    }
+
+    /// Static and one-small-mover scenes are too static, a strobing one flickers, a fast pan is busy,
+    /// and gentle motion everywhere passes without warnings.
+    static func motionSyntheticScenes() throws {
+        let b = MotionBudgets()
+        func judge(_ scene: @escaping SyntheticScene) -> (MotionSummary, [String], [String]) {
+            let s = MotionAnalysis.summarize(measure(scene), size: "320x180@1", budgets: b, heatmap: "/tmp/x/.check/motion-320x180@1.png")
+            let v = MotionAnalysis.verdict([s], budgets: b)
+            return (s, v.problems, v.warnings)
+        }
+        var (s, problems, warnings) = judge(Synthetic.still)
+        try expectEqual(s.coverage5s, 0)
+        try expectEqual(s.stillRegions.count, 9)
+        try expect(problems.count == 1 && problems[0].hasPrefix("Too static at 320x180@1: nothing in the frame changes within 5 s"), "\(problems)")
+        try expect(problems[0].contains("t = 3, 17, 41 and 120 s"), problems[0])
+
+        (s, problems, _) = judge(Synthetic.oneSmallMover)
+        try expect(s.coverage5s > 0 && s.coverage5s < b.minCoverage5s, "coverage \(s.coverage5s)")
+        try expectEqual(s.stillRegions, Array(MotionAnalysis.regionNames.dropFirst()))
+        try expect(s.map.prefix(3).allSatisfy { !$0.dropFirst(5).contains("#") } && s.map[1].contains("#") &&
+                   s.map.suffix(6).allSatisfy { !$0.contains("#") }, s.map.joined(separator: "\n"))
+        try expect(problems.count == 1 && problems[0].contains("almost all of it in the top-left — the other 8 of 9 regions"), "\(problems)")
+        try expect(problems[0].contains("drifting fog") && problems[0].contains("Make it feel alive") &&
+                   problems[0].hasSuffix("motion[].map in report.json and the heat map .check/motion-320x180@1.png."), problems[0])
+
+        (s, problems, warnings) = judge(Synthetic.everywhere)
+        try expect(problems.isEmpty && warnings.isEmpty, "\(problems) \(warnings)")
+        try expect(s.coverage5s > 0.9 && s.coverage2s > 0.5 && s.spread == 1 && s.busy == 0 && s.flicker == 0,
+                   "everywhere: \(s.coverage5s) \(s.coverage2s) \(s.spread) \(s.busy) \(s.flicker)")
+        try expect(s.map.allSatisfy { $0 == String(repeating: "#", count: 16) }, s.map.joined(separator: "\n"))
+
+        // A 3 Hz flash looks the same 2 s and 5 s later: "within 5 s" must still see it change.
+        (s, problems, _) = judge(Synthetic.strobing)
+        try expect(s.flicker > 0.9 && s.coverage5s == 1, "flicker \(s.flicker), coverage \(s.coverage5s)")
+        try expect(problems.contains { $0.hasPrefix("Flickers at 320x180@1 (t = ") && $0.contains("strobing") }, "\(problems)")
+        try expect(!problems.contains { $0.contains("Too static") }, "\(problems)")
+
+        (s, problems, _) = judge(Synthetic.fastPan)
+        try expect(s.busy > 0.9, "busy \(s.busy)")
+        try expect(problems.contains { $0.hasPrefix("Too busy at 320x180@1") }, "\(problems)")
+
+        for p in problems { try expect(p.count > 60 && p.hasSuffix("."), "actionable sentence: \(p)") }
+    }
+
+    /// A passing scene's motion, as the render server reports it, for `size` (gently alive everywhere).
+    static func aliveMotion(_ size: CheckFrame) -> RenderResponse {
+        motionResponse(size) { _, _ in 3 }
+    }
+
+    /// A motion response whose 5 s (and 2 s) change level per tile is `level(col, row)`.
+    static func motionResponse(_ size: CheckFrame, level: (Int, Int) -> Double) -> RenderResponse {
+        let pw = Int(Double(size.width) * size.dpr), ph = Int(Double(size.height) * size.dpr)
+        let (cols, rows) = MotionAnalysis.grid(width: pw, height: ph)
+        let long = (0..<rows).flatMap { r in (0..<cols).map { c in level(c, r) } }
+        let tiles = { (k: Double) in MotionTiles(level: long.map { $0 * k }, area: long.map { $0 > 0 ? 0.1 : 0 }) }
+        let samples = MotionAnalysis.defaultTimes.map {
+            MotionSample(t: $0, gaps: [MotionGap(gap: 0.5, tiles: tiles(0.1)), MotionGap(gap: 2, tiles: tiles(0.5)), MotionGap(gap: 5, tiles: tiles(1))],
+                         flicker: tiles(0.05))
+        }
+        return RenderResponse(ok: true, ready: true, motion: MotionMeasurement(width: pw, height: ph, cols: cols, rows: rows, samples: samples))
+    }
+
+    static func motionCheckVerdicts() throws {
+        let plan = CheckPlan.standard(power: false)
+        try expectEqual(plan.motionSizes.map(\.sizeLabel), ["1280x720@0.5", "1024x820@0.5"])
+        try expectEqual(CheckPlan.quick(power: false).motionSizes.map(\.sizeLabel), ["1280x720@0.5"])
+        // Only the top-left corner moves, at both sizes: one grouped problem naming both.
+        let corner = results(plan, motion: { f in
+            var r = motionResponse(f) { c, row in c < 3 && row < 2 ? 4 : 0 }
+            r.out = "/tmp/pkg/.check/" + SceneChecker.motionFileName(f)
+            return r
+        })
+        var report = SceneChecker.evaluate(corner, plan: plan, budgets: CheckBudgets(), quick: false)
+        try expect(!report.passed, "fails")
+        let stat = report.problems.filter { $0.contains("Too static") }
+        try expectEqual(stat.count, 1)
+        try expect(stat[0].contains("top-left") && stat[0].contains("(also at ") && stat[0].contains(".check/motion-"), stat[0])
+        try expectEqual(report.motion?.map(\.size), ["1280x720@0.5", "1024x820@0.5"])
+        try expectEqual(report.motion?.first?.heatmap, "/tmp/pkg/.check/motion-1280x720@0.5.png")
+        try expectEqual(report.motion?.first?.map.first, "###.............")
+        // report.json carries the numbers.
+        let json = String(decoding: try SceneChecker.reportEncoder().encode(report), as: UTF8.self)
+        try expect(json.contains("\"coverage5s\"") && json.contains("\"stillRegions\"") && json.contains("\"map\""), json)
+        let decoded = try SceneManifest.decoder().decode(CheckReport.self, from: Data(json.utf8))
+        try expectEqual(decoded.motion, report.motion)
+        try expectEqual(try SceneManifest.decoder().decode(CheckReport.self, from: Data(#"{"passed":true,"problems":[],"warnings":[],"jsErrors":[],"stills":[],"benchMs":{},"checkedAt":"2026-11-15T00:00:00Z"}"#.utf8)).motion, nil)
+
+        // Alive everywhere: passes, no motion warnings.
+        report = SceneChecker.evaluate(results(plan), plan: plan, budgets: CheckBudgets(), quick: false)
+        try expect(report.passed && report.warnings.isEmpty, "\(report.problems) \(report.warnings)")
+        // Subtle (passes, with advice): 30 % of the frame moves, in every region.
+        report = SceneChecker.evaluate(results(plan, motion: { f in motionResponse(f) { c, r in (c + r) % 3 == 0 ? 2 : 0 } }), plan: plan,
+                                       budgets: CheckBudgets(), quick: false)
+        try expect(report.passed, "\(report.problems)")
+        try expect(report.warnings.contains { $0.hasPrefix("Motion is on the subtle side at ") }, "\(report.warnings)")
+
+        // An older render server can't decode the request: a warning, not a failure.
+        let old = RenderResponse(ok: false, note: "bad request: The data couldn’t be read because it isn’t in the correct format.")
+        report = SceneChecker.evaluate(results(plan, motion: { _ in old }), plan: plan, budgets: CheckBudgets(), quick: false)
+        try expect(report.passed && report.warnings.contains { $0.hasPrefix("Motion was not measured") }, "\(report.problems) \(report.warnings)")
+        try expectEqual(report.motion, [])
+        // A motion render that fails is a problem like any other render failure.
+        let timeout = RenderResponse(ok: false, ready: true, note: "timed out taking a snapshot")
+        report = SceneChecker.evaluate(results(plan, motion: { _ in timeout }), plan: plan, budgets: CheckBudgets(), quick: false)
+        try expect(report.problems.contains { $0.contains("motion measurement failed") && $0.contains("1280x720@0.5") }, "\(report.problems)")
+        // JS errors seen while measuring motion are reported too.
+        var withError = aliveMotion(CheckPlan.motionWide)
+        withError.errors = ["draw: ReferenceError: fog is not defined (scene.js:9:3)"]
+        report = SceneChecker.evaluate(results(plan, motion: { _ in withError }), plan: plan, budgets: CheckBudgets(), quick: false)
+        try expectEqual(report.jsErrors, ["draw: ReferenceError: fog is not defined (scene.js:9:3)"])
+
+        // The checker asks for the heat map in .check and the standard sampling.
+        let fake = FakeRender()
+        let pkg = try package("motionreq", js: minimalScene)
+        defer { try? FileManager.default.removeItem(at: pkg.deletingLastPathComponent()) }
+        report = try blocking { try await SceneChecker(compiler: SceneCompiler(), render: fake).check(package: pkg, options: CheckOptions(quick: true)) }
+        let reqs = fake.requests.filter { $0.op == .motion }
+        try expectEqual(reqs.count, 1)
+        try expectEqual(reqs.first?.out, pkg.appendingPathComponent(".check/motion-1280x720@0.5.png").path)
+        try expectEqual(reqs.first?.times, MotionAnalysis.defaultTimes)
+        try expectEqual(reqs.first?.gaps, MotionAnalysis.defaultGaps)
+        try expectEqual(reqs.first?.grid, [16, 9])
+        try expectEqual(reqs.first?.dpr, 0.5)
+        try expectEqual(report.motion?.count, 1)
+    }
+
+    // MARK: Motion end to end (opt-in: uses the render server)
+
+    /// JavaScript twins of `Synthetic`, rendered by the real server.
+    static let motionScenes: [(name: String, js: String)] = {
+        let ground = """
+          const c = lp.ctx, g = c.createLinearGradient(0, 0, 0, lp.h);
+          g.addColorStop(0, '#08101e'); g.addColorStop(1, '#1c2c44');
+          c.fillStyle = g; c.fillRect(0, 0, lp.w, lp.h);
+          c.fillStyle = '#26384e'; c.beginPath(); c.moveTo(0, lp.h);
+          for (let i = 0; i <= 16; i++) c.lineTo(lp.w * i / 16, lp.h * (0.7 + 0.06 * Math.sin(i * 1.7)));
+          c.lineTo(lp.w, lp.h); c.fill();
+        """
+        return [
+            ("still", "LivePaper.scene({ draw(lp) {\n\(ground)\n} });\n"),
+            ("one-small-mover", """
+            LivePaper.scene({ draw(lp) {
+            \(ground)
+              const x = lp.w * 0.14 + Math.cos(lp.t * 0.3) * lp.min * 0.05, y = lp.h * 0.16 + Math.sin(lp.t * 0.3) * lp.min * 0.03;
+              c.fillStyle = '#e8e0c8'; c.beginPath(); c.arc(x, y, lp.min * 0.035, 0, Math.PI * 2); c.fill();
+            } });
+            """),
+            ("everywhere", """
+            const blobs = [];
+            LivePaper.scene({
+              setup(lp) { const r = LivePaper.util.mulberry32(5); for (let i = 0; i < 14; i++) blobs.push([r(), r(), 0.6 + r(), r() * 6.28]); },
+              draw(lp) {
+            \(ground)
+                c.globalCompositeOperation = 'lighter';
+                for (const [bx, by, s, ph] of blobs) {
+                  const x = ((bx * 1.4 * lp.w + lp.t * 9 * s) % (1.4 * lp.w)) - 0.2 * lp.w;
+                  const y = by * lp.h + Math.sin(lp.t * 0.2 + ph) * lp.h * 0.05, r = lp.max * 0.22;
+                  LivePaper.util.glow(c, x, y, r, '#5a7fa8', 0.22);
+                }
+                c.globalCompositeOperation = 'source-over';
+              }
+            });
+            """),
+            ("strobing", """
+            LivePaper.scene({ draw(lp) {
+            \(ground)
+              if (Math.floor(lp.t * 6) % 2 === 0) { c.fillStyle = 'rgba(255,255,255,0.3)'; c.fillRect(0, 0, lp.w, lp.h); }
+            } });
+            """),
+            ("fast-pan", """
+            LivePaper.scene({ draw(lp) {
+              const c = lp.ctx; c.fillStyle = '#141820'; c.fillRect(0, 0, lp.w, lp.h); c.fillStyle = '#5a6478';
+              const off = (lp.t * 320) % 60;
+              for (let x = -60; x < lp.w + 60; x += 60) c.fillRect(x + off, 0, 30, lp.h);
+            } });
+            """),
+        ]
+    }()
+
+    /// The server end of the e2e motion tests (the one LIVEPAPER_HOME serves, or a fresh one).
+    static func withE2EServer(_ name: String, _ body: (RenderClient) throws -> Void) throws {
+        let env = ProcessInfo.processInfo.environment
+        let ownHome = env["LIVEPAPER_HOME"]?.isEmpty ?? true
+        let home = ownHome ? URL(fileURLWithPath: "/tmp/lp-st-\(getpid())-\(name)") : LPPaths.supportRoot
+        let client = RenderClient(socket: home.appendingPathComponent("render.sock"))
+        defer {
+            if ownHome {
+                _ = try? client.sendBlocking(RenderRequest(op: .shutdown), timeout: 10)
+                try? FileManager.default.removeItem(at: home)
+            }
+        }
+        try body(client)
+    }
+
+    /// Sends one motion request for a compiled package and summarises it with the check's budgets.
+    static func measureMotion(_ client: RenderClient, package pkg: URL, size: CheckFrame) throws -> (RenderResponse, MotionSummary?) {
+        let html = pkg.appendingPathComponent(".check/scene.html")
+        try SceneCompiler().compile(package: pkg, to: html)
+        let pw = Int(Double(size.width) * size.dpr), ph = Int(Double(size.height) * size.dpr)
+        let grid = MotionAnalysis.grid(width: pw, height: ph)
+        let req = RenderRequest(op: .motion, html: html.path, width: Double(size.width), height: Double(size.height), dpr: size.dpr,
+                                out: pkg.appendingPathComponent(".check/" + SceneChecker.motionFileName(size)).path, clock: true,
+                                times: MotionAnalysis.defaultTimes, gaps: MotionAnalysis.defaultGaps, grid: [grid.cols, grid.rows])
+        let r = try client.sendBlocking(req, timeout: RenderClient.defaultTimeout(for: req))
+        return (r, r.motion.map { MotionAnalysis.summarize($0, size: size.sizeLabel, budgets: CheckBudgets().motion, heatmap: r.out) })
+    }
+
+    static func describe(_ s: MotionSummary) -> String {
+        let p = MotionAnalysis.percent
+        return "\(s.size): 5 s \(p(s.coverage5s)), 2 s \(p(s.coverage2s)), regions \(s.movingRegions)/9, busy \(p(s.busy)), flicker \(p(s.flicker))"
+    }
+
+    static func endToEndMotion() throws {
+        guard ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_E2E"] == "1" else {
+            print("  (skipped: set LIVEPAPER_SELFTEST_E2E=1 to run it; it uses or starts one LivePaperRenderd)")
+            return
+        }
+        try withE2EServer("motion") { client in
+            var failures: [String] = []
+            let b = CheckBudgets().motion
+            for (name, js) in motionScenes {
+                let pkg = try package("motion-\(name)", js: js)
+                defer { try? FileManager.default.removeItem(at: pkg.deletingLastPathComponent()) }
+                let started = Date()
+                let (r, summary) = try measureMotion(client, package: pkg, size: CheckPlan.motionWide)
+                guard r.ok, r.errors.isEmpty, let s = summary else { failures.append("\(name): ok=\(r.ok) note=\(r.note ?? "-") errors=\(r.errors)"); continue }
+                let v = MotionAnalysis.verdict([s], budgets: b)
+                print("  \(name): \(describe(s)) in \(String(format: "%.1f", Date().timeIntervalSince(started))) s → " +
+                      (v.problems.isEmpty ? "passes" : v.problems.map { String($0.prefix(40)) }.joined(separator: " | ")))
+                let png = (try? Data(contentsOf: URL(fileURLWithPath: r.out ?? "/nonexistent"))) ?? Data()
+                if !png.starts(with: [0x89, 0x50, 0x4E, 0x47]) { failures.append("\(name): no heat map PNG at \(r.out ?? "-")") }
+                let expected: (String) -> Bool
+                switch name {
+                case "still", "one-small-mover": expected = { $0.hasPrefix("Too static") }
+                case "strobing": expected = { $0.hasPrefix("Flickers") }
+                case "fast-pan": expected = { $0.hasPrefix("Too busy") }
+                default: expected = { _ in false }
+                }
+                if name == "everywhere" {
+                    if !v.problems.isEmpty { failures.append("everywhere should pass: \(v.problems)") }
+                } else if !v.problems.contains(where: expected) {
+                    failures.append("\(name): expected its problem, got \(v.problems)")
+                }
+            }
+            if !failures.isEmpty { throw TestFailure(description: failures.joined(separator: "\n    ")) }
+        }
+    }
+
+    /// Prints the motion numbers of every built-in scene (calibration; asserts only that they render).
+    static func endToEndMotionBuiltins() throws {
+        let env = ProcessInfo.processInfo.environment
+        guard env["LIVEPAPER_SELFTEST_E2E"] == "1" else {
+            print("  (skipped: set LIVEPAPER_SELFTEST_E2E=1 to run it; it uses or starts one LivePaperRenderd)")
+            return
+        }
+        let dump = env["LIVEPAPER_MOTION_DUMP"].map { URL(fileURLWithPath: $0) }
+        if let dump { try FileManager.default.createDirectory(at: dump, withIntermediateDirectories: true) }
+        try withE2EServer("motion-builtins") { client in
+            var failures: [String] = []
+            let fm = FileManager.default
+            let repo = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            let scenes = try fm.contentsOfDirectory(at: repo.appendingPathComponent("Scenes"), includingPropertiesForKeys: nil)
+                .filter { $0.pathExtension == "lpscene" }.sorted { $0.path < $1.path }
+            for source in scenes {
+                let tmp = try tempDir("motion-builtin")
+                defer { if dump == nil { try? fm.removeItem(at: tmp) } }
+                let pkg = tmp.appendingPathComponent(source.lastPathComponent)
+                try fm.copyItem(at: source, to: pkg)
+                var summaries: [MotionSummary] = []
+                for size in CheckPlan.standard(power: false).motionSizes {
+                    let started = Date()
+                    let (r, s) = try measureMotion(client, package: pkg, size: size)
+                    guard r.ok, let s else { failures.append("\(source.lastPathComponent) \(size.sizeLabel): \(r.note ?? "-")"); continue }
+                    summaries.append(s)
+                    print("  \(pkg.deletingPathExtension().lastPathComponent) \(describe(s)) (\(String(format: "%.1f", Date().timeIntervalSince(started))) s)")
+                    for row in s.map { print("      " + row) }
+                    if let dump, let m = r.motion {
+                        let name = "\(pkg.deletingPathExtension().lastPathComponent)-\(size.sizeLabel)"
+                        try JSONEncoder().encode(m).write(to: dump.appendingPathComponent(name + ".json"))
+                        if let out = r.out { try? fm.removeItem(at: dump.appendingPathComponent(name + ".png")); try? fm.copyItem(atPath: out, toPath: dump.appendingPathComponent(name + ".png").path) }
+                    }
+                }
+                let v = MotionAnalysis.verdict(summaries, budgets: CheckBudgets().motion)
+                print("    → " + (v.problems.isEmpty ? "passes" : v.problems.map { String($0.prefix(60)) + "…" }.joined(separator: " | ")) +
+                      (v.warnings.isEmpty ? "" : " (warnings: \(v.warnings.map { String($0.prefix(50)) + "…" }.joined(separator: " | ")))"))
+            }
+            if !failures.isEmpty { throw TestFailure(description: failures.joined(separator: "\n    ")) }
+        }
     }
 }

@@ -4,14 +4,14 @@
     "position" : "top"
   },
   "created" : "2026-11-15T02:37:13Z",
-  "description" : "Bells, fringed discs, frilly-armed drifters and shimmering comb jellies pulse, glow and slowly rise or sink on minutes-long journeys at every depth of the deep night ocean, trailing lagging tentacles through marine snow, faint moonlight shafts and passing waves of plankton light.",
+  "description" : "Bells, fringed discs, frilly-armed drifters and shimmering comb jellies pulse, glow and slowly rise or sink on minutes-long journeys at every depth of the deep night ocean, trailing lagging tentacles through three depths of drifting marine snow, swaying moonlight shafts under a faint rippling net of surface light, slow plankton-glow haze, softly flaring bioluminescent sparks and passing waves of plankton light.",
   "id" : "abyssal-lanterns",
   "kind" : "web",
   "name" : "Abyssal Lanterns",
   "performance" : {
-    "benchMs" : 2.4670000000000001,
-    "checkedAt" : "2026-11-15T02:55:01Z",
-    "energyMw" : 135
+    "benchMs" : 1.6080000000000001,
+    "checkedAt" : "2026-11-15T17:25:00Z",
+    "energyMw" : 90
   },
   "runtime" : 1,
   "schema" : 1,
@@ -22,5 +22,5 @@
     "night",
     "calm"
   ],
-  "updated" : "2026-11-15T02:53:01Z"
+  "updated" : "2026-11-15T17:23:54Z"
 }

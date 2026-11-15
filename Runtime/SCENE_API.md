@@ -13,14 +13,15 @@ Exact types: `livepaper.d.ts`. A complete example: `templates/web/`.
 4. [The frame object `lp`](#4-the-frame-object-lp)
 5. [Time and determinism](#5-time-and-determinism)
 6. [Long-run rules](#6-long-run-rules)
-7. [The clock](#7-the-clock)
-8. [Performance in WebKit](#8-performance-in-webkit)
-9. [Utilities](#9-utilities-livepaperutil)
-10. [Assets](#10-assets)
-11. [WebGL scenes](#11-webgl-scenes)
-12. [Rules](#12-rules)
-13. [Checking a scene](#13-checking-a-scene-livepaper-check)
-14. [Host bridge (for host developers)](#14-host-bridge-for-host-developers)
+7. [Make it feel alive](#7-make-it-feel-alive)
+8. [The clock](#8-the-clock)
+9. [Performance in WebKit](#9-performance-in-webkit)
+10. [Utilities](#10-utilities-livepaperutil)
+11. [Assets](#11-assets)
+12. [WebGL scenes](#12-webgl-scenes)
+13. [Rules](#13-rules)
+14. [Checking a scene](#14-checking-a-scene-livepaper-check)
+15. [Host bridge (for host developers)](#15-host-bridge-for-host-developers)
 
 ## 1. Quick start
 
@@ -31,7 +32,7 @@ Exact types: `livepaper.d.ts`. A complete example: `templates/web/`.
   "schema": 1,
   "id": "night-drift",
   "name": "Night Drift",
-  "description": "Slow stars over a dark gradient.",
+  "description": "Slow stars and drifting haze over a dark gradient.",
   "kind": "web",
   "runtime": 1,
   "clock": { "position": "top" },
@@ -58,11 +59,17 @@ LivePaper.scene({
   draw(lp) {                         // composite a few images per frame
     lp.ctx.drawImage(sky.canvas, 0, 0, lp.w, lp.h);
     stars.draw(lp.ctx, lp, { dx: -lp.t * 2, fraction: lp.quality });
+    for (let i = 0; i < 7; i++) {    // soft haze drifting across the whole sky, each band at its own speed
+      const span = lp.w + lp.min, x = (i * 0.37 * span + lp.t * (8 + 3 * i)) % span - lp.min / 2;
+      U.glow(lp.ctx, x, lp.h * (i + 0.5) / 7, lp.min * 0.35, '#4a6fa8', 0.3);
+    }
   }
 });
 ```
 
 Then run `livepaper check <scene-dir>` and look at the PNGs it writes to `<scene-dir>/.check/`.
+(Without the haze, only scattered stars would move and the check would call the scene too static:
+see §7.)
 
 ## 2. The scene package
 
@@ -72,7 +79,7 @@ A scene is a directory (`<id>.lpscene` in the library):
 |---|---|
 | `scene.json` | Manifest. `id` is kebab-case (`a-z`, `0-9`, inner `-`, ≤ 64 chars). `clock.position` is `top`, `bottom-left`, `bottom-right` or `none`. `performance` is written by `livepaper check`; don't edit it. |
 | `scene.js` | All the code. A classic script (not an ES module): no `import`/`export`, no other files are loaded. |
-| `assets/` | Optional small images, fonts, JSON or shader sources, inlined at compile time (§10). |
+| `assets/` | Optional small images, fonts, JSON or shader sources, inlined at compile time (§11). |
 | `.check/` | Output of the last `livepaper check` (report + PNGs). Not published. |
 
 LivePaper compiles the package into **one self-contained HTML file** (runtime + `scene.js` + assets
@@ -124,7 +131,7 @@ One object, updated in place and passed to every callback.
 | `rand()` | Seeded PRNG in [0, 1). Same sequence every run. |
 | `quality` | 0.5–1. Lowered by the governor when frames run over budget: draw less when < 1. |
 | `clockRect` | `{x, y, w, h}` of the runtime clock in CSS px, or `null` when the runtime draws none. |
-| `clockVisible`, `clockAlpha` | Whether any clock should show now, and its eased 0–1 opacity (§7). |
+| `clockVisible`, `clockAlpha` | Whether any clock should show now, and its eased 0–1 opacity (§8). |
 | `env` | `{power: 'ac'\|'battery', lowPower, reducedMotion, preview}`. |
 | `cfg` | The effective runtime configuration (read-only). |
 | `util` | Same as `LivePaper.util`. |
@@ -167,7 +174,133 @@ The screen saver runs for hours. Things that are fine in a 30-second demo break 
 * **Calm by default.** Lock screens are seen in the dark and at a glance: no strobing, no flashes,
   no fast full-screen motion.
 
-## 7. The clock
+## 7. Make it feel alive
+
+A LivePaper scene is a **live wallpaper**, in the spirit of Apple's: glance at the lock screen and
+the whole picture is quietly alive — mist drifting, leaves stirring, water shimmering, the view
+itself slowly breathing — yet nothing asks for attention. A still picture with one thing moving (a
+sun on a slow arc, a single moon) reads as a static image. `livepaper check` measures this (§14)
+and fails scenes that are too static, too busy or that flicker.
+
+**Principles**
+
+1. **Every region, all the time.** Think of the frame as thirds × thirds: each of the nine regions
+   should have something gently moving at every moment, so that wherever you look you see change
+   within 1–2 s. Motion is the ambient state of the scene, not one hero element.
+2. **Layers at different speeds.** Depth reads as parallax: far layers (sky, nebula, distant hills)
+   drift slowest, middle layers faster, near layers (foreground mist, foliage, water) fastest.
+   As a guide, on a 1512-px-wide screen: far 1–3 CSS px/s, middle 3–8, near 8–20 (scale with `lp.w`).
+3. **Atmosphere moves.** Fog, mist, haze, clouds, smoke, aurora curtains and light shafts drift,
+   thin and thicken. Two to four large, soft, low-alpha layers moving in slightly different
+   directions are the cheapest way to bring every region to life.
+4. **Nature moves.** Foliage and grass sway (a sine of `lp.t` with a per-element phase, amplitude of
+   a few px); water shimmers and ripples (reflections offset by noise, glints that come and go);
+   flames and lanterns flicker *softly* (smooth noise, never random per frame); particles drift
+   (dust, pollen, snow, embers, plankton, rain, fireflies).
+5. **A slow camera.** A gentle drift or zoom of the whole composition — a few % over 1–2 minutes,
+   looping with sin/cos — moves every textured edge in the frame for one `drawImage`. (Smooth
+   gradients don't visibly change when shifted: the layers on top must carry the motion.)
+6. **Calm.** Nothing large moves fast: no element crosses the screen in less than ~20 s, no
+   whole-frame brightness or colour change faster than a couple of seconds, no flashes or
+   strobing, no per-frame random values. Behind the clock keep motion dark and low-contrast.
+7. **Occasional moments.** On top of the ambient motion, rare events reward a longer look: a shooting
+   star every ~40 s, a fish rising, a gust through the grass, a bird crossing, a distant light
+   passing. Ease them in and out over a second or more and derive them from `lp.t`
+   (`const k = Math.floor(lp.t / 37), p = (lp.t % 37) / 37;` plus `util.hash2(k, 1)` to vary them).
+8. **Seamless loops.** Scroll layers with `(lp.t * speed) % width` and draw them twice (tiled);
+   sway and camera moves with sin/cos; mix long, unrelated periods (47 s, 73 s, 131 s) so the
+   combination never visibly repeats. Nothing may jump when a period wraps.
+
+**Doing it cheaply** (the frame budget and battery still apply, §9):
+
+* Paint each layer once in `resize()` into `util.layer()` canvases — oversized by a few % for a
+  camera drift, or two screens wide for a scrolling band — and per frame just `drawImage` them at
+  an offset or scale. A handful of full-screen `drawImage` calls costs almost nothing.
+* Particles: one cached `util.glow` sprite per particle (a few hundred are fine), positions as pure
+  functions of `lp.t` (`x = (x0 + lp.t * vx) % lp.w`), fewer when `lp.quality < 1`.
+* Sway: rotate or skew a few pre-rendered strips or sprites with `ctx.setTransform`, not every blade.
+* Water: draw the reflection layer in 20–40 horizontal strips, each offset by
+  `util.noise1(y * k + lp.t * s)`.
+* WebGL: two or three octaves of value noise / fbm for fog, water and light, animated by moving
+  (and slowly warping) the noise coordinates with `lp.t`; render at reduced resolution if heavy.
+* Avoid per-pixel JavaScript loops, `getImageData`, `shadowBlur`/`ctx.filter` and re-painting
+  static layers every frame.
+
+The pattern, complete (a night valley: static scenery with a slow camera drift, two mist bands at
+different speeds, motes everywhere — 0.3 ms per frame; within 5 s about 60 % of the frame changes,
+in all nine regions):
+
+```js
+const U = LivePaper.util;
+const R = U.mulberry32(11);
+const MOTES = Array.from({ length: 140 }, () => [R(), R(), 0.5 + R(), R() * U.TAU]);   // x0, y0, speed, phase
+let scenery, mist;
+
+LivePaper.scene({
+  resize(lp) {
+    // Everything static, painted once and a little oversized so the camera can drift.
+    scenery = U.layer(lp.w * 1.08, lp.h * 1.08, lp.dpr);
+    const s = scenery.ctx, g = s.createLinearGradient(0, 0, 0, scenery.h);
+    g.addColorStop(0, '#060b18'); g.addColorStop(0.6, '#142238'); g.addColorStop(1, '#1d2b3c');
+    s.fillStyle = g; s.fillRect(0, 0, scenery.w, scenery.h);
+    for (const [base, amp, color] of [[0.62, 0.06, '#1a2536'], [0.74, 0.05, '#121b28'], [0.86, 0.04, '#0b121c']]) {
+      s.fillStyle = color; s.beginPath(); s.moveTo(0, scenery.h);
+      for (let x = 0; x <= scenery.w; x += 8) s.lineTo(x, scenery.h * (base - amp * U.fbm2(x * 0.004, base * 9, 3)));
+      s.lineTo(scenery.w, scenery.h); s.fill();
+    }
+    // One soft mist band, two screens wide, seamless at its ends, tiled while it scrolls.
+    mist = U.layer(lp.w * 2, lp.h * 0.35, lp.dpr);
+    for (let i = 0; i < 40; i++) {
+      const x = (i / 40) * mist.w, y = mist.h * (0.3 + 0.4 * U.noise1(i * 0.7));
+      for (const dx of [0, mist.w, -mist.w]) U.glow(mist.ctx, x + dx, y, lp.h * 0.12, '#8fa6c4', 0.18);
+    }
+  },
+  draw(lp) {
+    const c = lp.ctx, t = lp.t;
+    // Slow camera drift (±3 % over ~1.5 min): the whole picture is alive for one drawImage.
+    const dx = (Math.sin(t * U.TAU / 97) - 1) * lp.w * 0.03, dy = (Math.sin(t * U.TAU / 71) - 1) * lp.h * 0.03;
+    c.drawImage(scenery.canvas, dx, dy, scenery.w, scenery.h);
+    // Two mist layers at different heights and speeds (parallax).
+    for (const [y, speed, alpha] of [[0.42, 5, 0.8], [0.66, 12, 0.6]]) {
+      const x = -((t * speed) % mist.w);
+      c.globalAlpha = alpha;
+      c.drawImage(mist.canvas, x, lp.h * y, mist.w, mist.h);
+      c.drawImage(mist.canvas, x + mist.w, lp.h * y, mist.w, mist.h);
+    }
+    c.globalAlpha = 1;
+    // Motes everywhere, as pure functions of t; fewer when the governor lowers lp.quality.
+    const n = Math.floor(MOTES.length * lp.quality);
+    for (let i = 0; i < n; i++) {
+      const [x0, y0, s, ph] = MOTES[i];
+      const x = (x0 * lp.w + t * 6 * s) % lp.w, y = y0 * lp.h + Math.sin(t * 0.4 + ph) * 10;
+      U.glow(c, x, y, 3 + 2 * s, '#cfe0ff', 0.35 + 0.25 * Math.sin(t * 0.7 + ph));
+    }
+  }
+});
+```
+
+**How the check measures it.** It lays the scene out at 1280×720 and 1024×820 (analysed at 640×360
+and 512×410 px), renders it at t = 3, 17, 41 and 120 s, and compares each of those frames with the
+frames 1, 3, 7 and 15 frames (1/30 s each), 0.5 s, 2 s and 5 s later, tile by tile (16 tiles
+across). A tile *moves* when it visibly changes: ignoring differences of up to 2/255 (dithering),
+its pixels change by at least 0.5/255 on average, or at least 3 % of them by 8/255 or more. A very
+faint haze or a single tiny dot crossing a big empty tile barely registers — make motion visible.
+
+| Measure | Fails when | Aim |
+|---|---|---|
+| Coverage: share of the frame that moves within 5 s | < 25 % | ≥ 50 % |
+| Coverage within 2 s | | ≥ 25 % |
+| Regions (thirds × thirds) with motion | fewer than 5 of 9 | all 9 |
+| Busy: share of the frame changing strongly within 0.5 s | > 50 % | close to 0 |
+| Flicker: share of the frame jumping between successive frames | > 30 % | close to 0 |
+
+`report.json` has them under `motion` (one entry per size): `coverage5s`, `coverage2s`, `spread`
+(regions with motion / 9), `stillRegions`, `busy`, `flicker`, `map` — one string per tile row, top
+first: `#` moves at most sampled moments, `+` at some, `.` never — and `heatmap`, a picture of the
+frame with moving tiles tinted (amber: most of the time, blue: sometimes, grey: still; red outline:
+flicker), also as `.check/previews/motion-<size>.jpg`.
+
+## 8. The clock
 
 LivePaper draws an Apple-style lock-screen clock (date above a large time, SF font) over the scene.
 `scene.json` `"clock": {"position": …}` chooses where:
@@ -211,7 +344,7 @@ LivePaper.scene({
 });
 ```
 
-## 8. Performance in WebKit
+## 9. Performance in WebKit
 
 Budgets (enforced by `livepaper check`): **≤ 4 ms per frame at 1512×982 @2x** (a MacBook Pro
 screen) and ≤ 6 ms at 5120×1440 @1x, measured at the heaviest sampled moment; with `--power`,
@@ -241,7 +374,7 @@ frame on 120 Hz displays), render scale per performance profile, a governor that
 down (×0.85 per step, floor 0.6) when update+draw stays over budget for ~2 s and back up when there
 is headroom, and pausing when the display sleeps or the page is hidden.
 
-## 9. Utilities (`LivePaper.util`)
+## 10. Utilities (`LivePaper.util`)
 
 | | |
 |---|---|
@@ -255,9 +388,9 @@ is headroom, and pausing when the display sleeps or the page is hidden.
 | `glowSprite(color, size?, falloff?)`, `glow(ctx, x, y, r, color, alpha, falloff?)` | Cached soft glows (additive). |
 | `makeStars({count, seed, tint, twinkle, glow})` | Parallax starfield; `.draw(ctx, lp, {x, y, w, h, dx, dy, brightness, fraction, size})`. |
 
-Also on `LivePaper`: `clockParts(date?)` (§7), `asset(name)`, `image(name)`, `text(name)` (§10).
+Also on `LivePaper`: `clockParts(date?)` (§8), `asset(name)`, `image(name)`, `text(name)` (§11).
 
-## 10. Assets
+## 11. Assets
 
 Put small files in `assets/` (subfolders allowed). They are inlined into the compiled HTML as
 `data:` URLs, so they work offline and inside the sandboxed screen saver.
@@ -273,7 +406,7 @@ vert, frag, bin. Limits: 4 MB per file, 8 MB in total — and every byte is load
 starts, so prefer drawing procedurally. Text assets (SVG, JSON, shaders) must not reference external
 URLs either.
 
-## 11. WebGL scenes
+## 12. WebGL scenes
 
 ```js
 LivePaper.scene({
@@ -293,7 +426,7 @@ LivePaper.scene({
 * Handle `webglcontextlost` if you allocate GPU resources lazily (rare; the scene is reloaded on
   failures anyway).
 
-## 12. Rules
+## 13. Rules
 
 * **Offline only.** No `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `import()`, beacons
   or external URLs; the compiler rejects them and the page's security policy blocks them anyway.
@@ -306,7 +439,7 @@ LivePaper.scene({
 * **Don't touch the page around you.** No DOM elements, CSS or event listeners of your own: the
   runtime owns the page (and there is no input — the screen saver never receives clicks or keys).
 
-## 13. Checking a scene: `livepaper check`
+## 14. Checking a scene: `livepaper check`
 
 ```
 livepaper check <scene-dir> [--quick] [--power] [--json]
@@ -315,20 +448,23 @@ livepaper check <scene-dir> [--quick] [--power] [--json]
 It compiles the scene, renders stills at 1512×982 @2x (t = 0, 4, 12, 30, 90, 240, 600 s), 2560×720
 (32:9), 1280×1024 (5:4) and 320×200 @2x, collects JavaScript errors, benchmarks the heaviest moment
 at 1512×982 @2x and 5120×1440, measures brightness (whole frame, and behind the clock with the
-clock hidden), optionally measures live CPU energy (`--power`), and writes:
+clock hidden), measures how alive the scene is (motion coverage, spread, busyness and flicker at
+16:9 and 5:4, §7), optionally measures live CPU energy (`--power`), and writes:
 
 * `<scene-dir>/.check/report.json` — `passed`, `problems` (each an actionable sentence; all must be
   fixed), `warnings` (advice), `jsErrors`, `stills` (path, size, t, `meanLuma`, `clockLuma`),
   `benchMs` (`"1512x982@2 t=30": 1.4`; entries ending in ` probe` are short runs that only locate the
-  heaviest moment), `energyMw`.
+  heaviest moment), `energyMw`, `motion` (§7: `coverage5s`, `coverage2s`, `spread`, `regions`,
+  `stillRegions`, `busy`, `flicker`, `map`, `heatmap` per size).
+* `<scene-dir>/.check/motion-<W>x<H>@<dpr>.png` — the motion heat maps (also in `previews/` as JPEGs).
 * `<scene-dir>/.check/<W>x<H>@<dpr>-t<T>.png` — the stills. Look at them: they are what users see.
   `<scene-dir>/.check/previews/<W>x<H>@<dpr>-t<T>.jpg` are the same stills as small JPEGs (at most
   1280 px wide), for image viewers and AI tools that can't take multi-megabyte images.
 * On success, `performance` in `scene.json`.
 
 Exit status: 0 passed · 1 the scene has problems · 2 usage error · 3 LivePaper itself could not
-render (render server unavailable). `--quick` renders fewer stills and skips the ultra-wide bench —
-for fast iteration; finish with a full check.
+render (render server unavailable). `--quick` renders fewer stills, measures motion at 16:9 only
+and skips the ultra-wide bench — for fast iteration; finish with a full check.
 
 Other commands: `livepaper still <dir> --t 8 --size 1512x982 --dpr 2 --out x.png`, `livepaper bench
 <dir> --t 30`, `livepaper live <dir>` (fps, CPU %, mW), `livepaper compile <dir>`, `livepaper
@@ -336,9 +472,11 @@ thumbnail <dir> [--t 8]` (the 640×400 library thumbnail, `thumbnail.jpg`; the a
 your own scenes, built-in scenes ship theirs).
 
 Thresholds: frame brightness ≤ 165/255 on average; behind the clock ≤ 120/255; not black at every
-sampled time; not black at t = 600 when earlier stills aren't.
+sampled time; not black at t = 600 when earlier stills aren't; motion within 5 s over ≥ 25 % of the
+frame and in ≥ 5 of its 9 regions; ≤ 50 % of the frame changing strongly within 0.5 s; ≤ 30 %
+jumping between successive frames (§7).
 
-## 14. Host bridge (for host developers)
+## 15. Host bridge (for host developers)
 
 Configuration precedence: built-in defaults < `window.LIVEPAPER_CONFIG` (inject with a user script
 at document start) < URL hash (`#still=1&t=12&clock=0&debug=1`, for development) <

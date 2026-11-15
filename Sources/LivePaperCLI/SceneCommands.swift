@@ -7,7 +7,7 @@ enum SceneCommands {
     static var all: [CLICommand] {
         [
             CLICommand(name: "check", synopsis: "<dir.lpscene> [--quick] [--power] [--json]",
-                       summary: "build + validate a scene: stills, JS errors, benchmarks, brightness; exit 0 only if it passes",
+                       summary: "build + validate a scene: stills, JS errors, benchmarks, brightness, motion; exit 0 only if it passes",
                        run: check),
             CLICommand(name: "still", synopsis: "<dir.lpscene> [--t 8] [--size 1512x982] [--dpr 2] [--out x.png] [--no-clock] [--json]",
                        summary: "render one frame of a scene to a PNG", run: still),
@@ -63,6 +63,7 @@ enum SceneCommands {
             }
             print(line)
         }
+        printMotion(r, checkDir: checkDir, previews: previews)
         if let mw = r.energyMw {
             let p = SceneChecker.powerProfile
             print("  energy       \(fmt(mw)) mW at \(p.fps) fps, \(Int(p.scale * 100)) % scale (battery profile; budget \(fmt(budgets.energyMaxMw)))")
@@ -83,6 +84,31 @@ enum SceneCommands {
         if !r.warnings.isEmpty {
             print("\nWarnings:")
             for w in r.warnings { print("  - \(w)") }
+        }
+    }
+
+    /// One line per analysed size, plus — when motion needs attention — the map of where the worst
+    /// size moves, so an agent can see at a glance which parts of the frame are still.
+    static func printMotion(_ r: CheckReport, checkDir: URL, previews: URL?) {
+        guard let motion = r.motion, !motion.isEmpty else { return }
+        let b = CheckBudgets().motion
+        let pct = MotionAnalysis.percent
+        for (i, m) in motion.enumerated() {
+            print((i == 0 ? "  motion       " : "               ") + "\(m.size): \(pct(m.coverage5s)) of the frame changes within 5 s " +
+                  "(min \(pct(b.minCoverage5s))), \(pct(m.coverage2s)) within 2 s  ·  moving in \(m.movingRegions)/9 regions " +
+                  "(min \(b.minRegions))  ·  busy \(pct(m.busy)) (max \(pct(b.maxBusy)))  ·  flicker \(pct(m.flicker)) (max \(pct(b.maxFlicker)))")
+        }
+        let verdict = MotionAnalysis.verdict(motion, budgets: b)
+        guard !verdict.problems.isEmpty || !verdict.warnings.isEmpty,
+              let worst = motion.min(by: { ($0.coverage5s, $0.movingRegions) < ($1.coverage5s, $1.movingRegions) }) else { return }
+        print("               where \(worst.size) changes within 5 s (# at most sampled moments, + at some, . never):")
+        for row in worst.map { print("                 " + row) }
+        if let heatmap = worst.heatmap {
+            let name = URL(fileURLWithPath: heatmap).deletingPathExtension().lastPathComponent
+            let preview = previews.map { $0.appendingPathComponent(name + ".jpg") }
+            let shown = preview.flatMap { FileManager.default.fileExists(atPath: $0.path) ? $0 : nil } ?? URL(fileURLWithPath: heatmap)
+            print("               heat map \(displayPath(shown)) (amber = moves most of the time, blue = sometimes, grey = still, " +
+                  "red outline = flicker)")
         }
     }
 

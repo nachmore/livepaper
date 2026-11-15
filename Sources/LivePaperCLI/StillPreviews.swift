@@ -3,7 +3,8 @@
 // The full-size stills are what users see, but a dithered 3024×1964 PNG is 4–6 MB: several of them
 // exceed the request size some AI harnesses allow (Codex on Bedrock fails the whole turn with
 // "request_too_large"), and they are slow for any image viewer. `check` therefore also writes
-// .check/previews/<still>.jpg, at most `maxPixels` on the long side, which agents are told to view.
+// .check/previews/<still>.jpg, at most `maxPixels` on the long side, which agents are told to view —
+// and the same for the motion heat maps (.check/motion-<size>.png → previews/motion-<size>.jpg).
 // ImageIO + CoreGraphics only: the CLI never links AppKit.
 import CoreGraphics
 import Darwin
@@ -33,8 +34,10 @@ enum StillPreviews {
         // `check` rewrites .check/ on every run; start from an empty directory so stale previews never linger.
         try? fm.removeItem(at: dir)
         var written = 0
-        for still in report.stills {
-            let source = still.path.hasPrefix("/") ? URL(fileURLWithPath: still.path) : package.appendingPathComponent(still.path)
+        // The stills, and the motion heat maps (motion-<size>.png).
+        let images = report.stills.map(\.path) + (report.motion ?? []).compactMap(\.heatmap)
+        for path in images {
+            let source = path.hasPrefix("/") ? URL(fileURLWithPath: path) : package.appendingPathComponent(path)
             guard (try? source.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
             if written == 0 { try? fm.createDirectory(at: dir, withIntermediateDirectories: true) }
             let out = dir.appendingPathComponent(source.deletingPathExtension().lastPathComponent + ".jpg")
