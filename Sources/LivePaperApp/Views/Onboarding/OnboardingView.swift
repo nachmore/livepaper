@@ -361,16 +361,15 @@ struct GuidedSaverSelection: View {
                     .frame(width: 260, height: 168)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 10) {
-                    GuideStep(n: 1, text: "Click Open Screen Saver Settings.")
+                    GuideStep(n: 1, text: "Click Open Screen Saver Settings below.")
                     GuideStep(n: 2, text: "Under Other, click LivePaper.")
                     GuideStep(n: 3, text: "Come back here \u{2014} this page updates by itself.")
-                    HStack {
-                        Button("Open Screen Saver Settings") { model.openScreenSaverSettings() }
-                            .buttonStyle(.borderedProminent)
-                        Button("Check Again") { Task { await model.refreshInstallStatus() } }
-                    }
-                    .padding(.top, 4)
                 }
+            }
+            HStack {
+                Button("Open Screen Saver Settings") { model.openScreenSaverSettings() }
+                    .buttonStyle(.borderedProminent)
+                Button("Check Again") { Task { await model.refreshInstallStatus() } }
             }
         }
         .padding(16)
@@ -512,13 +511,15 @@ private struct LockKeysPage: View {
         VStack(alignment: .leading, spacing: 20) {
             PageHeader(title: "Use your usual lock keys",
                        text: "Optional. \u{2303}\u{2318}Q and the lock key lock instantly and show the plain wallpaper. LivePaper can catch them and lock with your scene instead.")
-            VStack(alignment: .leading, spacing: 12) {
-                Toggle("Use \u{2303}\u{2318}Q for LivePaper lock", isOn: Binding(
-                    get: { lock.takeOverSystemLock }, set: { v in model.updateLock { $0.takeOverSystemLock = v } }))
-                Toggle("Use the lock key (Touch ID button)", isOn: Binding(
-                    get: { lock.takeOverLockKey }, set: { v in model.updateLock { $0.takeOverLockKey = v } }))
+            VStack(spacing: 0) {
+                SwitchRow(title: "Use \u{2303}\u{2318}Q for LivePaper lock",
+                          detail: "The standard Lock Screen shortcut shows your scene too.",
+                          isOn: Binding(get: { lock.takeOverSystemLock }, set: { v in model.updateLock { $0.takeOverSystemLock = v } }))
+                Divider().padding(.vertical, 10)
+                SwitchRow(title: "Use the lock key",
+                          detail: "The Touch ID / lock key in the top-right corner of the keyboard.",
+                          isOn: Binding(get: { lock.takeOverLockKey }, set: { v in model.updateLock { $0.takeOverLockKey = v } }))
             }
-            .toggleStyle(.switch)
             .padding(14)
             .card(cornerRadius: 10)
             CheckWithAction(check: SetupChecklist.checks(for: .lockKeys, status: status)[0]) {
@@ -529,6 +530,26 @@ private struct LockKeysPage: View {
             Text("Catching keys needs Accessibility access. If the helper ever stops, the keys simply work as they always did.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+}
+
+/// Title + explanation on the left, a switch on the right (like a grouped Form row).
+private struct SwitchRow: View {
+    let title: String
+    let detail: String
+    @Binding var isOn: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                Text(detail).font(.callout).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Toggle(title, isOn: $isOn)
+                .labelsHidden()
+                .toggleStyle(.switch)
         }
     }
 }

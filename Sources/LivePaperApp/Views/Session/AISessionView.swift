@@ -132,9 +132,23 @@ private struct SessionTimeline: View {
             .padding(20)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        // Follows new activity while the user is at the bottom; scrolling up stops following.
-        .defaultScrollAnchor(.bottom)
+        .modifier(FollowsNewActivity())
         .accessibilityLabel("Agent activity")
+    }
+}
+
+/// Keeps the newest activity in view while the user is at the bottom (scrolling up stops
+/// following). On macOS 15+ short timelines still start at the top instead of the bottom.
+private struct FollowsNewActivity: ViewModifier {
+    func body(content: Content) -> some View {
+        if #available(macOS 15.0, *) {
+            content
+                .defaultScrollAnchor(.bottom, for: .initialOffset)
+                .defaultScrollAnchor(.bottom, for: .sizeChanges)
+                .defaultScrollAnchor(.top, for: .alignment)
+        } else {
+            content.defaultScrollAnchor(.bottom)
+        }
     }
 }
 
