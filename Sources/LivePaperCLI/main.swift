@@ -3,4 +3,7 @@
 // render server over its socket (see RenderClient).
 import Foundation
 
+// Before anything reads LPPaths: resolve resources, the render daemon and this CLI from the real
+// executable path (argv[0] is a bare name when run from PATH).
+CLIEnvironment.pinLocations()
 exit(await CLI.main(CommandLine.arguments))
