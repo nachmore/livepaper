@@ -1,0 +1,1 @@
+../../LivePaperHelper/Logic/HelperAppLocator.swift
