@@ -1,4 +1,5 @@
-// ChildProcess — posix_spawn wrapper that starts a command in its OWN process group.
+// ChildProcess — posix_spawn wrapper that starts a command in its OWN process group (optionally in
+// its own session too, without a controlling terminal).
 //
 // Foundation's Process can't do that (setpgid after launch races with the child's own fork/exec),
 // and AI harnesses spawn whole trees (node → shells → livepaper → …). Putting the child in a fresh
@@ -23,8 +24,12 @@ final class ChildProcess: @unchecked Sendable {
 
     /// Spawns `executable` (an absolute path; PATH is not searched) with exactly `environment`.
     /// stdin is `stdinFile` or /dev/null — never the parent's stdin. No other descriptors leak in.
+    /// - Parameter newSession: start it in a session of its own as well (it still leads its own
+    ///   group), so it has no controlling terminal. In the caller's session an interactive shell
+    ///   opens the caller's terminal (/dev/tty) even with stdin at /dev/null and tries to take it
+    ///   over from its background group, and the kernel stops it (SIGTTOU/SIGTTIN) for good.
     static func spawn(executable: String, arguments: [String], environment: [String: String],
-                      currentDirectory: URL?, stdinFile: URL?) throws -> ChildProcess {
+                      currentDirectory: URL?, stdinFile: URL?, newSession: Bool = false) throws -> ChildProcess {
         var outPipe: [Int32] = [-1, -1], errPipe: [Int32] = [-1, -1]
         guard pipe(&outPipe) == 0 else { throw spawnError(errno, executable) }
         guard pipe(&errPipe) == 0 else { close(outPipe[0]); close(outPipe[1]); throw spawnError(errno, executable) }
@@ -43,12 +48,14 @@ final class ChildProcess: @unchecked Sendable {
         var attributes: posix_spawnattr_t?
         posix_spawnattr_init(&attributes)
         defer { posix_spawnattr_destroy(&attributes) }
-        // SETPGROUP with pgroup 0 = new group whose id is the child's pid. CLOEXEC_DEFAULT closes
-        // every descriptor not named in the file actions (the app's sockets etc. stay private).
+        // SETPGROUP with pgroup 0 = new group whose id is the child's pid; SETSID = new session
+        // (no controlling terminal) whose leader also leads a new group with that id. CLOEXEC_DEFAULT
+        // closes every descriptor not named in the file actions (the app's sockets etc. stay private).
         // SETSIGDEF/SETSIGMASK undo any signal dispositions (e.g. ignored SIGPIPE) we'd otherwise pass on.
-        let flags = POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
+        let group = newSession ? POSIX_SPAWN_SETSID : POSIX_SPAWN_SETPGROUP
+        let flags = group | POSIX_SPAWN_CLOEXEC_DEFAULT | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK
         posix_spawnattr_setflags(&attributes, Int16(flags))
-        posix_spawnattr_setpgroup(&attributes, 0)
+        if !newSession { posix_spawnattr_setpgroup(&attributes, 0) }
         var defaults = sigset_t(); sigfillset(&defaults); posix_spawnattr_setsigdefault(&attributes, &defaults)
         var mask = sigset_t(); sigemptyset(&mask); posix_spawnattr_setsigmask(&attributes, &mask)
 

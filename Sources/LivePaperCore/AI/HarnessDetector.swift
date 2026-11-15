@@ -2,11 +2,16 @@
 //
 // GUI apps started by launchd don't inherit the user's shell environment: their PATH is just
 // /usr/bin:/bin:/usr/sbin:/sbin, so CLIs installed with Homebrew, npm, custom installers, … are
-// invisible. We ask the user's own login shell once, as an INTERACTIVE login shell
-// (`$SHELL -ilc 'command -v …'`, like VS Code resolves the shell environment): a plain login shell
-// (`-lc`) skips ~/.zshrc / ~/.bashrc, which is where many installers add their PATH entries. Output
-// the user's profile prints is ignored (we parse only our own marked lines). Then we also look in a
-// few standard install directories.
+// invisible. We ask the user's own shell once, as an INTERACTIVE login shell
+// (`$SHELL -ilc 'command -v …'`, like VS Code resolves the shell environment), so it reads the same
+// files as a new Terminal window: zsh reads ~/.zprofile AND ~/.zshrc (where many installers add
+// their PATH line; a plain `-lc` skips it); bash, as a login shell, reads ~/.bash_profile (or
+// ~/.bash_login, or ~/.profile), which on macOS is what sources ~/.bashrc. The shell runs in a
+// session of its own, without a controlling terminal, so from the CLI in a terminal it can neither
+// take over nor read that terminal. If the interactive run doesn't get through (an rc file that
+// execs tmux/fish, hangs or is slow), a plain login shell (`-lc`) is asked instead, so ~/.zprofile
+// still counts. Output the user's profile prints is ignored (we parse only our own marked lines).
+// Then we also look in a few standard install directories.
 import Darwin
 import Foundation
 
@@ -32,6 +37,15 @@ public final class LoginShell: @unchecked Sendable {
     public static let shared: LoginShell = ProcessInfo.processInfo.environment["LIVEPAPER_NO_SYSTEM_COMMANDS"] == "1"
         ? .fixed(ShellSnapshot()) : LoginShell()
     static let marker = "LPENV"
+    /// Set to 1 for the shell LivePaper asks, so rc files can skip what only makes sense in a
+    /// terminal (`[ -z "$LIVEPAPER_RESOLVING_ENVIRONMENT" ] && exec tmux`), like VS Code's
+    /// VSCODE_RESOLVING_ENVIRONMENT. Not part of the snapshot.
+    public static let resolvingVariable = "LIVEPAPER_RESOLVING_ENVIRONMENT"
+    /// The terminal session the CLI may run in; the probe isn't part of it (with these,
+    /// /etc/zshrc_Apple_Terminal would restore and save that Terminal tab's shell session).
+    static let terminalVariables: Set<String> = ["TERM_PROGRAM", "TERM_PROGRAM_VERSION", "TERM_SESSION_ID"]
+    /// Per shell run (a broken profile must not hang detection).
+    static let timeout: TimeInterval = 10
 
     private let shell: String
     private let tools: [String]
@@ -41,8 +55,9 @@ public final class LoginShell: @unchecked Sendable {
 
     /// - Parameter tools: command names to look up (must be plain `[A-Za-z0-9._-]` names; they are
     ///   embedded in the shell script).
+    /// - Parameter runner: the default gives the shell a session of its own (no controlling terminal).
     public init(shell: String = LoginShell.userShell(), tools: [String] = HarnessDetector.known.map(\.tool),
-                runner: CommandRunning = SystemCommandRunner()) {
+                runner: CommandRunning = SystemCommandRunner(newSession: true)) {
         self.shell = shell
         self.tools = tools.filter { $0.allSatisfy { $0.isLetter || $0.isNumber || "._-".contains($0) } }
         self.runner = runner
@@ -68,16 +83,30 @@ public final class LoginShell: @unchecked Sendable {
         return shell
     }
 
-    /// Runs the login shell the first time (≤ 10 s; a broken profile must not hang detection).
+    /// Runs the login shell the first time: interactively, then — only if that run doesn't get
+    /// through to our script — as a plain login shell (each ≤ `timeout`).
     public func snapshot() -> ShellSnapshot {
         lock.lock(); defer { lock.unlock() }
         if let cached { return cached }
         let lookups = tools.map { "p=$(command -v -- '\($0)' 2>/dev/null) && printf 'LPBIN\\t%s\\t%s\\n' '\($0)' \"$p\"" }
         let script = (lookups + ["printf '\(Self.marker)\\n'", "/usr/bin/env -0"]).joined(separator: "; ")
-        // -i so ~/.zshrc / ~/.bashrc are read (stdin is /dev/null, so nothing can prompt).
-        let result = try? runner.run(shell, ["-ilc", script], environment: nil, timeout: 10)
-        let snapshot = result.map { Self.parse($0.stdout) } ?? ShellSnapshot()
+        var environment = ProcessInfo.processInfo.environment.filter { !Self.terminalVariables.contains($0.key) }
+        environment[Self.resolvingVariable] = "1"
+        // -i so ~/.zshrc is read too. stdin is /dev/null and (with the default runner) there is no
+        // controlling terminal, so nothing can prompt or stop the shell. An rc file that execs
+        // another program (`exec tmux`, `exec fish`) or runs past the timeout never reaches our
+        // script: then -l alone, which skips ~/.zshrc, still brings ~/.zprofile's PATH.
+        let snapshot = probe("-ilc", script, environment) ?? probe("-lc", script, environment) ?? ShellSnapshot()
         cached = snapshot
+        return snapshot
+    }
+
+    /// One run of the shell; nil unless it got as far as printing our marker.
+    private func probe(_ flags: String, _ script: String, _ environment: [String: String]) -> ShellSnapshot? {
+        guard let result = try? runner.run(shell, [flags, script], environment: environment, timeout: Self.timeout),
+              result.stdout.contains(Self.marker + "\n") else { return nil }
+        var snapshot = Self.parse(result.stdout)
+        snapshot.environment.removeValue(forKey: Self.resolvingVariable)
         return snapshot
     }
 

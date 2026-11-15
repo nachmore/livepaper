@@ -31,12 +31,16 @@ public extension CommandRunning {
 
 /// Runs commands for real, each in its own process group so a timeout kills the whole tree.
 public struct SystemCommandRunner: CommandRunning {
-    public init() {}
+    /// Also gives each command a session of its own, without a controlling terminal: for commands
+    /// that would otherwise use the caller's terminal, such as an interactive shell (LoginShell).
+    public var newSession: Bool
+
+    public init(newSession: Bool = false) { self.newSession = newSession }
 
     public func run(_ executable: String, _ arguments: [String], environment: [String: String]?, timeout: TimeInterval) throws -> CommandResult {
         let child = try ChildProcess.spawn(executable: executable, arguments: arguments,
                                            environment: environment ?? ProcessInfo.processInfo.environment,
-                                           currentDirectory: nil, stdinFile: nil)
+                                           currentDirectory: nil, stdinFile: nil, newSession: newSession)
         let out = OutputBuffer(), err = OutputBuffer()
         let done = DispatchGroup()
         for (fd, buffer) in [(child.stdoutFD, out), (child.stderrFD, err)] {

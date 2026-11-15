@@ -452,6 +452,85 @@ extension SelfTests {
             try expectEqual(try sb.run(["ai", "modify", "missing", "make it blue", "--command", agent.path]).status, 1)
             try expectEqual(try sb.run(["ai", "dance"]).status, 2)
         },
+        cliTest("cli.ai.terminal") { sb in
+            // Regression: in a terminal (here script(1)'s pty is the CLI's controlling terminal), the
+            // interactive login-shell probe was stopped by SIGTTOU: every `livepaper ai …` stalled
+            // ~11 s and the agent got none of the user's rc environment.
+            guard (LoginShell.userShell() as NSString).lastPathComponent == "zsh",
+                  FileManager.default.isExecutableFile(atPath: "/usr/bin/script") else {
+                print("  (skipped: needs zsh as the login shell, and /usr/bin/script)"); return
+            }
+            let fm = FileManager.default
+            let zdot = sb.root.appendingPathComponent("zdotdir"), agentEnv = sb.root.appendingPathComponent("agent-env.txt")
+            try fm.createDirectory(at: zdot, withIntermediateDirectories: true)
+            try Data("export LP_FROM_ZSHRC=yes\n".utf8).write(to: zdot.appendingPathComponent(".zshrc"))
+            let agent = try CLITestSupport.writeScript(sb.root.appendingPathComponent("tools/env-agent"), """
+            #!/bin/sh
+            /usr/bin/env > '\(agentEnv.path)'
+            echo '// v2' > scene/scene.js
+
+            """)
+            var env = sb.environment
+            env["ZDOTDIR"] = zdot.path   // the sandbox's rc files, not the developer's
+            let began = Date()
+            let r = try CLITestSupport.exec(URL(fileURLWithPath: "/usr/bin/script"),
+                                            ["-q", "/dev/null", sb.binary.path, "ai", "create", "x", "--command", agent.path, "--json"],
+                                            environment: env, stdin: nil, directory: sb.work)
+            let took = Date().timeIntervalSince(began)
+            let seen = (try? String(contentsOf: agentEnv, encoding: .utf8)) ?? ""
+            try expect(!seen.isEmpty, "the agent didn't run: \(r.out)")
+            try expect(seen.contains("LP_FROM_ZSHRC=yes\n"), "the agent didn't get ~/.zshrc's environment (\(took) s)")
+            try expect(took < 8, "took \(took) s")
+        },
+        cliTest("cli.ai.signals") { sb in
+            // Closing the terminal (SIGHUP) stops the agent's process group and exits 129 — but under
+            // `nohup` SIGHUP stays ignored and the session goes on (regression: a dispatch source
+            // fires even for an ignored signal, so the CLI killed the agent anyway).
+            let fm = FileManager.default
+            let dir = sb.root.appendingPathComponent("signals")
+            let agent = try CLITestSupport.writeScript(sb.root.appendingPathComponent("tools/waiting-agent"), """
+            #!/bin/sh
+            echo $$ > "$LP_TEST_DIR/agent.pid"
+            i=0; while [ ! -e "$LP_TEST_DIR/go" ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+            echo '// v2' > scene/scene.js
+            echo "agent finished"
+
+            """)
+            for nohup in [false, true] {
+                try? fm.removeItem(at: dir)
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                var env = sb.environment
+                env["LP_TEST_DIR"] = dir.path
+                let args = ["ai", "create", "x", "--command", agent.path, "--json"]
+                let cli = try CLITestSupport.Background(nohup ? URL(fileURLWithPath: "/usr/bin/nohup") : sb.binary,
+                                                        nohup ? [sb.binary.path] + args : args, environment: env, directory: sb.work)
+                defer { cli.stop(); fm.createFile(atPath: dir.appendingPathComponent("go").path, contents: nil) }
+                var agentPID: pid_t = 0
+                let deadline = Date().addingTimeInterval(20)
+                while agentPID <= 0 && Date() < deadline && cli.isRunning {
+                    agentPID = pid_t((try? String(contentsOf: dir.appendingPathComponent("agent.pid"), encoding: .utf8))?
+                        .trimmingCharacters(in: .whitespacesAndNewlines) ?? "") ?? 0
+                    if agentPID <= 0 { usleep(50_000) }
+                }
+                try expect(agentPID > 0, "the agent never started: \(cli.output)")
+                kill(cli.pid, SIGHUP)
+                if nohup {
+                    usleep(700_000)
+                    try expect(cli.isRunning, "under nohup, SIGHUP ended the CLI: \(cli.output)")
+                    try expect(kill(agentPID, 0) == 0, "under nohup, SIGHUP stopped the agent")
+                    fm.createFile(atPath: dir.appendingPathComponent("go").path, contents: nil)
+                    let status = try cli.wait(timeout: 30)
+                    try expect(cli.output.contains("agent finished"), cli.output)
+                    try expectEqual(status, 1)   // the check can't render here, after everything else ran
+                } else {
+                    try expectEqual(try cli.wait(timeout: 10), 129)
+                    let gone = Date().addingTimeInterval(3)
+                    while kill(agentPID, 0) == 0 && Date() < gone { usleep(20_000) }
+                    try expect(kill(agentPID, 0) != 0, "the agent outlived the CLI")
+                    try expect(!cli.output.contains("agent finished"), cli.output)
+                }
+            }
+        },
         cliTest("cli.path-invocation") { sb in
             // Run from PATH (argv[0] is the bare name) in another directory without
             // LIVEPAPER_RESOURCES: the CLI must still find the runtime template next to itself.
@@ -513,6 +592,55 @@ enum CLITestSupport {
     }
 
     struct Result { var status: Int32; var out: String; var err: String }
+
+    /// Writes an executable script.
+    static func writeScript(_ url: URL, _ text: String) throws -> URL {
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data(text.utf8).write(to: url)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+        return url
+    }
+
+    /// A command running in the background (stdin /dev/null; stdout and stderr into one file), for
+    /// tests that signal it while it runs.
+    final class Background {
+        private let process = Process()
+        private let scratch: URL
+        private var log: URL { scratch.appendingPathComponent("output") }
+
+        init(_ executable: URL, _ arguments: [String], environment: [String: String], directory: URL) throws {
+            scratch = FileManager.default.temporaryDirectory.appendingPathComponent("lpcli-bg-\(UUID().uuidString)")
+            try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
+            FileManager.default.createFile(atPath: log.path, contents: nil)
+            process.executableURL = executable
+            process.arguments = arguments
+            process.environment = environment
+            process.currentDirectoryURL = directory
+            let out = try FileHandle(forWritingTo: log)
+            process.standardOutput = out
+            process.standardError = out
+            process.standardInput = FileHandle.nullDevice
+            try process.run()
+        }
+
+        var pid: pid_t { process.processIdentifier }
+        var isRunning: Bool { process.isRunning }
+        var output: String { (try? String(contentsOf: log, encoding: .utf8)) ?? "" }
+
+        /// Its exit status; throws if it is still running after `timeout` seconds.
+        func wait(timeout: TimeInterval) throws -> Int32 {
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline { usleep(20_000) }
+            guard !process.isRunning else { throw TestFailure(description: "still running after \(timeout) s: \(output)") }
+            return process.terminationStatus
+        }
+
+        /// Kills it if it still runs, and removes its output.
+        func stop() {
+            if process.isRunning { kill(process.processIdentifier, SIGKILL); process.waitUntilExit() }
+            try? FileManager.default.removeItem(at: scratch)
+        }
+    }
 
     /// Runs a process with stdout/stderr captured in files (no pipe-buffer deadlocks) and a timeout.
     static func exec(_ executable: URL, _ arguments: [String], environment: [String: String]?, stdin: String?,
