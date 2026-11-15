@@ -100,7 +100,8 @@ public final class AIService: AIServicing, @unchecked Sendable {
             searchPath: { detector.searchPath() },
             extraArguments: settings.extraArguments[harness.kind.rawValue] ?? [],
             timeout: timeoutOverride ?? settings.timeout,
-            prepareRenderer: Self.rendererWarmUp(for: checker))
+            prepareRenderer: Self.rendererWarmUp(for: checker),
+            renderRelay: Self.renderRelay(for: checker, workspace: workspace))
         let chosenModel = model ?? settings.models[harness.kind.rawValue]
         let session = AISession(id: id, workspace: workspace, request: request, harness: harness, model: chosenModel, dependencies: deps)
         log.info("starting AI session \(id, privacy: .public) with \(harness.name, privacy: .public)")
@@ -116,6 +117,13 @@ public final class AIService: AIServicing, @unchecked Sendable {
     static func rendererWarmUp(for checker: SceneChecking) -> () -> Void {
         guard let client = (checker as? SceneChecker)?.render as? RenderClient else { return {} }
         return { try? client.ensureServer(timeout: 40) }
+    }
+
+    /// The relay for an agent whose sandbox keeps its CLI off the render socket, talking to the
+    /// checker's own renderer (fakes in tests get none unless they use a SceneChecker).
+    static func renderRelay(for checker: SceneChecking, workspace: AIWorkspace) -> RenderRelay? {
+        guard let checker = checker as? SceneChecker else { return nil }
+        return RenderRelay(workspace: workspace, privateDirectory: workspace.relayDirectory, render: checker.render, compiler: checker.compiler)
     }
 
     /// `20261113T175610Z-3f9a1c`: sortable, unique, file-name safe.

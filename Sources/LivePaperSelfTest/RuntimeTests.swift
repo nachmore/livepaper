@@ -30,6 +30,7 @@ extension SelfTests {
             TestCase(name: "runtime.render.outputConfinement", run: RuntimeTests.renderOutputConfinement),
             TestCase(name: "runtime.render.navigationGate", run: RuntimeTests.navigationGate),
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
+            TestCase(name: "runtime.client.spoolFallback", run: RuntimeTests.clientSpoolFallback),
             TestCase(name: "runtime.client.waitsForServerHoldingLock", run: RuntimeTests.clientWaitsForLockHolder),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
         ]
@@ -473,6 +474,49 @@ enum RuntimeTests {
         try expect(!preview.decide(R(url: URL(fileURLWithPath: "/tmp/LivePaperPreviews/other.html"), isMainFrame: true)), "other file")
         try expect(preview.decide(R(url: file, isMainFrame: true)), "the preview's own file")
         try expectEqual(SceneNavigationGate.describe(URL(string: "https://user:pw@lpnav.invalid/leak?d=secret#x")), "https://lpnav.invalid/leak")
+    }
+
+    /// In an AI session whose sandbox blocks the socket, the client leaves the request in the
+    /// session's spool for the runner to relay — and never starts a render daemon itself.
+    static func clientSpoolFallback() throws {
+        let fm = FileManager.default
+        let spool = try tempDir("spool")
+        defer { try? fm.removeItem(at: spool) }
+        let socket = URL(fileURLWithPath: "/tmp/lp-nosock-\(UUID().uuidString.prefix(8)).sock")
+        let client = RenderClient(socket: socket, spool: spool)
+        try expect(!client.allowSpawn, "never spawns a daemon from inside a session")
+        // A stand-in for RenderRelay: claim, answer.
+        let stop = Flag()
+        Thread {
+            while !stop.isSet {
+                for name in (try? fm.contentsOfDirectory(atPath: spool.path)) ?? [] where name.hasSuffix(".request.json") {
+                    let id = String(name.dropLast(".request.json".count))
+                    let claimed = spool.appendingPathComponent(id + ".working")
+                    guard rename(spool.appendingPathComponent(name).path, claimed.path) == 0,
+                          let req = try? JSONDecoder().decode(RenderRequest.self, from: Data(contentsOf: claimed)) else { continue }
+                    let resp = RenderResponse(ok: true, ready: true, note: "relayed \(req.op.rawValue) t=\(Int(req.t ?? -1))")
+                    try? JSONEncoder().encode(resp).write(to: spool.appendingPathComponent(id + ".response.json"), options: .atomic)
+                }
+                usleep(20_000)
+            }
+        }.start()
+        let r = try client.sendBlocking(RenderRequest(op: .still, html: "/x/.check/scene.html", t: 7), timeout: 10)
+        stop.set()
+        try expectEqual(r.note, "relayed still t=7")
+        try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])   // the client cleans up
+        // Nobody relays: a clear error after the claim timeout, not a hang until the request timeout.
+        let lonely = RenderClient(socket: socket, spool: spool)
+        lonely.spoolClaimTimeout = 0.5
+        let began = Date()
+        do { _ = try lonely.sendBlocking(RenderRequest(op: .bench, html: "/x/.check/scene.html"), timeout: 30); throw TestFailure(description: "expected an error") }
+        catch let e as RenderClientError { try expect("\(e.localizedDescription)".contains("didn't pick up"), e.localizedDescription) }
+        try expect(Date().timeIntervalSince(began) < 5, "gave up promptly")
+        try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])
+    }
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock(); private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
     }
 
     static func checkCompileFailure() throws {

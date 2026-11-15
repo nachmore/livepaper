@@ -36,10 +36,16 @@ public final class RenderClient: RenderClienting, @unchecked Sendable {
     public let socket: URL
     /// When false the client only talks to an already-running server (LIVEPAPER_NO_SPAWN=1 sets this).
     public var allowSpawn: Bool
+    /// In an AI session (RenderSpool): where requests go when the socket can't be reached — the
+    /// agent's sandbox may forbid it. The client then never starts a daemon itself.
+    public let spool: URL?
+    /// How long a spooled request may wait for the session runner to pick it up.
+    public var spoolClaimTimeout = RenderSpool.claimTimeout
 
-    public init(socket: URL = LPPaths.renderSocket) {
+    public init(socket: URL = LPPaths.renderSocket, spool: URL? = RenderSpool.environmentSpool) {
         self.socket = socket
-        allowSpawn = ProcessInfo.processInfo.environment["LIVEPAPER_NO_SPAWN"] != "1"
+        self.spool = spool
+        allowSpawn = ProcessInfo.processInfo.environment["LIVEPAPER_NO_SPAWN"] != "1" && spool == nil
     }
 
     /// Generous per-op defaults (they include time spent queued behind other clients' work).
@@ -95,7 +101,17 @@ public final class RenderClient: RenderClienting, @unchecked Sendable {
     }
 
     private func sendOnce(_ request: RenderRequest, timeout: TimeInterval, deadline: Date, cancel: CancelToken) throws -> RenderResponse {
-        let fd = try connectOrStart(deadline: deadline, spawn: allowSpawn && request.op != .shutdown && request.op != .ping)
+        let fd: Int32
+        if let spool {
+            do { fd = try LineSocket.connect(path: socket.path) } catch {
+                // Unreachable from here (a sandbox denies the connect, or nothing listens yet): the
+                // session runner relays it.
+                return try RenderSpool.send(request, directory: spool, timeout: timeout, deadline: deadline,
+                                            claimTimeout: spoolClaimTimeout, isCancelled: { cancel.isCancelled })
+            }
+        } else {
+            fd = try connectOrStart(deadline: deadline, spawn: allowSpawn && request.op != .shutdown && request.op != .ping)
+        }
         guard cancel.register(fd) else { close(fd); throw RenderClientError.cancelled }
         defer { cancel.unregister(); close(fd) }
         var line = try JSONEncoder().encode(request)

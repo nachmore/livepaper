@@ -125,7 +125,9 @@ directories and inject fakes for commands, preferences and login items.
     AGENTS.md, CLAUDE.md          identical agent guide (Runtime/AGENTS.md + this session's task)
     TASK.md                       the user's request (reaches the harness only through this file)
     sdk/  scene/  bin/livepaper   API docs + examples, the candidate package, CLI shim
-    .livepaper/                   stdout.log, stderr.log, last-message.txt (codex); agents keep out
+    .livepaper/                   stdout.log, stderr.log, last-message.txt (codex), render-spool/; agents keep out
+    .kiro/agents/                 the restricted agent Kiro sessions run as
+  Workspaces/.render-relay/<id>/  scenes compiled by the session runner for relayed render requests
   state.json                      app → helper shared state (§4.4)
   playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes)
   ai-settings.json                AISettings: Settings › AI (shared by the app, the CLI and sessions)
@@ -408,8 +410,17 @@ Budgets (`CheckBudgets`):
     check|still|bench|live|thumbnail|compile|help` (Claude Code checks each part of a compound
     command). `acceptEdits` is not used: it auto-approves edits and mv/cp anywhere in the workspace.
   * Codex: `codex exec -C <ws> -s workspace-write --skip-git-repo-check --json -o
-    <ws>/.livepaper/last-message.txt -c sandbox_workspace_write.network_access=true [-m M] <extra> -`,
-    TASK.md on stdin (`network_access` because workspace-write blocks the Unix socket `livepaper check` needs).
+    <ws>/.livepaper/last-message.txt [-m M] <extra> -`, TASK.md on stdin. The sandbox keeps its
+    defaults (writes only in the workspace, no network). It also blocks the Unix socket `livepaper
+    check` needs, so the CLI falls back to the **render spool**: in a session, when the socket
+    can't be reached, `RenderClient` writes `<id>.request.json` into `LIVEPAPER_RENDER_SPOOL`
+    (`<ws>/.livepaper/render-spool`) and waits for `<id>.response.json`; it never starts a daemon
+    itself. `RenderRelay` (in the session runner, outside the sandbox, polling every 0.1 s)
+    claims each request and forwards it only if it is a still/bench/live/thumbnail/ping on a
+    package and outputs inside the workspace (`.png`/`.jpg`); for still/bench/live it compiles the
+    package itself into `<Workspaces>/.render-relay/<session>/`, where the agent can't write, so
+    the server never renders HTML the agent wrote. It touches the spool only through a descriptor
+    whose real path it checked, never through links.
   * Kiro CLI: `kiro-cli chat --no-interactive --agent livepaper-session [--trust-workspace]
     --output-format stream-json [--model M] <extra> "<bootstrap>"` (`--wrap never` instead of
     stream-json, and no `--trust-workspace`, for versions whose `chat --help` doesn't offer them).

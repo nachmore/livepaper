@@ -271,6 +271,42 @@ extension SelfTests {
             // A session marker without a workspace refuses the scene commands too.
             try expectEqual(try sb.run(["compile", pkg.path], extraEnv: [AISessionPolicy.sessionVariable: "s1"]).status, 2)
         },
+        cliTest("cli.ai-session.render-spool") { sb in
+            // With the render socket out of reach (Codex's sandbox), the session's CLI hands its
+            // requests to the runner through the spool instead of failing or starting a daemon.
+            let fm = FileManager.default
+            let ws = sb.root.appendingPathComponent("ws")
+            let pkg = ws.appendingPathComponent("scene"), spool = ws.appendingPathComponent(".livepaper/render-spool")
+            try CLITestSupport.writeWebScene(at: pkg, id: "untitled", name: "Untitled")
+            try fm.createDirectory(at: spool, withIntermediateDirectories: true)
+            let done = RuntimeTests.Flag()
+            let seen = RuntimeTests.ResultBox<RenderRequest>()
+            Thread {
+                while !done.isSet {
+                    for name in (try? fm.contentsOfDirectory(atPath: spool.path)) ?? [] where name.hasSuffix(".request.json") {
+                        let id = String(name.dropLast(".request.json".count))
+                        let claimed = spool.appendingPathComponent(id + ".working")
+                        guard rename(spool.appendingPathComponent(name).path, claimed.path) == 0,
+                              let req = try? JSONDecoder().decode(RenderRequest.self, from: Data(contentsOf: claimed)) else { continue }
+                        seen.result = .success(req)
+                        try? JSONEncoder().encode(RenderResponse(ok: true, ready: true, benchMs: 1.25))
+                            .write(to: spool.appendingPathComponent(id + ".response.json"), options: .atomic)
+                    }
+                    usleep(20_000)
+                }
+            }.start()
+            defer { done.set() }
+            let r = try sb.run(["bench", pkg.path, "--frames", "10"],
+                               extraEnv: [AISessionPolicy.sessionVariable: "s1", AISessionPolicy.workspaceVariable: ws.path,
+                                          AISessionPolicy.renderSpoolVariable: spool.path, "LIVEPAPER_NO_SPAWN": "0"])
+            try expectEqual(r.status, 0)
+            try expect(r.out.contains("1.250 ms/frame"), r.out + r.err)
+            let req = try seen.result?.get()
+            try expectEqual(req?.op, .bench)
+            try expectEqual(req?.frames, 10)
+            try expect(req?.html?.hasSuffix("/ws/scene/.check/scene.html") == true, req?.html ?? "-")
+            try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])
+        },
         cliTest("cli.ai") { sb in
             // A stand-in agent: writes a scene, prints two lines, exits 0.
             let agent = sb.root.appendingPathComponent("tools/fake-agent")

@@ -26,6 +26,11 @@ public struct AIWorkspace: Sendable, Equatable {
     public var lastMessageFile: URL { internalDirectory.appendingPathComponent("last-message.txt") }
     /// Render requests a sandboxed agent's CLI couldn't send over the socket (RenderSpool).
     public var renderSpool: URL { internalDirectory.appendingPathComponent("render-spool") }
+    /// The session runner's own files (RenderRelay's compiled HTML), next to the workspaces and
+    /// outside this one, where no agent sandbox lets the agent write.
+    public var relayDirectory: URL {
+        root.deletingLastPathComponent().appendingPathComponent(WorkspaceBuilder.relayDirectoryName).appendingPathComponent(root.lastPathComponent)
+    }
 }
 
 public enum AIError: Error, LocalizedError, Sendable, Equatable {
@@ -52,6 +57,9 @@ public final class WorkspaceBuilder: @unchecked Sendable {
     /// The candidate's `scene/.check/` (full-size stills: 40–80 MB per session) only matters while
     /// the session is reviewed; it goes after a day, the logs and scene stay for `retention`.
     public static let checkRetention: TimeInterval = 86_400
+    /// `<Workspaces>/.render-relay/<session-id>/` (AIWorkspace.relayDirectory).
+    static let relayDirectoryName = ".render-relay"
+    public static var relayDirectoryNameForTests: String { relayDirectoryName }
 
     public let runtimeDirectory: URL
     public let builtinScenesDirectory: URL
@@ -94,7 +102,7 @@ public final class WorkspaceBuilder: @unchecked Sendable {
         guard !FileOps.entryExists(ws.root) else { throw LibraryError.exists(sessionID) }
         try fm.createDirectory(at: ws.root, withIntermediateDirectories: true)
         do {
-            try fm.createDirectory(at: ws.internalDirectory, withIntermediateDirectories: true)
+            try fm.createDirectory(at: ws.renderSpool, withIntermediateDirectories: true)
             // scene/
             if let modified {
                 try Self.copySceneFiles(from: modified.packageURL, to: ws.scene)
@@ -137,6 +145,12 @@ public final class WorkspaceBuilder: @unchecked Sendable {
             } else if age > checkRetention {
                 try? fm.removeItem(at: AIWorkspace(root: url).scene.appendingPathComponent(SceneChecker.checkDirectory))
             }
+        }
+        // Relay leftovers of sessions that ended without cleaning up (a crash): a day is plenty.
+        let relays = workspacesDirectory.appendingPathComponent(Self.relayDirectoryName)
+        for url in (try? fm.contentsOfDirectory(at: relays, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            if now.timeIntervalSince(date) > checkRetention { try? fm.removeItem(at: url) }
         }
     }
 

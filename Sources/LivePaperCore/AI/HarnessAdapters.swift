@@ -86,16 +86,18 @@ public struct ClaudeAdapter: HarnessAdapter {
 }
 
 /// Codex: `codex exec … -` reads the prompt from stdin; --json streams JSONL events.
+///
+/// The workspace-write sandbox (writes only in the workspace, no network) stays as Codex makes it.
+/// It also blocks the Unix socket `livepaper check` uses to reach the render server; instead of
+/// opening the sandbox to the whole network for it, the CLI leaves its requests in the
+/// workspace's render spool and the session runner relays them (RenderSpool / RenderRelay).
 public struct CodexAdapter: HarnessAdapter {
     public init() {}
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         let ws = context.workspace
         var args = ["exec", "-C", ws.root.path, "-s", "workspace-write", "--skip-git-repo-check", "--json",
-                    "-o", ws.lastMessageFile.path,
-                    // workspace-write blocks all sockets by default, including the Unix socket
-                    // `livepaper check` uses to reach the RenderService.
-                    "-c", "sandbox_workspace_write.network_access=true"]
+                    "-o", ws.lastMessageFile.path]
         if let model = context.model { args += ["-m", model] }
         args += context.extraArguments
         args.append("-")

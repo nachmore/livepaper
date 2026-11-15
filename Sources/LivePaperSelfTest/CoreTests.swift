@@ -708,8 +708,11 @@ extension SelfTests {
 
             let codex = try CodexAdapter().invocation(for: AIHarness(kind: .codex, name: "Codex", executable: "/bin/codex"),
                                                       context: HarnessContext(workspace: ws, model: nil, searchPath: []))
+            // Codex's sandbox stays closed to the network (the render socket is reached through the
+            // workspace's render spool instead).
             try expectEqual(codex.arguments, ["exec", "-C", "/tmp/lp-ws", "-s", "workspace-write", "--skip-git-repo-check", "--json",
-                                              "-o", "/tmp/lp-ws/.livepaper/last-message.txt", "-c", "sandbox_workspace_write.network_access=true", "-"])
+                                              "-o", "/tmp/lp-ws/.livepaper/last-message.txt", "-"])
+            try expect(!codex.arguments.contains { $0.contains("network_access") })
             try expectEqual(codex.stdinFile, ws.taskFile)
             let codexModel = try CodexAdapter().invocation(for: AIHarness(kind: .codex, name: "Codex", executable: "/bin/codex"), context: ctx)
             try expectEqual(Array(codexModel.arguments.suffix(5)), ["-m", "haiku", "--x", "1", "-"])
@@ -1030,6 +1033,64 @@ extension SelfTests {
                 try expect({ if case .failed(let m) = last2 { return m.contains("symbolic link") }; return false }(), "\(String(describing: last2))")
                 try expectEqual(children(other.packageURL), before)
                 try expect(fm.fileExists(atPath: other.packageURL.appendingPathComponent("history.jsonl").path))
+            }
+        },
+        TestCase(name: "core.ai.session.render-relay") {
+            // A sandboxed agent's CLI leaves render requests in the spool; the runner relays them
+            // after checking them: LivePaper compiles the scene itself, and every path must stay in
+            // the workspace.
+            try CoreSandbox.with("session-relay") { sb in
+                let render = RuntimeTests.FakeRender()
+                let checker = SceneChecker(compiler: SceneCompiler(), render: render)
+                let outside = sb.root.appendingPathComponent("Documents")
+                try sb.write("my thesis", to: outside.appendingPathComponent("thesis.png"))
+                try sb.writeWebScene(in: outside, id: "elsewhere", name: "Elsewhere")
+                // (id, op, html, scene, out) — the agent writes them as the CLI would and waits for answers.
+                let requests: [(String, String)] = [
+                    ("ok", #"{"op":"still","html":"WS/scene/.check/scene.html","width":320,"height":200,"dpr":1,"t":3,"out":"WS/scene/.check/a.png"}"#),
+                    ("bench", #"{"op":"bench","html":"WS/scene/.check/scene.html","frames":10,"out":"OUT/thesis.png"}"#),
+                    ("outside-out", #"{"op":"still","html":"WS/scene/.check/scene.html","out":"OUT/thesis.png"}"#),
+                    ("own-html", #"{"op":"still","html":"WS/scene/evil.html","out":"WS/scene/.check/b.png"}"#),
+                    ("outside-scene", #"{"op":"bench","html":"OUT/elsewhere.lpscene/.check/scene.html"}"#),
+                    ("thumb-outside", #"{"op":"thumbnail","scene":"WS/scene","out":"OUT/thumbnail.jpg"}"#),
+                    ("not-png", #"{"op":"still","html":"WS/scene/.check/scene.html","out":"WS/scene/notes.docx"}"#),
+                    ("shutdown", #"{"op":"shutdown"}"#),
+                ]
+                var agent = "ws=$(pwd -P)\n"
+                for (id, json) in requests {
+                    let body = json.replacingOccurrences(of: "WS/", with: "$ws/").replacingOccurrences(of: "OUT/", with: outside.path + "/")
+                    agent += "printf '%s' \"\(body.replacingOccurrences(of: "\"", with: "\\\""))\" > \"$\(AISessionPolicy.renderSpoolVariable)/.\(id).tmp\"\n"
+                    agent += "mv \"$\(AISessionPolicy.renderSpoolVariable)/.\(id).tmp\" \"$\(AISessionPolicy.renderSpoolVariable)/\(id).request.json\"\n"
+                }
+                agent += "for i in $(seq 1 100); do [ $(ls \"$\(AISessionPolicy.renderSpoolVariable)\" | grep -c response.json) -ge \(requests.count) ] && break; sleep 0.1; done\n"
+                let (ai, harness) = try sessionFixture(sb, checker: checker, agent: agent)
+                let handle = try ai.start(.create(prompt: "x"), harness: harness, model: nil)
+                _ = try collect(handle)
+                let ws = AIWorkspace(root: handle.workspace)
+                func response(_ id: String) throws -> RenderResponse {
+                    try JSONDecoder().decode(RenderResponse.self, from: Data(contentsOf: ws.renderSpool.appendingPathComponent(id + ".response.json")))
+                }
+                let ok = try response("ok"), bench = try response("bench")
+                try expect(ok.ok, "\(ok)")
+                try expect(bench.ok, "a bench writes nothing; its stray out is dropped: \(bench)")
+                for id in ["outside-out", "own-html", "outside-scene", "thumb-outside", "not-png", "shutdown"] {
+                    let r = try response(id)
+                    try expect(!r.ok && (r.note ?? "").contains("LivePaper refused"), "\(id): \(r.note ?? "-")")
+                }
+                // Only the two valid requests reached the renderer, with LivePaper's own compile of the
+                // scene (outside the workspace) and the workspace output; the bench lost its out.
+                let wsReal = ws.root.resolvingSymlinksInPath().path
+                try expectEqual(render.requests.count, 2)
+                for r in render.requests {
+                    let html = r.html ?? ""
+                    try expect(html.hasSuffix(".html") && !html.hasPrefix(ws.root.path) && !html.hasPrefix(wsReal), "compiled privately: \(html)")
+                    try expect(html.contains(WorkspaceBuilder.relayDirectoryNameForTests), html)
+                }
+                let still = render.requests.first { $0.op == .still }, benchReq = render.requests.first { $0.op == .bench }
+                try expect(still?.out?.hasSuffix("/scene/.check/a.png") == true && benchReq != nil && benchReq?.out == nil,
+                           "\(render.requests.map { "\($0.op) \($0.out ?? "-")" })")
+                try expectEqual(read(outside.appendingPathComponent("thesis.png")), "my thesis")
+                try expect(!exists(ws.relayDirectory), "the relay cleans up after the session")
             }
         },
         TestCase(name: "core.ai.session.renderer-first") {

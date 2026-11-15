@@ -33,6 +33,8 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         /// calls find it instead of starting LivePaperRenderd from inside the agent's process tree
         /// (where a sandbox such as Codex's would also confine it). Failures are left to the check.
         var prepareRenderer: () -> Void = {}
+        /// Relays the render requests a sandboxed agent can only leave in the spool (RenderSpool).
+        var renderRelay: RenderRelay?
     }
 
     private enum StopReason { case cancelled, timedOut }
@@ -109,6 +111,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         }
         sceneBefore = try? Data(contentsOf: sceneScript)
         deps.prepareRenderer()
+        deps.renderRelay?.start()
         parser = adapter.makeParser(workspaceRoot: ws.root)
         stdoutLog = Self.openLog(ws.stdoutLog)
         stderrLog = Self.openLog(ws.stderrLog)
@@ -175,6 +178,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
     private func harnessExited(status: Int32) {
         guard phase == .running else { return }
         child = nil
+        deps.renderRelay?.stop()
         stopPolling()
         scanStills()
         if let parser {
@@ -331,6 +335,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         guard phase != .done else { return }
         phase = .done
         stopPolling()
+        deps.renderRelay?.stop()
         closeLogs()
         child?.terminateGroup()
         if case .failed(let reason) = event { log.notice("session \(self.id, privacy: .public) failed: \(reason, privacy: .public)") }
