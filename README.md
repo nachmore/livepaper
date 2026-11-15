@@ -90,9 +90,12 @@ re-run from Settings and only changes what still needs it.
 
 The CLI ships inside the app at `LivePaper.app/Contents/Helpers/livepaper` (link it onto your
 PATH with `scripts/dev-install.sh --link-cli`). It is a plain command-line process — it never
-links AppKit or WebKit — so AI agents can run it freely; rendering goes to LivePaper's render
-server (the running app, or one headless `LivePaperRenderd` started on demand that exits after 15
-idle minutes). `livepaper help <command>` lists every option.
+links AppKit or WebKit — so AI agents can run it without disturbing you; rendering goes to
+LivePaper's render server (the running app, or one headless `LivePaperRenderd` started on demand
+that exits after 15 idle minutes). Inside an AI session it runs only the scene commands (`check`,
+`still`, `bench`, `live`, `thumbnail`, `compile`) on the session's own workspace, and each agent
+is limited to editing the scene and running those commands (details in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) §10). `livepaper help <command>` lists every option.
 
 | Command | What it does |
 |---|---|

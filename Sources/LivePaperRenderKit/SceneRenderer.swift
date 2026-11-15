@@ -21,6 +21,8 @@ final class SceneRenderer {
 
     private let window: NSWindow
     private let meter = ProcessEnergyMeter()
+    /// Where requests may have files written (the server runs outside any agent's sandbox).
+    private let outputs = RenderOutputPolicy()
 
     init() {
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 500), styleMask: [.borderless],
@@ -74,6 +76,7 @@ final class SceneRenderer {
 
     private func still(_ r: RenderRequest, deadline: Date) async throws -> RenderResponse {
         let (size, dpr) = try Self.geometry(r)
+        if r.out != nil { try validateOutput(r) }
         let html = try Self.readHTML(r)
         let clock = r.clock ?? true
         // debug: JS errors are also printed on the frame, so whoever looks at the PNG sees them.
@@ -104,7 +107,7 @@ final class SceneRenderer {
                 resp.clockLuma = measured.meanLuma(in: px).map(Self.round1)
             }
             if let out = r.out {
-                try final.write(to: URL(fileURLWithPath: out), as: .png)
+                try final.write(for: r, as: .png, policy: self.outputs)
                 resp.out = out
             }
             return resp
@@ -163,12 +166,12 @@ final class SceneRenderer {
         }
         let pw = Int(r.width ?? Double(Self.thumbnailPixels.width)), ph = Int(r.height ?? Double(Self.thumbnailPixels.height))
         guard (16...4096).contains(pw), (16...4096).contains(ph) else { throw RenderFailure("thumbnail size must be 16–4096 px") }
-        let outURL = URL(fileURLWithPath: out)
+        try validateOutput(r)
         switch manifest.kind {
         case .video:
             guard let video = manifest.video else { throw RenderFailure("scene.json has no \"video\" section") }
             let frame = try await Self.videoFrame(package.appendingPathComponent(video.file), at: r.t ?? 1)
-            try Self.aspectFill(frame, width: pw, height: ph).write(to: outURL, as: .jpeg(quality: 0.85))
+            try Self.aspectFill(frame, width: pw, height: ph).write(for: r, as: .jpeg(quality: 0.85), policy: outputs)
             return RenderResponse(ok: true, ready: true, out: out)
         case .web:
             let html: String
@@ -181,13 +184,18 @@ final class SceneRenderer {
                 try await page.nextFrames(deadline: deadline)
                 let frame = try await page.snapshot(deadline: deadline)
                 guard let cg = frame.cgImage() else { throw RenderFailure("could not encode the frame") }
-                try Self.aspectFill(cg, width: pw, height: ph).write(to: outURL, as: .jpeg(quality: 0.85))
+                try Self.aspectFill(cg, width: pw, height: ph).write(for: r, as: .jpeg(quality: 0.85), policy: self.outputs)
                 return RenderResponse(ok: true, ready: true, errors: page.errors, out: out)
             }
         }
     }
 
     // MARK: - Helpers
+
+    /// Refuses a request whose `out` the server may not write, before any rendering.
+    private func validateOutput(_ r: RenderRequest) throws {
+        do { try outputs.validate(r) } catch { throw RenderFailure(error.localizedDescription) }
+    }
 
     /// Loads a page, waits for the runtime's 'ready', runs `body`, and always tears the page down.
     private func withPage(html: String, size: CGSize, dpr: Double, config: [String: Any], deadline: Date,

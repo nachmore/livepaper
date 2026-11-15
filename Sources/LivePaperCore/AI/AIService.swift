@@ -13,8 +13,8 @@ public final class AIService: AIServicing, @unchecked Sendable {
     private let runner: CommandRunning
     private let timeoutOverride: TimeInterval?
     private let lock = NSLock()
-    /// kiro-cli executable → whether it supports `--output-format stream-json`.
-    private var kiroStreamJSON: [String: Bool] = [:]
+    /// kiro-cli executable → what its `chat --help` offers.
+    private var kiroCapabilities: [String: KiroCapabilities] = [:]
     private var prunedWorkspaces = false
     private let log = Logger(subsystem: LPPaths.bundleID, category: "ai")
 
@@ -61,7 +61,7 @@ public final class AIService: AIServicing, @unchecked Sendable {
             DispatchQueue.global(qos: .userInitiated).async {
                 let harnesses = self.detector.detect()
                 // Probe capabilities now so starting a session never waits for it.
-                for h in harnesses where h.kind == .kiro { _ = self.kiroSupportsStreamJSON(h.executable) }
+                for h in harnesses where h.kind == .kiro { _ = self.kiroCapabilities(h.executable) }
                 done.resume(returning: harnesses)
             }
         }
@@ -86,16 +86,22 @@ public final class AIService: AIServicing, @unchecked Sendable {
         let deps = AISession.Dependencies(
             checker: checker,
             adapter: { [self] in
-                HarnessAdapters.adapter(for: harness, kiroStreamJSON: harness.kind == .kiro ? kiroSupportsStreamJSON(harness.executable) : true)
+                let kiro = harness.kind == .kiro ? kiroCapabilities(harness.executable) : KiroCapabilities(streamJSON: true, trustWorkspace: false)
+                return HarnessAdapters.adapter(for: harness, kiroStreamJSON: kiro.streamJSON, kiroTrustWorkspace: kiro.trustWorkspace)
             },
             environment: {
-                HarnessEnvironment.compose(process: ProcessInfo.processInfo.environment, login: detector.shell.snapshot(),
-                                           searchPath: detector.searchPath(), workspaceBin: workspace.bin)
+                // Marks every process of the harness as this session (the CLI then runs only the scene
+                // commands, on this workspace) and keeps the real CLI's location out of its view.
+                HarnessEnvironment.compose(process: ProcessInfo.processInfo.environment.filter { !AISessionPolicy.withheldVariables.contains($0.key) },
+                                           login: detector.shell.snapshot().withoutVariables(AISessionPolicy.withheldVariables),
+                                           searchPath: detector.searchPath(), workspaceBin: workspace.bin,
+                                           extra: AISessionPolicy.environment(sessionID: id, workspace: workspace))
             },
             searchPath: { detector.searchPath() },
             extraArguments: settings.extraArguments[harness.kind.rawValue] ?? [],
             timeout: timeoutOverride ?? settings.timeout,
-            prepareRenderer: Self.rendererWarmUp(for: checker))
+            prepareRenderer: Self.rendererWarmUp(for: checker),
+            renderRelay: Self.renderRelay(for: checker, workspace: workspace))
         let chosenModel = model ?? settings.models[harness.kind.rawValue]
         let session = AISession(id: id, workspace: workspace, request: request, harness: harness, model: chosenModel, dependencies: deps)
         log.info("starting AI session \(id, privacy: .public) with \(harness.name, privacy: .public)")
@@ -113,19 +119,29 @@ public final class AIService: AIServicing, @unchecked Sendable {
         return { try? client.ensureServer(timeout: 40) }
     }
 
+    /// The relay for an agent whose sandbox keeps its CLI off the render socket, talking to the
+    /// checker's own renderer (fakes in tests get none unless they use a SceneChecker).
+    static func renderRelay(for checker: SceneChecking, workspace: AIWorkspace) -> RenderRelay? {
+        guard let checker = checker as? SceneChecker else { return nil }
+        return RenderRelay(workspace: workspace, privateDirectory: workspace.relayDirectory, render: checker.render, compiler: checker.compiler)
+    }
+
     /// `20261113T175610Z-3f9a1c`: sortable, unique, file-name safe.
     static func makeSessionID(date: Date = Date()) -> String {
         "\(FileOps.timestamp(date))-\(UUID().uuidString.prefix(6).lowercased())"
     }
 
+    struct KiroCapabilities: Equatable { var streamJSON: Bool; var trustWorkspace: Bool }
+
     /// Asks `kiro-cli chat --help` once per executable (older versions only print text).
-    func kiroSupportsStreamJSON(_ executable: String) -> Bool {
-        if let known = lock.withLock({ kiroStreamJSON[executable] }) { return known }
+    func kiroCapabilities(_ executable: String) -> KiroCapabilities {
+        if let known = lock.withLock({ kiroCapabilities[executable] }) { return known }
         let env = HarnessEnvironment.compose(process: ProcessInfo.processInfo.environment, login: detector.shell.snapshot(),
                                              searchPath: detector.searchPath(), workspaceBin: nil)
         let help = (try? runner.run(executable, ["chat", "--help"], environment: env, timeout: 20))?.combinedOutput ?? ""
-        let supported = KiroAdapter.supportsStreamJSON(helpOutput: help)
-        lock.withLock { kiroStreamJSON[executable] = supported }
-        return supported
+        let found = KiroCapabilities(streamJSON: KiroAdapter.supportsStreamJSON(helpOutput: help),
+                                     trustWorkspace: KiroAdapter.supportsTrustWorkspace(helpOutput: help))
+        lock.withLock { kiroCapabilities[executable] = found }
+        return found
     }
 }

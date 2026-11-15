@@ -6,6 +6,7 @@
 // .check/previews/<still>.jpg, at most `maxPixels` on the long side, which agents are told to view.
 // ImageIO + CoreGraphics only: the CLI never links AppKit.
 import CoreGraphics
+import Darwin
 import Foundation
 import ImageIO
 import LivePaperCore
@@ -23,8 +24,12 @@ enum StillPreviews {
     /// nothing was written. Failures are not the scene's fault and never fail the check.
     @discardableResult
     static func write(for report: CheckReport, package: URL) -> URL? {
-        let dir = package.appendingPathComponent(SceneChecker.checkDirectory).appendingPathComponent(directoryName)
+        let check = package.appendingPathComponent(SceneChecker.checkDirectory)
+        let dir = check.appendingPathComponent(directoryName)
         let fm = FileManager.default
+        // `check` has just made .check a real directory; never follow a link swapped in since.
+        var st = stat()
+        guard lstat(check.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFDIR else { return nil }
         // `check` rewrites .check/ on every run; start from an empty directory so stale previews never linger.
         try? fm.removeItem(at: dir)
         var written = 0

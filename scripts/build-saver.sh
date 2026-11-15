@@ -10,7 +10,7 @@
 # LIVEPAPER_BUILD (CFBundleVersion), LIVEPAPER_ARCHS (default "arm64 x86_64").
 #
 # SwiftPM can't emit an MH_BUNDLE, so the saver is compiled directly with swiftc. It is
-# self-contained: Saver/*.swift plus the shared playlist model, no LivePaperCore.
+# self-contained: Saver/*.swift plus the shared playlist model and scene navigation gate, no LivePaperCore.
 # The bundle ships with an empty Contents/Resources/Playlist/ that publishing fills in later
 # (see Saver/README.md for why that doesn't need re-signing).
 set -euo pipefail
@@ -38,7 +38,8 @@ ARCHS=(${LIVEPAPER_ARCHS:-arm64 x86_64})
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/livepaper-saver.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-SOURCES=("$ROOT"/Saver/*.swift "$ROOT/Sources/LivePaperCore/Playlist/PlaylistModel.swift")
+SOURCES=("$ROOT"/Saver/*.swift "$ROOT/Sources/LivePaperCore/Playlist/PlaylistModel.swift"
+         "$ROOT/Sources/LivePaperCore/Render/SceneNavigationGate.swift")
 FRAMEWORKS=(-framework AppKit -framework ScreenSaver -framework WebKit -framework AVFoundation
             -framework QuartzCore -framework IOKit)
 

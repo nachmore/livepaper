@@ -24,7 +24,11 @@ private final class WeakMessageProxy: NSObject, WKScriptMessageHandler {
     }
 }
 
-final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
+final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegate {
+    /// What `loadHTMLString(_:baseURL: nil)` navigates to.
+    private static let blankPage = URL(string: "about:blank")!
+    /// Lets through only the page `load()` starts.
+    private var navigationGate = SceneNavigationGate()
     static let messageHandlerName = "livepaper"
     /// Reveal anyway if the page never reports ready (better a live page than a black screen).
     private static let readyDeadline: TimeInterval = 8
@@ -97,6 +101,7 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         webView.allowsBackForwardNavigationGestures = false
         webView.autoresizingMask = [.width, .height]
         webView.navigationDelegate = self
+        webView.uiDelegate = self
     }
 
     // MARK: SceneHost
@@ -111,6 +116,7 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         }
         // No base URL: the scene is self-contained, and the sandboxed WebContent process could not
         // read files from the saver bundle anyway.
+        navigationGate.expect(Self.blankPage)
         webView.loadHTMLString(html, baseURL: nil)
         after(Self.readyDeadline) { [weak self] in
             guard let self, !self.isReady, !self.failed else { return }
@@ -143,6 +149,7 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         pendingWork = []
         delegate = nil
         webView.navigationDelegate = nil
+        webView.uiDelegate = nil
         webView.stopLoading()
         webView.configuration.userContentController.removeScriptMessageHandler(forName: Self.messageHandlerName)
         webView.configuration.userContentController.removeAllUserScripts()
@@ -236,10 +243,35 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
     }
 
     /// Scenes are self-contained and offline: never let one navigate the lock screen somewhere else.
+    /// Only `load()`'s own page (loadHTMLString without a base URL, i.e. about:blank) goes through;
+    /// anything the scene starts — another address, data:/blob: documents, links, subframes, new
+    /// windows, downloads — is cancelled (SceneNavigationGate, shared with the app and RenderKit).
     func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        let scheme = navigationAction.request.url?.scheme?.lowercased() ?? "about"
-        let allowed = navigationAction.navigationType != .linkActivated && ["about", "data", "blob"].contains(scheme)
+        let kind: SceneNavigationGate.Kind
+        switch navigationAction.navigationType {
+        case .linkActivated: kind = .linkActivated
+        case .formSubmitted: kind = .formSubmitted
+        case .backForward: kind = .backForward
+        case .reload: kind = .reload
+        case .formResubmitted: kind = .formResubmitted
+        default: kind = .other
+        }
+        let allowed = navigationGate.decide(SceneNavigationGate.Request(
+            url: navigationAction.request.url, isMainFrame: navigationAction.targetFrame?.isMainFrame ?? false,
+            opensNewWindow: navigationAction.targetFrame == nil, kind: kind, isDownload: navigationAction.shouldPerformDownload))
+        if !allowed {
+            SaverLog.scene.notice("\(self.entryID, privacy: .public): blocked navigation to \(SceneNavigationGate.describe(navigationAction.request.url), privacy: .public)")
+        }
         decisionHandler(allowed ? .allow : .cancel)
     }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(navigationResponse.isForMainFrame && navigationResponse.canShowMIMEType ? .allow : .cancel)
+    }
+
+    /// `window.open` never opens anything.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 }

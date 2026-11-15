@@ -2,6 +2,7 @@
 import CoreGraphics
 import Foundation
 import ImageIO
+import LivePaperCore
 
 /// An opaque 8-bit sRGB RGBA image of an exact pixel size.
 struct Bitmap {
@@ -75,26 +76,24 @@ struct Bitmap {
         }
     }
 
-    /// Writes the image atomically (temp file + rename), creating the directory if needed.
-    func write(to url: URL, as type: FileType) throws {
+    /// The image encoded as PNG or JPEG.
+    func encoded(as type: FileType) throws -> Data {
         guard let image = cgImage() else { throw RenderFailure("could not encode the frame") }
-        let dir = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let tmp = dir.appendingPathComponent(".\(url.lastPathComponent).\(getpid()).tmp")
-        guard let dest = CGImageDestinationCreateWithURL(tmp as CFURL, type.uti, 1, nil) else {
-            throw RenderFailure("cannot write \(url.path)")
+        let data = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(data as CFMutableData, type.uti, 1, nil) else {
+            throw RenderFailure("could not encode the frame")
         }
         var props: [CFString: Any] = [:]
         if case .jpeg(let q) = type { props[kCGImageDestinationLossyCompressionQuality] = q }
         CGImageDestinationAddImage(dest, image, props as CFDictionary)
-        guard CGImageDestinationFinalize(dest) else {
-            try? FileManager.default.removeItem(at: tmp)
-            throw RenderFailure("cannot write \(url.path)")
-        }
-        if rename(tmp.path, url.path) != 0 {
-            let e = errno
-            try? FileManager.default.removeItem(at: tmp)
-            throw RenderFailure("cannot write \(url.path): \(String(cString: strerror(e)))")
-        }
+        guard CGImageDestinationFinalize(dest) else { throw RenderFailure("could not encode the frame") }
+        return data as Data
+    }
+
+    /// Writes the image to the `out` of `request`, within what `policy` allows (RenderOutputPolicy:
+    /// confined folders, symlinks resolved at write time, atomic replace).
+    func write(for request: RenderRequest, as type: FileType, policy: RenderOutputPolicy) throws {
+        let data = try encoded(as: type)
+        do { try policy.write(data, for: request) } catch { throw RenderFailure(error.localizedDescription) }
     }
 }

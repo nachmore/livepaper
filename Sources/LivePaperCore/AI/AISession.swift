@@ -33,6 +33,8 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         /// calls find it instead of starting LivePaperRenderd from inside the agent's process tree
         /// (where a sandbox such as Codex's would also confine it). Failures are left to the check.
         var prepareRenderer: () -> Void = {}
+        /// Relays the render requests a sandboxed agent can only leave in the spool (RenderSpool).
+        var renderRelay: RenderRelay?
     }
 
     private enum StopReason { case cancelled, timedOut }
@@ -109,6 +111,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         }
         sceneBefore = try? Data(contentsOf: sceneScript)
         deps.prepareRenderer()
+        deps.renderRelay?.start()
         parser = adapter.makeParser(workspaceRoot: ws.root)
         stdoutLog = Self.openLog(ws.stdoutLog)
         stderrLog = Self.openLog(ws.stderrLog)
@@ -175,6 +178,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
     private func harnessExited(status: Int32) {
         guard phase == .running else { return }
         child = nil
+        deps.renderRelay?.stop()
         stopPolling()
         scanStills()
         if let parser {
@@ -196,6 +200,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         guard (try? Data(contentsOf: sceneScript)) != sceneBefore else {
             finish(.failed("\(harness.name) finished without changing the scene.")); return
         }
+        // Everything below runs with the user's full rights, outside any sandbox the agent had: a
+        // link the agent left in its candidate would point the check's writes and the clean-up's
+        // deletes at files elsewhere (and a scene package must be self-contained anyway).
+        if let problem = candidateLinkProblem() { finish(.failed(problem)); return }
 
         phase = .checking
         emit(.status("Validating the scene…"))
@@ -237,9 +245,20 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
     static let candidateEntries: Set<String> = [SceneManifest.fileName, SceneCompiler.sceneFile, SceneCompiler.assetsDirectory,
                                                 SceneChecker.checkDirectory]
 
+    /// Why the candidate can't be used because of a symbolic link (scene/ itself or anything in
+    /// it), or nil.
+    private func candidateLinkProblem() -> String? {
+        guard let link = FileOps.firstSymlink(atOrIn: ws.scene) else { return nil }
+        let rel = link.path.hasPrefix(ws.root.path + "/") ? String(link.path.dropFirst(ws.root.path.count + 1)) : link.lastPathComponent
+        return "\(harness.name) left a symbolic link in the scene (\(rel)); LivePaper doesn't accept links in scenes, so it was discarded."
+    }
+
     private func finalizePackage() throws {
         let fm = FileManager.default
+        if let problem = candidateLinkProblem() { throw AIError.unsupported(problem) }
         for name in (try? fm.contentsOfDirectory(atPath: ws.scene.path)) ?? [] where !Self.candidateEntries.contains(name) {
+            // Re-checked right before each delete: never follow a link out of the candidate.
+            guard FileOps.isRealDirectory(ws.scene) else { throw AIError.unsupported("The scene directory was replaced while LivePaper finished it.") }
             try? fm.removeItem(at: ws.scene.appendingPathComponent(name))
         }
         var m = try SceneManifest.load(package: ws.scene)
@@ -316,6 +335,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         guard phase != .done else { return }
         phase = .done
         stopPolling()
+        deps.renderRelay?.stop()
         closeLogs()
         child?.terminateGroup()
         if case .failed(let reason) = event { log.notice("session \(self.id, privacy: .public) failed: \(reason, privacy: .public)") }

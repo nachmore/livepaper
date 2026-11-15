@@ -125,7 +125,9 @@ directories and inject fakes for commands, preferences and login items.
     AGENTS.md, CLAUDE.md          identical agent guide (Runtime/AGENTS.md + this session's task)
     TASK.md                       the user's request (reaches the harness only through this file)
     sdk/  scene/  bin/livepaper   API docs + examples, the candidate package, CLI shim
-    .livepaper/                   stdout.log, stderr.log, last-message.txt (codex); agents keep out
+    .livepaper/                   stdout.log, stderr.log, last-message.txt (codex), render-spool/; agents keep out
+    .kiro/agents/                 the restricted agent Kiro sessions run as
+  Workspaces/.render-relay/<id>/  scenes compiled by the session runner for relayed render requests
   state.json                      app → helper shared state (§4.4)
   playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes)
   ai-settings.json                AISettings: Settings › AI (shared by the app, the CLI and sessions)
@@ -281,7 +283,8 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
 * Reads `Playlist/playlist.json`; keeps entries whose file is a plain name with a supported
   extension (§4.3) that exists; picks a scene (shuffle with no-repeat across sessions and displays
   agreeing per 30 s epoch); crossfades every `cycleMinutes`; fallback scene when nothing plays.
-* **Web scenes:** `WKWebView` (`PassiveWebView`: no hit-testing), `loadHTMLString(baseURL: nil)`,
+* **Web scenes:** `WKWebView` (`PassiveWebView`: no hit-testing), `loadHTMLString(baseURL: nil)`
+  (the only navigation `SceneNavigationGate` lets through; no new windows or downloads),
   non-persistent data store, `window.LIVEPAPER_CONFIG = {clock, clockPosition, fps, scale, seed,
   power, lowPower, lockUI}` injected at document start, occlusion detection disabled, failure
   recovery with backoff.
@@ -347,7 +350,20 @@ connection; the server renders strictly one request at a time on the main thread
   every request: WebKit hides error details from opaque-origin scripts ("Script error."), and check
   must report syntax errors with message and line. Nothing can load through it, so scenes stay as
   offline as in the saver.
+* **Navigation policy** (`SceneNavigationGate`, also used by the app's previews and the saver): a
+  page may perform only the one load its host started. The scene setting `location`, links,
+  forms, subframes, `window.open` and downloads are cancelled — the CSP has no navigation
+  directive and the source scanner only sees literal URLs — and the attempt is reported as a
+  JavaScript error ("the scene tried to navigate to …"), so check fails the scene.
 * `devicePixelRatio` is emulated per request; App Nap is disabled while serving (else fps caps at 30).
+* **Outputs are confined** (`RenderOutputPolicy`): the server runs outside any agent's sandbox, so it
+  writes a still only as a `.png` into the `.check` folder holding the request's html, a thumbnail
+  only as a `.jpg` into the scene package it renders, or either into `<support>/Workspaces` or a
+  temporary folder. Symlinks are resolved at write time (the parent folder is opened and its real
+  path checked, the file is created and renamed relative to it); an existing destination must be a
+  regular file. Anything else is refused before rendering. `livepaper still|thumbnail --out
+  <elsewhere>` renders into the package's `.check` and moves the file itself, with the caller's
+  own permissions.
 
 ## 9. CLI `livepaper` (`Sources/LivePaperCLI`, Foundation + Core only)
 ```
@@ -387,14 +403,33 @@ Budgets (`CheckBudgets`):
   each probed with `--version`). Every harness runs in the workspace (cwd), in its own process
   group, with `bin/` first on PATH; the prompt only ever travels in TASK.md. `[--model M]` comes from
   the session or `AISettings.models[kind]`; `<extra>` from `AISettings.extraArguments[kind]`.
-  * Claude Code: `claude -p --output-format stream-json --verbose --permission-mode acceptEdits
-    --allowedTools "Read,Write,Edit,Glob,Grep,Bash(livepaper:*)" [--model M] <extra>`, TASK.md on stdin.
+  * Claude Code: `claude -p --output-format stream-json --verbose --permission-mode dontAsk
+    --allowedTools "Read(./**),Edit(./scene/**),Bash(livepaper check *),…" --disallowedTools
+    "WebFetch,WebSearch,Edit(./bin/**),…" [--model M] <extra>`, TASK.md on stdin. `dontAsk` denies
+    whatever the rules don't allow: reading the workspace, editing ./scene, and `livepaper
+    check|still|bench|live|thumbnail|compile|help` (Claude Code checks each part of a compound
+    command). `acceptEdits` is not used: it auto-approves edits and mv/cp anywhere in the workspace.
   * Codex: `codex exec -C <ws> -s workspace-write --skip-git-repo-check --json -o
-    <ws>/.livepaper/last-message.txt -c sandbox_workspace_write.network_access=true [-m M] <extra> -`,
-    TASK.md on stdin (`network_access` because workspace-write blocks the Unix socket `livepaper check` needs).
-  * Kiro CLI: `kiro-cli chat --no-interactive --trust-tools=fs_read,fs_write,execute_bash
+    <ws>/.livepaper/last-message.txt [-m M] <extra> -`, TASK.md on stdin. The sandbox keeps its
+    defaults (writes only in the workspace, no network). It also blocks the Unix socket `livepaper
+    check` needs, so the CLI falls back to the **render spool**: in a session, when the socket
+    can't be reached, `RenderClient` writes `<id>.request.json` into `LIVEPAPER_RENDER_SPOOL`
+    (`<ws>/.livepaper/render-spool`) and waits for `<id>.response.json`; it never starts a daemon
+    itself. `RenderRelay` (in the session runner, outside the sandbox, polling every 0.1 s)
+    claims each request and forwards it only if it is a still/bench/live/thumbnail/ping on a
+    package and outputs inside the workspace (`.png`/`.jpg`); for still/bench/live it compiles the
+    package itself into `<Workspaces>/.render-relay/<session>/`, where the agent can't write, so
+    the server never renders HTML the agent wrote. It touches the spool only through a descriptor
+    whose real path it checked, never through links.
+  * Kiro CLI: `kiro-cli chat --no-interactive --agent livepaper-session [--trust-workspace]
     --output-format stream-json [--model M] <extra> "<bootstrap>"` (`--wrap never` instead of
-    stream-json for versions whose `chat --help` doesn't offer it).
+    stream-json, and no `--trust-workspace`, for versions whose `chat --help` doesn't offer them).
+    No `--trust-tools`: the session runs as the workspace's own agent,
+    `.kiro/agents/livepaper-session.json` (`KiroAgentConfig`), which trusts reads, allows writes
+    only under `scene/**` and shell commands only of the form `livepaper <scene command> <plain
+    words>` — V2 engine: `toolsSettings` (anchored regex, `denyByDefault`); V3 engine:
+    `permissions.rules` (globs, everything else denied) — with no MCP servers or hooks. Anything
+    else would need approval, which a non-interactive run can't give.
   * Custom: a template such as `mytool --prompt-file {prompt_file} --cwd {workspace}`; placeholders
     `{prompt_file}` `{workspace}` `{scene}` `{model}` `{instructions}` (a lone `{model}` token is dropped
     without a model); POSIX-style quoting, no shell; TASK.md also on stdin. Validated by
@@ -403,8 +438,17 @@ Budgets (`CheckBudgets`):
     describes, following AGENTS.md."
 * **Workspace** per session (§4.1): `AGENTS.md` + `CLAUDE.md` (identical: scene rules, API, budgets,
   validation loop, "only edit ./scene"), `TASK.md`, `sdk/` (livepaper.d.ts, SCENE_API.md, templates,
-  3 example scenes), `scene/` (template for *create*, a copy of the scene for *modify*), `bin/livepaper`
-  (shim to the bundled CLI), `.livepaper/` (logs).
+  3 example scenes), `scene/` (template for *create*, a copy of the scene for *modify* without hidden
+  entries, agent instruction files or links), `bin/livepaper` (shim to the bundled CLI),
+  `.livepaper/` (logs). A modified scene is named by its id; its manifest name only appears as one
+  quoted, length-limited line marked as data.
+* **What an agent may run** (`AISessionPolicy`): every harness process carries
+  `LIVEPAPER_AI_SESSION`, `LIVEPAPER_AI_WORKSPACE` and `LIVEPAPER_RENDER_SPOOL` (and not
+  `LIVEPAPER_CLI`/`LIVEPAPER_RENDERD`). The shim sets them again and passes on only `check`,
+  `still`, `bench`, `live`, `thumbnail`, `compile` (and help/version); the CLI itself, with the
+  variables set, refuses every other command (exit 2) and any scene path or `--out` outside the
+  workspace (symlinks resolved). So `uninstall`, `publish`, `import`, `new`, nested `ai` sessions
+  and `server` control are out of reach whatever the harness's own rules let through.
 * **Flow:** create/modify → workspace → harness → stdout parsed into events (text, tool calls) and
   `scene/.check/*.png` reported as stills while the agent iterates → on exit LivePaper runs the
   check itself (never trusts the agent's word) → preview → "Add to library" / "Replace" (modify keeps

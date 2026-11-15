@@ -15,6 +15,10 @@ public struct ShellSnapshot: Sendable, Equatable {
         self.environment = environment; self.commands = commands
     }
     public var pathDirectories: [String] { (environment["PATH"] ?? "").split(separator: ":").map(String.init) }
+
+    func withoutVariables(_ names: Set<String>) -> ShellSnapshot {
+        ShellSnapshot(environment: environment.filter { !names.contains($0.key) }, commands: commands)
+    }
 }
 
 /// Resolves (once, then cached) the login-shell environment.

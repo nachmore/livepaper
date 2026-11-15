@@ -46,25 +46,36 @@ public enum HarnessAdapters {
     public static let bootstrapInstruction = "Read TASK.md in the current directory and carry out the task it describes, following AGENTS.md."
 
     /// - Parameter kiroStreamJSON: whether this kiro-cli supports `--output-format stream-json`.
-    public static func adapter(for harness: AIHarness, kiroStreamJSON: Bool = true) -> HarnessAdapter {
+    /// - Parameter kiroTrustWorkspace: whether it has `--trust-workspace` (V3 engine).
+    public static func adapter(for harness: AIHarness, kiroStreamJSON: Bool = true, kiroTrustWorkspace: Bool = false) -> HarnessAdapter {
         switch harness.kind {
         case .claude: return ClaudeAdapter()
         case .codex: return CodexAdapter()
-        case .kiro: return KiroAdapter(streamJSON: kiroStreamJSON)
+        case .kiro: return KiroAdapter(streamJSON: kiroStreamJSON, trustWorkspace: kiroTrustWorkspace)
         case .custom: return CustomAdapter()
         }
     }
 }
 
 /// Claude Code: `claude -p` reads the prompt from stdin; stream-json needs --verbose in print mode.
+///
+/// Permissions (rule syntax: code.claude.com/docs/en/permissions): `dontAsk` denies every tool call
+/// the rules don't allow, with nobody to ask in print mode anyway. The rules allow reading the
+/// workspace, editing files in ./scene and running the CLI's scene commands; the deny rules
+/// remove web access and protect LivePaper's own files even if the user's settings allow more.
+/// (`acceptEdits` would also auto-approve edits and mv/cp anywhere in the workspace — bin/livepaper
+/// included — and a bare `Write`/`Edit` allow rule approves writes anywhere on disk.) Claude Code
+/// checks each part of a compound command, so `livepaper check scene && rm …` is refused.
 public struct ClaudeAdapter: HarnessAdapter {
-    /// File tools plus the livepaper CLI only (no general shell access).
-    public static let allowedTools = "Read,Write,Edit,Glob,Grep,Bash(livepaper:*)"
+    public static let allowedTools = (["Read(./**)", "Edit(./scene/**)"]
+        + (AISessionPolicy.commands + ["help"]).map { "Bash(livepaper \($0) *)" }).joined(separator: ",")
+    public static let disallowedTools = ["WebFetch", "WebSearch", "Edit(./bin/**)", "Edit(./sdk/**)", "Edit(./.livepaper/**)",
+                                         "Edit(./.kiro/**)", "Edit(./AGENTS.md)", "Edit(./CLAUDE.md)", "Edit(./TASK.md)"].joined(separator: ",")
     public init() {}
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         var args = ["-p", "--output-format", "stream-json", "--verbose",
-                    "--permission-mode", "acceptEdits", "--allowedTools", Self.allowedTools]
+                    "--permission-mode", "dontAsk", "--allowedTools", Self.allowedTools, "--disallowedTools", Self.disallowedTools]
         if let model = context.model { args += ["--model", model] }
         args += context.extraArguments
         return HarnessInvocation(executable: harness.executable, arguments: args,
@@ -75,16 +86,18 @@ public struct ClaudeAdapter: HarnessAdapter {
 }
 
 /// Codex: `codex exec … -` reads the prompt from stdin; --json streams JSONL events.
+///
+/// The workspace-write sandbox (writes only in the workspace, no network) stays as Codex makes it.
+/// It also blocks the Unix socket `livepaper check` uses to reach the render server; instead of
+/// opening the sandbox to the whole network for it, the CLI leaves its requests in the
+/// workspace's render spool and the session runner relays them (RenderSpool / RenderRelay).
 public struct CodexAdapter: HarnessAdapter {
     public init() {}
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         let ws = context.workspace
         var args = ["exec", "-C", ws.root.path, "-s", "workspace-write", "--skip-git-repo-check", "--json",
-                    "-o", ws.lastMessageFile.path,
-                    // workspace-write blocks all sockets by default, including the Unix socket
-                    // `livepaper check` uses to reach the RenderService.
-                    "-c", "sandbox_workspace_write.network_access=true"]
+                    "-o", ws.lastMessageFile.path]
         if let model = context.model { args += ["-m", model] }
         args += context.extraArguments
         args.append("-")
@@ -94,15 +107,21 @@ public struct CodexAdapter: HarnessAdapter {
     public func makeParser(workspaceRoot: URL) -> HarnessStreamParser { CodexStreamParser(workspaceRoot: workspaceRoot) }
 }
 
-/// Kiro CLI: `kiro-cli chat --no-interactive` takes the first message as an argument.
+/// Kiro CLI: `kiro-cli chat --no-interactive` takes the first message as an argument. The session
+/// runs as the workspace's own agent (KiroAgentConfig: writes only in ./scene, the shell only for
+/// the livepaper scene commands) and trusts nothing on the command line.
 public struct KiroAdapter: HarnessAdapter {
-    public static let trustedTools = "fs_read,fs_write,execute_bash"
     /// `--output-format stream-json` (kiro-cli 3.x); older versions only print text.
     public let streamJSON: Bool
-    public init(streamJSON: Bool) { self.streamJSON = streamJSON }
+    /// `--trust-workspace` (V3 engine): load the workspace's agent without the "Trust this
+    /// workspace?" prompt a non-interactive run can't answer. Only LivePaper writes the workspace's
+    /// .kiro/ (the agent itself may write only in ./scene).
+    public let trustWorkspace: Bool
+    public init(streamJSON: Bool, trustWorkspace: Bool = false) { self.streamJSON = streamJSON; self.trustWorkspace = trustWorkspace }
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
-        var args = ["chat", "--no-interactive", "--trust-tools=\(Self.trustedTools)"]
+        var args = ["chat", "--no-interactive", "--agent", KiroAgentConfig.name]
+        if trustWorkspace { args.append("--trust-workspace") }
         // Text mode would otherwise wrap long lines at an assumed terminal width.
         args += streamJSON ? ["--output-format", "stream-json"] : ["--wrap", "never"]
         if let model = context.model { args += ["--model", model] }
@@ -119,6 +138,11 @@ public struct KiroAdapter: HarnessAdapter {
     /// Whether `kiro-cli chat --help` advertises stream-json output.
     public static func supportsStreamJSON(helpOutput: String) -> Bool {
         helpOutput.contains("--output-format") && helpOutput.contains("stream-json")
+    }
+
+    /// Whether `kiro-cli chat --help` offers `--trust-workspace`.
+    public static func supportsTrustWorkspace(helpOutput: String) -> Bool {
+        helpOutput.contains("--trust-workspace")
     }
 }
 
