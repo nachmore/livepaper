@@ -6,6 +6,7 @@
 // Entry/SystemActions.swift. That keeps this file compilable into LivePaperSelfTest (via
 // Sources/LivePaperSelfTest/AppLogic/) where its state transitions are tested against the mocks.
 import Foundation
+import CoreGraphics
 import Observation
 import LivePaperCore
 
@@ -179,6 +180,7 @@ final class AppModel {
         async let pl: Void = loadPlaylist()
         async let st: Void = refreshInstallStatus()
         _ = await (lib, pl, st)
+        await updateInstalledSaverIfNeeded()
         syncLockKeysMirror()
         await detectHarnesses()
         await generateMissingThumbnails()
@@ -680,6 +682,24 @@ final class AppModel {
 
     /// Everything setup and Settings show status for.
     var setupState: SetupState { SetupState(install: installStatus) }
+
+    /// After an app update the copy in ~/Library/Screen Savers is still the old build (the saver's
+    /// code — shuffle, power gate, clock hand-off — lives there, not in the app). Replace it with the
+    /// bundled template, keeping the published playlist; skipped while the Mac is locked.
+    func updateInstalledSaverIfNeeded() async {
+        guard installStatus.saverInstalled, !installStatus.saverUpToDate else { return }
+        // Never swap the bundle under a running lock screen.
+        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
+           (session["CGSSessionScreenIsLocked"] as? Bool) == true { return }
+        let install = services.install
+        do {
+            try await offMain { try install.installSaver() }
+            NSLog("LivePaper: updated the installed screen saver to this version")
+        } catch {
+            NSLog("LivePaper: couldn't update the installed screen saver: \(error.localizedDescription)")
+        }
+        await refreshInstallStatus()
+    }
 
     func refreshInstallStatus() async {
         let install = services.install
