@@ -42,40 +42,11 @@ struct Bitmap {
         self.pixels = pixels
     }
 
-    /// The motion heat map of `livepaper check`: this frame dimmed to grey, each tile of a
-    /// `cols`×`rows` grid tinted by how often it changed within 5 s (`alive`, 0–1: blue at some
-    /// sampled moments, amber at most of them, plain grey never), thin tile borders, and tiles that
-    /// flicker outlined in red.
+    /// The motion heat map of `livepaper check` over this frame (MotionAnalysis.heatmap): tiles tinted
+    /// by how often they changed within 5 s, thin tile borders, and tiles that flicker outlined in red.
     func motionHeatmap(alive: [Double], flicker: [Bool], cols: Int, rows: Int) -> Bitmap {
-        var out = pixels
-        let colOf = (0..<width).map { $0 * cols / width }, rowOf = (0..<height).map { $0 * rows / height }
-        for y in 0..<height {
-            let r = rowOf[y]
-            let rowEdge = y == 0 || rowOf[y - 1] != r, rowEdge2 = rowEdge || y == 1 || (y > 1 && rowOf[y - 2] != r)
-            for x in 0..<width {
-                let c = colOf[x], tile = r * cols + c, i = (y * width + x) * 4
-                let colEdge = x == 0 || colOf[x - 1] != c, colEdge2 = colEdge || x == 1 || (x > 1 && colOf[x - 2] != c)
-                let luma = 0.2126 * Double(pixels[i]) + 0.7152 * Double(pixels[i + 1]) + 0.0722 * Double(pixels[i + 2])
-                // Lifted and stretched so even a dark scene stays recognisable under the tint.
-                let grey = 40 + 0.8 * luma
-                var rgb = (grey, grey, grey)
-                let a = tile < alive.count ? alive[tile] : 0
-                if a > 0 {
-                    let (tint, k): ((Double, Double, Double), Double) = a >= 0.5 ? ((255, 165, 30), 0.22 + 0.2 * a) : ((70, 150, 255), 0.3)
-                    rgb = (rgb.0 + (tint.0 - rgb.0) * k, rgb.1 + (tint.1 - rgb.1) * k, rgb.2 + (tint.2 - rgb.2) * k)
-                }
-                if tile < flicker.count, flicker[tile], rowEdge2 || colEdge2 {
-                    rgb = (235, 40, 40)
-                } else if rowEdge || colEdge {
-                    rgb = (rgb.0 * 0.55, rgb.1 * 0.55, rgb.2 * 0.55)
-                }
-                out[i] = UInt8(max(0, min(255, rgb.0.rounded())))
-                out[i + 1] = UInt8(max(0, min(255, rgb.1.rounded())))
-                out[i + 2] = UInt8(max(0, min(255, rgb.2.rounded())))
-                out[i + 3] = 255
-            }
-        }
-        return Bitmap(width: width, height: height, pixels: out)
+        Bitmap(width: width, height: height,
+               pixels: MotionAnalysis.heatmap(pixels, width: width, height: height, alive: alive, flicker: flicker, cols: cols, rows: rows))
     }
 
     func cgImage() -> CGImage? {

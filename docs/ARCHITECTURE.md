@@ -379,9 +379,16 @@ connection; the server renders strictly one request at a time on the main thread
   runtime steps to t in 1/30 s steps exactly like a still, clock overlay hidden, clock time fixed),
   snapshots at 0, 1, 3, 7, 15 frames and every gap later, and per tile of the grid compares the
   frame at t with each gap (`level`: mean of max(0, d − 2), d = largest channel difference;
-  `area`: share of pixels with d ≥ 8) and successive burst frames (`flicker`: the largest step).
-  `out` (optional) gets a heat map PNG. The verdict (coverage, regions, busy, flicker) is computed
-  by the client from these maps (`MotionAnalysis.summarize`/`verdict`).
+  `area`: share of pixels with d ≥ 8) and successive burst frames (`flicker`: the largest step,
+  over spans of 1, 2, 4 and 8 frames). Each frame is compared as it arrives, so only the frame at t
+  and the previous burst frame are kept (`MotionAnalysis.SampleBuilder`). `out` (optional) gets a
+  heat map PNG. The verdict (coverage, regions, busy, flicker) is computed by the client from these
+  maps (`MotionAnalysis.summarize`/`verdict`). The answer is one line, so cols × rows × times ×
+  (gaps + 1) may be at most 65,536 (`MotionAnalysis.maxTileValues`; the check uses 2,304–3,328); a
+  failure names the moment it happened at ("… (at t = 41 s)").
+* **Time limits** (`RenderLimits`): every request runs under the server's own deadline — 60 s, bench
+  90 s, motion 150 s, live its (clamped) warm-up and run + 30 s. A request's `timeout` can set
+  another, but at most 15 minutes: the server has one render slot for every client on the Mac.
 * **Who serves:** the process holding `render-server.lock` (flock; dies with its process). The app
   starts an embedded server at launch; if `LivePaperRenderd` serves, the app asks it to `shutdown`
   and takes over when it exits. Clients start at most one daemon (`renderd-launch.lock`) and retry
@@ -445,7 +452,7 @@ Budgets (`CheckBudgets`):
 | CPU energy, battery profile (`--power`) | > 300 mW | > 150 mW, or live fps < 85 % of 30 |
 | Motion within 5 s (`MotionBudgets`; a tile moves at level ≥ 0.5 or area ≥ 3 %) | < 25 % of the frame, or motion in < 5 of the 9 regions (thirds × thirds) | < 50 % within 5 s or < 25 % within 2 s; any still region |
 | Busy: tiles with level ≥ 16 within 0.5 s | > 50 % of the frame | |
-| Flicker: tiles with a frame-to-frame step ≥ 10 | > 30 % of the frame | |
+| Flicker: tiles whose largest step between successive burst frames (1–8 frames apart: within ¼ s) is ≥ 10 — flashes, strobing, fast whole-frame fades | > 30 % of the frame | |
 | Motion not measured (render server too old) | | always |
 
 Motion calibration (2026-11, the built-ins as they were before their motion pass, at 16:9 / 5:4;
@@ -477,11 +484,16 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
     can't be reached, `RenderClient` writes `<id>.request.json` into `LIVEPAPER_RENDER_SPOOL`
     (`<ws>/.livepaper/render-spool`) and waits for `<id>.response.json`; it never starts a daemon
     itself. `RenderRelay` (in the session runner, outside the sandbox, polling every 0.1 s)
-    claims each request and forwards it only if it is a still/bench/live/thumbnail/ping on a
-    package and outputs inside the workspace (`.png`/`.jpg`); for still/bench/live it compiles the
-    package itself into `<Workspaces>/.render-relay/<session>/`, where the agent can't write, so
-    the server never renders HTML the agent wrote. It touches the spool only through a descriptor
-    whose real path it checked, never through links.
+    claims each request and forwards it only if it is a still/bench/live/motion/thumbnail/ping on
+    a package and outputs inside the workspace (`.png`/`.jpg`); for still/bench/live/motion it
+    compiles the package itself into `<Workspaces>/.render-relay/<session>/`, where the agent can't
+    write, so the server never renders HTML the agent wrote. The server writes images there too,
+    never into the workspace (its own rules admit every AI workspace, so a folder swapped for a link
+    after the relay's check could aim it at another session): the relay copies each one to the
+    agent's `out` itself, through the folder it opened and whose real path it checked inside the
+    workspace (`RenderOutputPolicy`, write time). It drops `timeout` (no scene command sets it;
+    the server's own limits apply) and touches the spool only through a descriptor whose real path
+    it checked, never through links.
   * Kiro CLI: `kiro-cli chat --no-interactive --agent livepaper-session [--trust-workspace]
     --output-format stream-json [--model M] <extra> "<bootstrap>"` (`--wrap never` instead of
     stream-json, and no `--trust-workspace`, for versions whose `chat --help` doesn't offer them).

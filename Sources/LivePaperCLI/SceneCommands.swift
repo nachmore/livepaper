@@ -92,11 +92,13 @@ enum SceneCommands {
     static func printMotion(_ r: CheckReport, checkDir: URL, previews: URL?) {
         guard let motion = r.motion, !motion.isEmpty else { return }
         let b = CheckBudgets().motion
-        let pct = MotionAnalysis.percent
+        let pct = MotionAnalysis.percent(_:), against = MotionAnalysis.percent(_:limit:)
         for (i, m) in motion.enumerated() {
-            print((i == 0 ? "  motion       " : "               ") + "\(m.size): \(pct(m.coverage5s)) of the frame changes within 5 s " +
-                  "(min \(pct(b.minCoverage5s))), \(pct(m.coverage2s)) within 2 s  ·  moving in \(m.movingRegions)/9 regions " +
-                  "(min \(b.minRegions))  ·  busy \(pct(m.busy)) (max \(pct(b.maxBusy)))  ·  flicker \(pct(m.flicker)) (max \(pct(b.maxFlicker)))")
+            // Numbers next to a limit are printed so they never read as the limit itself.
+            print((i == 0 ? "  motion       " : "               ") + "\(m.size): \(against(m.coverage5s, b.minCoverage5s)) of the frame changes " +
+                  "within 5 s (min \(pct(b.minCoverage5s))), \(against(m.coverage2s, b.goodCoverage2s)) within 2 s  ·  moving in " +
+                  "\(m.movingRegions)/9 regions (min \(b.minRegions))  ·  busy \(against(m.busy, b.maxBusy)) (max \(pct(b.maxBusy)))  ·  " +
+                  "flicker \(against(m.flicker, b.maxFlicker)) (max \(pct(b.maxFlicker)))")
         }
         let verdict = MotionAnalysis.verdict(motion, budgets: b)
         guard !verdict.problems.isEmpty || !verdict.warnings.isEmpty,

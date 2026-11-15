@@ -30,6 +30,7 @@ extension SelfTests {
             TestCase(name: "runtime.check.compileFailureSkipsRendering", run: RuntimeTests.checkCompileFailure),
             TestCase(name: "runtime.check.symlinkedCheckDirectory", run: RuntimeTests.checkSymlinkedCheckDirectory),
             TestCase(name: "runtime.render.outputConfinement", run: RuntimeTests.renderOutputConfinement),
+            TestCase(name: "runtime.render.timeLimits", run: RuntimeTests.renderTimeLimits),
             TestCase(name: "runtime.render.navigationGate", run: RuntimeTests.navigationGate),
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
             TestCase(name: "runtime.client.spoolFallback", run: RuntimeTests.clientSpoolFallback),
@@ -37,6 +38,10 @@ extension SelfTests {
             TestCase(name: "runtime.motion.tileDiff", run: RuntimeTests.motionTileDiff),
             TestCase(name: "runtime.motion.syntheticScenes", run: RuntimeTests.motionSyntheticScenes),
             TestCase(name: "runtime.motion.checkVerdicts", run: RuntimeTests.motionCheckVerdicts),
+            TestCase(name: "runtime.motion.sampleBuilder", run: RuntimeTests.motionSampleBuilder),
+            TestCase(name: "runtime.motion.responseFitsALine", run: RuntimeTests.motionResponseLimit),
+            TestCase(name: "runtime.motion.verdictNumbers", run: RuntimeTests.motionVerdictNumbers),
+            TestCase(name: "runtime.motion.heatmapOutline", run: RuntimeTests.motionHeatmapOutline),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
             TestCase(name: "runtime.e2e.motionScenes", run: RuntimeTests.endToEndMotion),
             TestCase(name: "runtime.e2e.motionBuiltins", run: RuntimeTests.endToEndMotionBuiltins),
@@ -312,9 +317,18 @@ enum RuntimeTests {
     final class FakeRender: RenderClienting, @unchecked Sendable {
         let lock = NSLock()
         var requests: [RenderRequest] = []
+        /// Writes a stand-in image to each request's `out`, like the server would (off by default).
+        var writesOutputs = false
+        /// Runs before answering (e.g. to change the file system while the "server" renders).
+        var whileRendering: ((RenderRequest) -> Void)?
         private func record(_ request: RenderRequest) { lock.lock(); requests.append(request); lock.unlock() }
         func send(_ request: RenderRequest, timeout: TimeInterval) async throws -> RenderResponse {
             record(request)
+            whileRendering?(request)
+            if writesOutputs, let out = request.out, [.still, .motion, .thumbnail].contains(request.op) {
+                try FileManager.default.createDirectory(at: URL(fileURLWithPath: out).deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data("image of \(request.op.rawValue) t=\(Int(request.t ?? 0))".utf8).write(to: URL(fileURLWithPath: out))
+            }
             switch request.op {
             case .still: return RenderResponse(ok: true, ready: true, out: request.out, meanLuma: 25, clockLuma: 10)
             case .bench: return RenderResponse(ok: true, ready: true, benchMs: request.t == 12 ? 2.5 : 1.0)
@@ -323,6 +337,7 @@ enum RuntimeTests {
                 var r = RuntimeTests.aliveMotion(CheckFrame(Int(request.width ?? 1280), Int(request.height ?? 720), dpr: request.dpr ?? 0.5, t: 0))
                 r.out = request.out
                 return r
+            case .thumbnail: return RenderResponse(ok: true, ready: true, out: request.out)
             default: return RenderResponse(ok: true, ready: true)
             }
         }
@@ -394,6 +409,24 @@ enum RuntimeTests {
     /// The render server runs outside any agent sandbox, so the `out` a client names must stay in
     /// the request's own .check (or scene package, for thumbnails), LivePaper's AI workspaces or a
     /// temporary directory — with symlinks resolved at the moment of writing.
+    /// The render server's deadline for a request: its own per-op limit, or the client's `timeout`
+    /// capped — never a client number that could hold the one render slot indefinitely.
+    static func renderTimeLimits() throws {
+        try expectEqual(RenderRequest(op: .still).serverTimeout, 60)
+        try expectEqual(RenderRequest(op: .bench).serverTimeout, 90)
+        try expectEqual(RenderRequest(op: .motion).serverTimeout, 150)
+        try expectEqual(RenderRequest(op: .live).serverTimeout, 12 + 3 + 30)
+        try expectEqual(RenderRequest(op: .motion, timeout: 20).serverTimeout, 20)
+        try expectEqual(RenderRequest(op: .motion, timeout: 100_000_000).serverTimeout, RenderLimits.maxTimeout)
+        try expectEqual(RenderRequest(op: .still, timeout: -5).serverTimeout, 60)
+        try expectEqual(RenderRequest(op: .still, timeout: .infinity).serverTimeout, 60)
+        // live's limit follows the run it measures, clamped like the run itself (≤ 600 s + 60 s warm-up).
+        try expectEqual(RenderRequest(op: .live, seconds: 1e9, warmup: 1e9).serverTimeout, 600 + 60 + 30)
+        try expectEqual(RenderRequest(op: .live, seconds: 10, warmup: 3).serverTimeout, 43)
+        try expectEqual(RenderRequest(op: .live, seconds: -1, warmup: -1).liveSeconds, 1)
+        try expect(RenderLimits.maxTimeout >= RenderRequest(op: .live, seconds: 600, warmup: 60).serverDefaultTimeout, "the longest default fits")
+    }
+
     static func renderOutputConfinement() throws {
         let fm = FileManager.default
         let root = try tempDir("outputs").resolvingSymlinksInPath()
@@ -761,6 +794,13 @@ extension RuntimeTests {
             let (r, g, b) = still(x, y, t)
             return Int((t * 6).rounded(.down)) % 2 == 0 ? (r + 70, g + 70, b + 70) : (r, g, b)
         }
+        /// The whole frame fades up by 60 code values over 1 s, starting at each whole second
+        /// (so at every sampled moment): smooth, but faster than SCENE_API §7 allows.
+        static let fastFade: SyntheticScene = { x, y, t in
+            let (r, g, b) = still(x, y, t)
+            let p = min(1, t - t.rounded(.down)), k = p * p * (3 - 2 * p)
+            return (r + 60 * k, g + 60 * k, b + 60 * k)
+        }
         /// High-contrast stripes panning fast across the whole frame.
         static let fastPan: SyntheticScene = { x, y, t in
             let v = sin((Double(x) + Double(y) * 0.4 - t * 160) * 0.12) > 0 ? 90.0 : 20.0
@@ -834,6 +874,15 @@ extension RuntimeTests {
         try expect(s.flicker > 0.9 && s.coverage5s == 1, "flicker \(s.flicker), coverage \(s.coverage5s)")
         try expect(problems.contains { $0.hasPrefix("Flickers at 320x180@1 (t = ") && $0.contains("strobing") }, "\(problems)")
         try expect(!problems.contains { $0.contains("Too static") }, "\(problems)")
+        // Flicker compares burst frames up to 8 frames apart: it says so, and its advice fits what it
+        // also catches — a fast whole-frame fade — instead of claiming single-frame jumps.
+        let flickers = problems.first { $0.hasPrefix("Flickers") } ?? ""
+        try expect(flickers.contains("within a fraction of a second") && flickers.contains("over a couple of seconds or more") &&
+                   !flickers.contains("from one frame to the next") && !flickers.contains("over a second or more"), flickers)
+        (s, problems, _) = judge(Synthetic.fastFade)
+        try expect(s.flicker > b.maxFlicker, "a 1 s whole-frame fade counts as sharp change: \(s.flicker)")
+        try expect(problems.contains { $0.hasPrefix("Flickers") && $0.contains("fade whole-frame brightness and colour over a couple of seconds") },
+                   "\(problems)")
 
         (s, problems, _) = judge(Synthetic.fastPan)
         try expect(s.busy > 0.9, "busy \(s.busy)")
@@ -900,9 +949,18 @@ extension RuntimeTests {
         try expect(report.passed && report.warnings.contains { $0.hasPrefix("Motion was not measured") }, "\(report.problems) \(report.warnings)")
         try expectEqual(report.motion, [])
         // A motion render that fails is a problem like any other render failure.
-        let timeout = RenderResponse(ok: false, ready: true, note: "timed out taking a snapshot")
+        let timeout = RenderResponse(ok: false, ready: true, note: "timed out taking a snapshot (at t = 41 s)")
         report = SceneChecker.evaluate(results(plan, motion: { _ in timeout }), plan: plan, budgets: CheckBudgets(), quick: false)
         try expect(report.problems.contains { $0.contains("motion measurement failed") && $0.contains("1280x720@0.5") }, "\(report.problems)")
+        // …named by size and the moment the server reports, never by the t=0 motion never samples.
+        let failed = report.problems.filter { $0.contains("motion measurement") }
+        try expectEqual(failed, ["The motion measurement failed: timed out taking a snapshot (at t = 41 s) (at 1280x720@0.5, 1024x820@0.5)."])
+        let notReady = RenderResponse(ok: false, ready: false, note: "timed out waiting for the scene to become ready (at t = 120 s)")
+        report = SceneChecker.evaluate(results(plan, motion: { _ in notReady }), plan: plan, budgets: CheckBudgets(), quick: false)
+        let loading = report.problems.first { $0.contains("motion measurement") } ?? ""
+        try expect(loading.hasPrefix("The scene did not finish loading for the motion measurement") && loading.contains("(at t = 120 s)") &&
+                   loading.contains("replays update() in 1/30 s steps up to each sampled moment (t = 3, 17, 41 and 120 s)") &&
+                   !loading.contains("t=0") && !loading.contains("t=600"), loading)
         // JS errors seen while measuring motion are reported too.
         var withError = aliveMotion(CheckPlan.motionWide)
         withError.errors = ["draw: ReferenceError: fog is not defined (scene.js:9:3)"]
@@ -922,6 +980,130 @@ extension RuntimeTests {
         try expectEqual(reqs.first?.grid, [16, 9])
         try expectEqual(reqs.first?.dpr, 0.5)
         try expectEqual(report.motion?.count, 1)
+    }
+
+    /// The render server builds each sample frame by frame, keeping only two frames: the result is
+    /// the same as comparing every snapshot afterwards (the burst's successive pairs, each gap with t).
+    static func motionSampleBuilder() throws {
+        let (w, h) = (160, 90), (cols, rows) = MotionAnalysis.grid(width: 160, height: 90)
+        func frame(_ scene: SyntheticScene, _ t: Double) -> [UInt8] {
+            var px = [UInt8](repeating: 255, count: w * h * 4)
+            for y in 0..<h { for x in 0..<w {
+                let (r, g, b) = scene(x, y, t), i = (y * w + x) * 4
+                px[i] = UInt8(max(0, min(255, r.rounded()))); px[i + 1] = UInt8(max(0, min(255, g.rounded()))); px[i + 2] = UInt8(max(0, min(255, b.rounded())))
+            } }
+            return px
+        }
+        /// Every snapshot kept, then compared (what the server did before).
+        func reference(_ t: Double, _ gaps: [Double], _ frames: [Int: [UInt8]]) -> MotionSample {
+            let zero = MotionTiles(level: Array(repeating: 0, count: cols * rows), area: Array(repeating: 0, count: cols * rows))
+            guard let base = frames[0] else { return MotionSample(t: t, gaps: [], flicker: zero) }
+            let result = gaps.compactMap { gap in
+                frames[MotionAnalysis.frames(gap)].map { MotionGap(gap: gap, tiles: MotionAnalysis.tiles(base, $0, width: w, height: h, cols: cols, rows: rows)) }
+            }
+            var flicker = zero
+            for (from, to) in zip(MotionAnalysis.flickerOffsets, MotionAnalysis.flickerOffsets.dropFirst()) {
+                guard let a = frames[from], let b = frames[to] else { continue }
+                let step = MotionAnalysis.tiles(a, b, width: w, height: h, cols: cols, rows: rows)
+                for i in flicker.level.indices {
+                    flicker.level[i] = max(flicker.level[i], step.level[i]); flicker.area[i] = max(flicker.area[i], step.area[i])
+                }
+            }
+            return MotionSample(t: t, gaps: result, flicker: flicker)
+        }
+        for (scene, gaps, drop) in [(Synthetic.strobing, MotionAnalysis.defaultGaps, nil), (Synthetic.everywhere, [0.2, 0.5, 2], nil),
+                                    (Synthetic.fastPan, [5, 0.5], 3), (Synthetic.oneSmallMover, MotionAnalysis.defaultGaps, 0)] as [(SyntheticScene, [Double], Int?)] {
+            var frames: [Int: [UInt8]] = [:]
+            for o in MotionAnalysis.offsets(gaps: gaps) where o != drop { frames[o] = frame(scene, 17 + Double(o) / MotionAnalysis.frameRate) }
+            var builder = MotionAnalysis.SampleBuilder(t: 17, gaps: gaps, width: w, height: h, cols: cols, rows: rows)
+            for o in frames.keys.sorted() { builder.add(offset: o, frame: frames[o]!) }
+            let expected = reference(17, gaps, frames)
+            try expectEqual(builder.finish(), expected)
+            try expectEqual(MotionAnalysis.sample(t: 17, gaps: gaps, frames: frames, width: w, height: h, cols: cols, rows: rows), expected)
+        }
+    }
+
+    /// The server refuses a motion request whose answer wouldn't fit in the one line a client reads.
+    static func motionResponseLimit() throws {
+        try expect(MotionAnalysis.responseFits(cols: 16, rows: 13, times: 4, gaps: 3), "the check's own requests")
+        try expect(MotionAnalysis.responseFits(cols: 64, rows: 64, times: 4, gaps: 3), "64x64 at the default sampling")
+        try expect(!MotionAnalysis.responseFits(cols: 64, rows: 64, times: 8, gaps: 6), "the largest grid, moments and gaps")
+        try expect(!MotionAnalysis.responseFits(cols: 48, rows: 48, times: 8, gaps: 6), "48x48, 8 moments, 6 gaps (~1.5 MB)")
+        try expect(!MotionAnalysis.responseFits(cols: Int.max, rows: 2, times: 1, gaps: 0), "overflow")
+        // The worst answer still allowed — every tile changing with the longest numbers — fits.
+        let (cols, rows, times, gaps) = (64, 64, 4, 3)
+        try expectEqual(cols * rows * times * (gaps + 1), MotionAnalysis.maxTileValues)
+        let tiles = MotionTiles(level: Array(repeating: 252.99, count: cols * rows), area: Array(repeating: 0.999, count: cols * rows))
+        let samples = (0..<times).map { i in
+            MotionSample(t: 3600 - Double(i), gaps: (0..<gaps).map { MotionGap(gap: 29.97 - Double($0), tiles: tiles) }, flicker: tiles)
+        }
+        var r = RenderResponse(ok: true, ready: true, errors: [], note: "8 moments × 11 frames at 8192x8192@2",
+                               out: "/" + String(repeating: "x", count: 1000) + ".png",
+                               motion: MotionMeasurement(width: 16384, height: 16384, cols: cols, rows: rows, samples: samples))
+        r.errors = []
+        let line = try JSONEncoder().encode(r)
+        try expect(line.count + 1 < LineSocket.maxLineBytes, "\(line.count) bytes")
+    }
+
+    /// Numbers next to a limit never read as the limit itself, and each advice threshold is checked
+    /// at every size.
+    static func motionVerdictNumbers() throws {
+        let b = MotionBudgets()
+        func summary(_ size: String, _ c5: Double, _ c2: Double, busy: Double = 0, flicker: Double = 0) -> MotionSummary {
+            MotionSummary(size: size, cols: 16, rows: 9, times: MotionAnalysis.defaultTimes, coverage2s: c2, coverage5s: c5, spread: 1,
+                          stillRegions: [], busy: busy, flicker: flicker, flickerAt: flicker > 0 ? 17 : nil, map: [])
+        }
+        try expectEqual(MotionAnalysis.percent(0.247, limit: 0.25), "24.7 %")
+        try expectEqual(MotionAnalysis.percent(0.2496, limit: 0.25), "24.9 %")
+        try expectEqual(MotionAnalysis.percent(0.503, limit: 0.5), "50.3 %")
+        try expectEqual(MotionAnalysis.percent(0.5001, limit: 0.5), "50.1 %")
+        try expectEqual(MotionAnalysis.percent(0.302, limit: 0.3), "30.2 %")
+        try expectEqual(MotionAnalysis.percent(0.24, limit: 0.25), "24 %")
+        try expectEqual(MotionAnalysis.percent(0.25, limit: 0.25), "25 %")
+        try expectEqual(MotionAnalysis.percent(0.9, limit: 0.25), "90 %")
+        // Failing coverage, busy and flicker just past their limits.
+        var v = MotionAnalysis.verdict([summary("1280x720@0.5", 0.247, 0.2, busy: 0.503, flicker: 0.302)], budgets: b)
+        let text = v.problems.joined(separator: "\n")
+        try expect(text.contains("only 24.7 % of the frame visibly changes within 5 s (needs at least 25 %)"), text)
+        try expect(text.contains("Too busy at 1280x720@0.5: 50.3 % of the frame") && text.contains("(at most 50 %)"), text)
+        try expect(text.contains("Flickers at 1280x720@0.5 (t = 17 s): 30.2 % of the frame") && text.contains("(at most 30 %)"), text)
+        // The lowest 5 s and 2 s coverages come from different sizes: 5:4 is below the 2 s advice.
+        v = MotionAnalysis.verdict([summary("1280x720@0.5", 0.55, 0.30), summary("1024x820@0.5", 0.60, 0.20)], budgets: b)
+        try expect(v.problems.isEmpty, "\(v.problems)")
+        try expectEqual(v.warnings.filter { $0.hasPrefix("Motion is on the subtle side") },
+                        ["Motion is on the subtle side: 55 % of the frame changes within 5 s at 1280x720@0.5, and 20 % within 2 s at " +
+                         "1024x820@0.5. Aim for at least 50 % within 5 s and motion visible within 1–2 s wherever you look (see \(MotionAnalysis.guide))."])
+        // Both from one size: named once.
+        v = MotionAnalysis.verdict([summary("1280x720@0.5", 0.45, 0.20), summary("1024x820@0.5", 0.60, 0.40)], budgets: b)
+        try expect(v.warnings.contains { $0.hasPrefix("Motion is on the subtle side at 1280x720@0.5: 45 % of the frame changes within 5 s and 20 % within 2 s.") },
+                   "\(v.warnings)")
+        v = MotionAnalysis.verdict([summary("1280x720@0.5", 0.55, 0.30), summary("1024x820@0.5", 0.60, 0.40)], budgets: b)
+        try expect(v.warnings.isEmpty, "\(v.warnings)")
+    }
+
+    /// The heat map outlines a flickering tile on all four sides, inside the tile, and closes the
+    /// tile grid at the frame's right and bottom edges.
+    static func motionHeatmapOutline() throws {
+        let (w, h, cols, rows) = (32, 18, 4, 3)          // tiles of 8×6 px
+        var px = [UInt8](repeating: 100, count: w * h * 4)
+        for i in stride(from: 3, to: px.count, by: 4) { px[i] = 255 }
+        var flicker = [Bool](repeating: false, count: cols * rows)
+        flicker[1 * cols + 1] = true                      // x 8–15, y 6–11
+        let out = MotionAnalysis.heatmap(px, width: w, height: h, alive: Array(repeating: 0, count: cols * rows), flicker: flicker, cols: cols, rows: rows)
+        func rgb(_ x: Int, _ y: Int) -> [UInt8] { let i = (y * w + x) * 4; return Array(out[i..<(i + 3)]) }
+        let red: [UInt8] = [235, 40, 40], grey: [UInt8] = [120, 120, 120], line: [UInt8] = [66, 66, 66]
+        for (x, y) in [(8, 8), (9, 8), (14, 8), (15, 8), (11, 6), (11, 7), (11, 10), (11, 11), (15, 11), (8, 11)] {
+            try expect(rgb(x, y) == red, "(\(x), \(y)) is on the red outline: \(rgb(x, y))")
+        }
+        try expectEqual(rgb(11, 8), grey)                 // inside the outline
+        try expectEqual(rgb(12, 9), grey)
+        try expectEqual(rgb(7, 8), grey)                  // the left neighbour's inside
+        try expectEqual(rgb(16, 8), line)                 // the right neighbour's own border, not red
+        try expectEqual(rgb(11, 12), line)                // the lower neighbour's own border
+        try expectEqual(rgb(31, 3), line)                 // the frame's right edge
+        try expectEqual(rgb(20, 17), line)                // and bottom edge
+        try expectEqual(rgb(0, 3), line)
+        try expectEqual(rgb(20, 0), line)
     }
 
     // MARK: Motion end to end (opt-in: uses the render server)
@@ -1006,7 +1188,7 @@ extension RuntimeTests {
     }
 
     static func describe(_ s: MotionSummary) -> String {
-        let p = MotionAnalysis.percent
+        let p = MotionAnalysis.percent(_:)
         return "\(s.size): 5 s \(p(s.coverage5s)), 2 s \(p(s.coverage2s)), regions \(s.movingRegions)/9, busy \(p(s.busy)), flicker \(p(s.flicker))"
     }
 
