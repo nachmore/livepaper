@@ -511,7 +511,14 @@ private func makeTestVideo(at url: URL, width: Int, height: Int, fps: Int32, fra
     guard writer.startWriting() else { throw writer.error ?? TestFailure(description: "can't write video") }
     writer.startSession(atSourceTime: .zero)
     for i in 0..<frames {
-        while !input.isReadyForMoreMediaData { usleep(1000) }
+        // Bounded: a writer that failed part-way (software encoders on a CI VM) never gets ready again.
+        let readyBy = Date().addingTimeInterval(30)
+        while !input.isReadyForMoreMediaData {
+            guard writer.status == .writing, Date() < readyBy else {
+                throw writer.error ?? TestFailure(description: "the video writer stalled (status \(writer.status.rawValue))")
+            }
+            usleep(1000)
+        }
         var buffer: CVPixelBuffer?
         CVPixelBufferCreate(nil, width, height, kCVPixelFormatType_32BGRA, nil, &buffer)
         guard let buffer else { throw TestFailure(description: "no pixel buffer") }
@@ -527,7 +534,7 @@ private func makeTestVideo(at url: URL, width: Int, height: Int, fps: Int32, fra
     input.markAsFinished()
     let done = DispatchSemaphore(value: 0)
     writer.finishWriting { done.signal() }
-    done.wait()
+    guard done.wait(timeout: .now() + 60) == .success else { throw TestFailure(description: "finishing the test video timed out") }
     guard writer.status == .completed else { throw writer.error ?? TestFailure(description: "video writing failed") }
 }
 

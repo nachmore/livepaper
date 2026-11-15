@@ -19,8 +19,9 @@ import os
 public protocol AISessionTerminating: AISessionHandle {
     /// Stops the agent's whole process group and returns once nothing in it is left: SIGTERM, up
     /// to `grace` seconds to exit, then SIGKILL. The session then ends as after `cancel()`. Blocks
-    /// for at most `grace` + `AISession.killWait` (plus however long a launch in progress takes to
-    /// spawn); returns false if something in the group was still there at the end. Idempotent.
+    /// for at most `grace` + `AISession.killWait` (plus moments to confirm the group stays empty, and
+    /// however long a launch in progress takes to spawn); returns false if something in the group
+    /// was still there at the end. Idempotent.
     @discardableResult func terminateNow(grace: TimeInterval) -> Bool
 }
 
@@ -60,6 +61,8 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     static let stderrTailLines = 8
     /// How long `stopGroup` waits for SIGKILLed processes to be gone.
     public static let killWait: TimeInterval = 0.5
+    /// How long a process group must look empty before `stopGroup` believes it is.
+    static let emptySettle: TimeInterval = 0.05
     /// After the harness exits, how long whatever it left in its group gets to exit on SIGTERM.
     static let leftoverGrace: TimeInterval = 1
 
@@ -127,21 +130,34 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     }
 
     /// SIGTERM to process group `pgid`, up to `grace` seconds for it to empty, then SIGKILL for
-    /// whatever is left and up to `killWait` for that to go. Blocks; true once nobody is left.
+    /// whatever is left and up to `killWait` for that to go. Blocks; true once nobody is left
+    /// (for `emptySettle`).
     /// (The group can outlive its leader — orphaned grandchildren — so this watches the group.)
     static func stopGroup(_ pgid: pid_t, grace: TimeInterval) -> Bool {
-        func gone(within timeout: TimeInterval) -> Bool {
+        // A process forked while the group is being signalled can miss the signal (a child doesn't
+        // inherit its parent's pending signals) and show up in the group a moment later — seen on
+        // loaded machines: a shell's `sleep` outliving a SIGKILLed group. So the group must stay
+        // empty for `emptySettle`, and after SIGKILL anything that turns up gets SIGKILL too.
+        func gone(within timeout: TimeInterval, resending signal: Int32? = nil) -> Bool {
             let deadline = Date().addingTimeInterval(timeout)
-            while killpg(pgid, 0) == 0 {
-                if Date() >= deadline { return false }
-                usleep(10_000)
+            var emptySince: Date?
+            while true {
+                if killpg(pgid, 0) == 0 {
+                    emptySince = nil
+                    if Date() >= deadline { return false }
+                    if let signal { _ = killpg(pgid, signal) }
+                } else {
+                    let now = Date()
+                    if now.timeIntervalSince(emptySince ?? now) >= emptySettle { return true }
+                    if emptySince == nil { emptySince = now }
+                }
+                usleep(5_000)
             }
-            return true
         }
         guard killpg(pgid, SIGTERM) == 0 else { return errno == ESRCH }   // ESRCH: nobody left
         if gone(within: grace) { return true }
         _ = killpg(pgid, SIGKILL)
-        return gone(within: killWait)
+        return gone(within: killWait, resending: SIGKILL)
     }
 
     // MARK: - Running the harness

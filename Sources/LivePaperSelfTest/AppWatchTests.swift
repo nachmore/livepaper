@@ -91,7 +91,7 @@ extension SelfTests {
                 defer { watcher.stop() }
                 try expect(watcher.isWatching)
                 // Creating the directories just before the stream started may still be reported.
-                _ = deliveries.collect(first: 0.8, quiet: 0.5)
+                try deliveries.settle(probe: LPPaths.library.appendingPathComponent("settle-probe.lpscene"))
                 let library = cliLibrary(root: root, directory: LPPaths.library)
 
                 // `livepaper import` adds a package: exactly one debounced change.
@@ -156,7 +156,7 @@ extension SelfTests {
             let watcher = LibraryWatcher(root: sb.support, deliveryQueue: deliveries.queue) { deliveries.append($0) }
             watcher.start()
             defer { watcher.stop() }
-            _ = deliveries.collect(first: 0.8, quiet: 0.5)
+            try deliveries.settle(probe: sb.library.appendingPathComponent("settle-probe.lpscene"))
 
             let source = try makeScenePackage(in: sb.work, id: "harbor-lights")
             var r = try sb.run(["import", source.path])
@@ -200,7 +200,7 @@ extension SelfTests {
                 let deliveries = Deliveries()
                 var watcher: LibraryWatcher? = LibraryWatcher(root: LPPaths.supportRoot, deliveryQueue: deliveries.queue) { deliveries.append($0) }
                 watcher?.start()
-                _ = deliveries.collect(first: 0.8, quiet: 0.5)
+                try deliveries.settle(probe: LPPaths.library.appendingPathComponent("settle-probe.lpscene"))
                 weak var released = watcher
                 watcher = nil
                 try expect(released == nil, "the stream doesn't keep the watcher alive")
@@ -219,7 +219,14 @@ extension SelfTests {
                     try awaitMain { await model.start() }
                     defer { model.stopWatchingDisk() }
                     try expect(model.isWatchingDisk)
-                    pumpMain(0.8)
+                    // Seeding the mock library just before the stream started can still be reported;
+                    // on a slow machine (CI) after more than a fixed pause. Wait until refreshes stop.
+                    var seen = model.diskRefreshCount, quietSince = Date()
+                    let settleLimit = Date().addingTimeInterval(10)
+                    while Date().timeIntervalSince(quietSince) < 1.2 && Date() < settleLimit {
+                        pumpMain(0.1)
+                        if model.diskRefreshCount != seen { seen = model.diskRefreshCount; quietSince = Date() }
+                    }
                     let baseline = model.diskRefreshCount
                     let before = model.entries.count
                     model.section = .library
@@ -369,6 +376,17 @@ extension SelfTests {
             while recorded.values.isEmpty && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
             if !recorded.values.isEmpty { Thread.sleep(forTimeInterval: quiet) }
             return recorded.take()
+        }
+
+        /// Waits until everything that happened on disk before now has been delivered, and drops
+        /// it. FSEvents delivers in event order, so once a probe package created and removed now is
+        /// reported, nothing older is still on its way — which a fixed pause can't promise on a slow
+        /// machine (CI). `probe` must be a visible `<name>.lpscene` in the library, so it's reported.
+        func settle(probe: URL) throws {
+            let fm = FileManager.default
+            try fm.createDirectory(at: probe, withIntermediateDirectories: true)
+            try fm.removeItem(at: probe)
+            try expect(!collect(first: 10, quiet: 1.0).isEmpty, "the watcher didn't report \(probe.lastPathComponent)")
         }
 
         /// `collect()` merged into one value.

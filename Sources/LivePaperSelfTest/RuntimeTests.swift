@@ -518,13 +518,17 @@ enum RuntimeTests {
         try expectEqual(r.note, "relayed still t=7")
         try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])   // the client cleans up
         // Nobody relays: a clear error after the claim timeout, not a hang until the request timeout.
-        let lonely = RenderClient(socket: socket, spool: spool)
+        // (A spool of its own: the stand-in above isn't joined, and a pass already under way when
+        // `stop` was set could otherwise still answer — rare, but possible on a slow CI machine.)
+        let lonelySpool = try tempDir("spool-lonely")
+        defer { try? fm.removeItem(at: lonelySpool) }
+        let lonely = RenderClient(socket: socket, spool: lonelySpool)
         lonely.spoolClaimTimeout = 0.5
         let began = Date()
         do { _ = try lonely.sendBlocking(RenderRequest(op: .bench, html: "/x/.check/scene.html"), timeout: 30); throw TestFailure(description: "expected an error") }
         catch let e as RenderClientError { try expect("\(e.localizedDescription)".contains("didn't pick up"), e.localizedDescription) }
         try expect(Date().timeIntervalSince(began) < 5, "gave up promptly")
-        try expectEqual(try fm.contentsOfDirectory(atPath: spool.path), [])
+        try expectEqual(try fm.contentsOfDirectory(atPath: lonelySpool.path), [])
     }
     final class Flag: @unchecked Sendable {
         private let lock = NSLock(); private var value = false

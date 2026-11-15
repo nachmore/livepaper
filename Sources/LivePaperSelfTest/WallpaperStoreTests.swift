@@ -1344,6 +1344,13 @@ extension SelfTests {
             let document = try WallpaperStoreDocument(data: bytes)
             try check(try PlistValue.parse(document.data()) == document.root, "document round trip lost something")
             try check(try WallpaperStoreSchema.encode(WallpaperStoreSchema.decode(document.data())) == bytes, "re-serialised store decodes differently")
+            // LivePaper refuses to edit some layouts (a linked record, a missing Idle slot) and guides
+            // the user instead (covered by the fixtures). A Mac whose wallpaper was never customised —
+            // a CI runner — can have one. (The reason isn't printed: it can name display UUIDs.)
+            do { try document.checkEditable() } catch WallpaperStoreError.unsupportedShape {
+                print("  (skipped select/restore: this Mac's store has a layout LivePaper doesn't edit; decoding and the byte round trip were checked)")
+                return
+            }
             // Select, then restore, on a copy (with a fake agent that re-encodes like the real one).
             try StoreSandbox.with("real", store: bytes) { sb in
                 let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()

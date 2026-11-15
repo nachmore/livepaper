@@ -14,11 +14,14 @@
 #                            "Developer ID Application: …", the hardened runtime and a secure
 #                            timestamp are added (notarization is a separate step).
 #   LIVEPAPER_BUILD          CFBundleVersion (default: the number of commits on HEAD)
+#   LIVEPAPER_VERSION        CFBundleShortVersionString (default: the VERSION file). Must be VERSION
+#                            itself or VERSION plus a suffix, e.g. 0.1.0-beta.2 (release automation).
 #   LIVEPAPER_ARCHS          release architectures (default "arm64 x86_64")
 #   LIVEPAPER_PER_ARCH=1     build each architecture separately and lipo them (automatic when the
 #                            toolchain can't build several architectures at once)
 #
-# Version: CFBundleShortVersionString comes from the VERSION file at the repository root.
+# Version: CFBundleShortVersionString comes from the VERSION file at the repository root (or
+# LIVEPAPER_VERSION); CFBundleVersion is always numeric.
 # Nothing here launches a GUI process: SwiftPM, swiftc, lipo, strip, iconutil and codesign only.
 set -euo pipefail
 
@@ -29,7 +32,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --debug) DEBUG=1; shift ;;
     --out) OUT="$(mkdir -p "$2" && cd "$2" && pwd)"; shift 2 ;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -44,11 +47,23 @@ VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
   echo "✗ VERSION must look like 1.2.3 (got '$VERSION')" >&2; exit 1
 fi
+# Release automation (scripts/ci/version-from-ref.sh) adds a channel suffix: 0.1.0-beta.2.
+if [ -n "${LIVEPAPER_VERSION:-}" ] && [ "$LIVEPAPER_VERSION" != "$VERSION" ]; then
+  suffix="${LIVEPAPER_VERSION#"$VERSION"-}"
+  if [ "$suffix" = "$LIVEPAPER_VERSION" ] || ! [[ "$suffix" =~ ^[0-9A-Za-z][0-9A-Za-z.-]*$ ]]; then
+    echo "✗ LIVEPAPER_VERSION must be $VERSION or $VERSION-<suffix> (got '$LIVEPAPER_VERSION')" >&2; exit 1
+  fi
+  VERSION="$LIVEPAPER_VERSION"
+fi
 # CFBundleVersion must be numeric and must grow: the installed saver is replaced when it differs
 # from the app's copy (InstallService compares CFBundleVersion).
 BUILD="${LIVEPAPER_BUILD:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
+if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then echo "✗ the build number must be numeric (got '$BUILD')" >&2; exit 1; fi
+if [ -z "${LIVEPAPER_BUILD:-}" ] && [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then
+  echo "! shallow clone: build $BUILD counts only the fetched commits (fetch the full history or set LIVEPAPER_BUILD)" >&2
+fi
 IDENTITY="${LIVEPAPER_SIGN_IDENTITY:--}"
-if [ "$DEBUG" = 1 ]; then ARCHS=("$(uname -m)"); else ARCHS=(${LIVEPAPER_ARCHS:-arm64 x86_64}); fi
+if [ "$DEBUG" = 1 ]; then ARCHS=("$(uname -m)"); else read -r -a ARCHS <<< "${LIVEPAPER_ARCHS:-arm64 x86_64}"; fi
 
 APP="$OUT/LivePaper.app"
 CACHE="$OUT/.cache"

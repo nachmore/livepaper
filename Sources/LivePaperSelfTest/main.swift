@@ -24,6 +24,9 @@ enum SelfTests {
     static var all: [TestCase] { contracts + runtime + saver + core + app + helper + cli + wallpaper + builtinScenes }
 }
 
+// Line-buffered even into a pipe (CI runs `… | tee`): results show as they happen, and if a test
+// hangs, the log ends at the last one that finished.
+setvbuf(stdout, nil, _IOLBF, 0)
 let filter = CommandLine.arguments.dropFirst().first
 var failed = 0, passed = 0
 for t in SelfTests.all where filter == nil || t.name.contains(filter!) {
