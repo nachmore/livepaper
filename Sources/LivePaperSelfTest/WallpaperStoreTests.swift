@@ -1297,6 +1297,7 @@ extension SelfTests {
                         try expect(why.hasPrefix("LivePaper is still your screen saver (LivePaper couldn't change it back automatically: "), why)
                         try expect(why.contains(name == "version" ? "version 11" : "isn't in the expected format"), why)
                         try expect(why.contains("Choose another screen saver in System Settings › Wallpaper › Screen Saver, then run uninstall again"), why)
+                        try expect(why.contains("before LivePaper it was \u{201C}Example\u{201D}"), why)
                         try expectEqual(steps.first { $0.title == "Remove \(fx.paths.installedSaver.path)" }?.outcome,
                                         .skipped("kept while it is still the selected screen saver; run uninstall again"))
                         try expect(sb.exists(sb.saver), "\(name): the store still points at the saver")

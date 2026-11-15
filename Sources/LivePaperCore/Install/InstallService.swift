@@ -732,13 +732,23 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             } catch let error as WallpaperStoreError where !error.isTransient && !error.wroteStore {
                 // Retrying alone can't help (unknown store format, a layout LivePaper doesn't edit, no
                 // earlier choice to put back, …): the user has to pick another screen saver.
-                throw InstallError.screenSaverStillSelected("LivePaper couldn't change it back automatically: \(error.localizedDescription)")
+                let previous = previousSaverName().map { "; before LivePaper it was \u{201C}\($0)\u{201D}" } ?? ""
+                throw InstallError.screenSaverStillSelected("LivePaper couldn't change it back automatically: \(error.localizedDescription)\(previous)")
             }
             if !report.builtinSaverPaths.isEmpty {
                 record(Self.builtinSaverTitle, .done)
             }
             return report.outcome == .applied ? nil : "the screen saver was changed since"
         }
+    }
+
+    /// The screen saver SystemDefault chose before LivePaper (from the manifest), e.g. "Voltron", so
+    /// the user can pick it again by hand.
+    private func previousSaverName() -> String? {
+        guard let manifest = try? WallpaperSelectionManifest.load(from: paths.wallpaperSelectionBackup),
+              let slot = try? manifest.entry(for: .systemDefault)?.originalSlot(),
+              let module = WallpaperSlot.moduleURLs(slot).first, !store.module.names(module) else { return nil }
+        return module.deletingPathExtension().lastPathComponent
     }
 
     /// The root-slot fallback for a restore: the raw store backup from before LivePaper's first
