@@ -9,7 +9,8 @@
 // Every run is sandboxed: LIVEPAPER_HOME / _SAVERS_DIR / _LAUNCH_AGENTS_DIR / _WALLPAPER_STORE /
 // _RESOURCES point into a temp directory; LIVEPAPER_NO_SPAWN=1 (and LIVEPAPER_RENDERD=/usr/bin/false)
 // mean no render daemon can ever start; LIVEPAPER_NO_SYSTEM_COMMANDS=1 makes install/uninstall/
-// doctor record launchctl & co. and keep preference changes in memory. Nothing here launches a GUI
+// doctor record launchctl & co. and keep preference changes in memory, and AI sessions skip the
+// login shell (only cli.ai.terminal runs it, with its own ZDOTDIR). Nothing here launches a GUI
 // process or touches the user's real state.
 import Foundation
 import LivePaperCore
@@ -472,6 +473,8 @@ extension SelfTests {
             """)
             var env = sb.environment
             env["ZDOTDIR"] = zdot.path   // the sandbox's rc files, not the developer's
+            // The sandbox's LIVEPAPER_NO_SYSTEM_COMMANDS=1 skips the login shell; this test is about it.
+            env[LoginShell.selfTestLoginShellVariable] = "1"
             let began = Date()
             let r = try CLITestSupport.exec(URL(fileURLWithPath: "/usr/bin/script"),
                                             ["-q", "/dev/null", sb.binary.path, "ai", "create", "x", "--command", agent.path, "--json"],

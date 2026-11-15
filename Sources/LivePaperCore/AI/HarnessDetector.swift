@@ -34,8 +34,16 @@ public struct ShellSnapshot: Sendable, Equatable {
 public final class LoginShell: @unchecked Sendable {
     /// With LIVEPAPER_NO_SYSTEM_COMMANDS=1 (the CLI self-tests) the account's login shell and its rc
     /// files are never run: the snapshot is empty and only the common directories and PATH count.
-    public static let shared: LoginShell = ProcessInfo.processInfo.environment["LIVEPAPER_NO_SYSTEM_COMMANDS"] == "1"
-        ? .fixed(ShellSnapshot()) : LoginShell()
+    /// The one test of the probe itself (`cli.ai.terminal`) brings its own rc files (ZDOTDIR in its
+    /// sandbox) and asks for the real thing with `selfTestLoginShellVariable`=1.
+    public static let shared: LoginShell = {
+        let environment = ProcessInfo.processInfo.environment
+        let noSystemCommands = environment["LIVEPAPER_NO_SYSTEM_COMMANDS"] == "1"
+        let probeTest = environment[LoginShell.selfTestLoginShellVariable] == "1"
+        return noSystemCommands && !probeTest ? .fixed(ShellSnapshot()) : LoginShell()
+    }()
+    /// See `shared`: only means something together with LIVEPAPER_NO_SYSTEM_COMMANDS=1.
+    public static let selfTestLoginShellVariable = "LIVEPAPER_SELFTEST_LOGIN_SHELL"
     static let marker = "LPENV"
     /// Set to 1 for the shell LivePaper asks, so rc files can skip what only makes sense in a
     /// terminal (`[ -z "$LIVEPAPER_RESOLVING_ENVIRONMENT" ] && exec tmux`), like VS Code's

@@ -94,7 +94,8 @@ enum CLIEnvironment {
 
     /// LIVEPAPER_NO_SYSTEM_COMMANDS=1: install/uninstall/doctor record launchctl, sysadminctl and
     /// open instead of running them, change preferences only in memory, and AI sessions don't run
-    /// the account's login shell (`LoginShell.shared`). Used by the self-tests
+    /// the account's login shell (`LoginShell.shared`; LIVEPAPER_SELFTEST_LOGIN_SHELL=1 runs it for
+    /// the test of the probe, which brings its own rc files). Used by the self-tests
     /// (together with the LIVEPAPER_HOME / _SAVERS_DIR / _LAUNCH_AGENTS_DIR / _WALLPAPER_STORE
     /// overrides) so nothing outside a temporary directory is ever touched.
     static var noSystemCommands: Bool { ProcessInfo.processInfo.environment["LIVEPAPER_NO_SYSTEM_COMMANDS"] == "1" }
