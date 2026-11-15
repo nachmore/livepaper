@@ -21,7 +21,7 @@ extension SelfTests {
 // MARK: - Sandbox & fakes
 
 /// A temp tree with a fake app bundle's resources, plus the LIVEPAPER_* overrides pointing into it.
-private final class CoreSandbox {
+final class CoreSandbox {
     let root: URL
     var resources: URL { root.appendingPathComponent("resources") }
     var runtime: URL { resources.appendingPathComponent("Runtime") }
@@ -155,11 +155,17 @@ private final class FakeCompiler: SceneCompiling, @unchecked Sendable {
     }
 }
 
-/// Answers every check with `report(package)`.
-private final class FakeChecker: SceneChecking, @unchecked Sendable {
+/// Answers every check with `report(package)`, and remembers the options of the last one.
+final class FakeChecker: SceneChecking, @unchecked Sendable {
     let report: @Sendable (URL) throws -> CheckReport
+    private let lock = NSLock()
+    private var options: [CheckOptions] = []
     init(_ report: @escaping @Sendable (URL) throws -> CheckReport) { self.report = report }
-    func check(package: URL, options: CheckOptions) async throws -> CheckReport { try report(package) }
+    func check(package: URL, options: CheckOptions) async throws -> CheckReport {
+        lock.withLock { self.options.append(options) }
+        return try report(package)
+    }
+    var recordedOptions: [CheckOptions] { lock.withLock { options } }
     static let passing = FakeChecker { _ in CheckReport(passed: true) }
 }
 
@@ -251,7 +257,7 @@ private final class FakeSystem: @unchecked Sendable {
     }
 }
 
-private final class ResultBox<T>: @unchecked Sendable {
+final class ResultBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var result: Result<T, Error>?
     func set(_ r: Result<T, Error>) { lock.lock(); result = r; lock.unlock() }
@@ -263,7 +269,7 @@ private final class ResultBox<T>: @unchecked Sendable {
 }
 
 /// Runs async work from the synchronous test runner.
-private func waitAsync<T>(timeout: TimeInterval = 60, _ body: @escaping @Sendable () async throws -> T) throws -> T {
+func waitAsync<T>(timeout: TimeInterval = 60, _ body: @escaping @Sendable () async throws -> T) throws -> T {
     let box = ResultBox<T>()
     let done = DispatchSemaphore(value: 0)
     Task.detached {
@@ -275,7 +281,7 @@ private func waitAsync<T>(timeout: TimeInterval = 60, _ body: @escaping @Sendabl
 }
 
 /// Every event of a session, optionally reacting to each one (e.g. to cancel).
-private func collect(_ handle: AISessionHandle, timeout: TimeInterval = 30,
+func collect(_ handle: AISessionHandle, timeout: TimeInterval = 30,
                      onEvent: @escaping @Sendable (AISessionEvent) -> Void = { _ in }) throws -> [AISessionEvent] {
     try waitAsync(timeout: timeout) {
         var events: [AISessionEvent] = []
@@ -723,7 +729,8 @@ extension SelfTests {
                                                    "Bash(livepaper bench *),Bash(livepaper live *),Bash(livepaper thumbnail *),Bash(livepaper compile *)," +
                                                    "Bash(livepaper help *)",
                                                "--disallowedTools", "WebFetch,WebSearch,Edit(./bin/**),Edit(./sdk/**),Edit(./.livepaper/**)," +
-                                                   "Edit(./.kiro/**),Edit(./AGENTS.md),Edit(./CLAUDE.md),Edit(./TASK.md)",
+                                                   "Edit(./.kiro/**),Edit(./AGENTS.md),Edit(./CLAUDE.md),Edit(./TASK.md)," +
+                                                   "Edit(./references/**),Edit(./scene/assets/reference.*)",
                                                "--model", "haiku", "--x", "1"])
             try expect(!claude.arguments.joined(separator: " ").contains("livepaper:*") && !claude.arguments.contains("acceptEdits"))
             try expectEqual(claude.stdinFile, ws.taskFile)
@@ -1205,7 +1212,7 @@ private final class ShellScriptLog: @unchecked Sendable {
 }
 
 /// An AIService whose harness is a /bin/sh script (a custom template) and whose login shell is fixed.
-private func sessionFixture(_ sb: CoreSandbox, library: LibraryService? = nil, checker: SceneChecking = FakeChecker.passing,
+func sessionFixture(_ sb: CoreSandbox, library: LibraryService? = nil, checker: SceneChecking = FakeChecker.passing,
                             agent: String, timeout: TimeInterval = 30) throws -> (AIService, AIHarness) {
     let script = sb.root.appendingPathComponent("agents/agent-\(UUID().uuidString.prefix(6)).sh")
     try sb.write("set -e\n" + agent + "\n", to: script)
