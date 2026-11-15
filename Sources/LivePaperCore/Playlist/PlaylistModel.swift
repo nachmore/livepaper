@@ -95,6 +95,11 @@ public enum LPNotification {
     public static let stateChanged = "com.nachmore.livepaper.stateChanged"
     /// Saver/anyone → helper: please open the LivePaper app (the sandboxed saver can't).
     public static let openApp = "com.nachmore.livepaper.openApp"
+    /// App → helper: run the LivePaper lock flow now (menu-bar "Lock Now").
+    public static let lockNow = "com.nachmore.livepaper.lockNow"
+    /// App → helper: the hotkey recorder is active (userInfo["active"]: Bool); suspend the shortcut
+    /// meanwhile so pressing the current shortcut while re-recording doesn't lock the Mac.
+    public static let hotkeyRecording = "com.nachmore.livepaper.hotkeyRecording"
     /// App → saver (preview instances): playlist was republished.
     public static let published = "com.nachmore.livepaper.published"
     /// System (distributed; object = the user's uid as a string; verified on macOS 26.7): loginwindow

@@ -10,7 +10,7 @@ let package = Package(
     name: "LivePaper",
     platforms: [.macOS(.v14)],
     products: [
-        .executable(name: "LivePaper", targets: ["LivePaperApp"]),
+        .executable(name: "LivePaperApp", targets: ["LivePaperApp"]),   // bundle executable is renamed to "LivePaper" by scripts/build.sh (avoids clashing with `livepaper` on case-insensitive disks)
         .executable(name: "LivePaperHelper", targets: ["LivePaperHelper"]),
         .executable(name: "livepaper", targets: ["LivePaperCLI"]),
         .executable(name: "LivePaperRenderd", targets: ["LivePaperRenderd"]),

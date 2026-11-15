@@ -26,6 +26,10 @@ public enum LPPaths {
         if let o = ProcessInfo.processInfo.environment["LIVEPAPER_SAVERS_DIR"], !o.isEmpty { return URL(fileURLWithPath: o) }
         return home.appendingPathComponent("Library/Screen Savers")
     }
+    public static var launchAgentsDir: URL {
+        if let o = ProcessInfo.processInfo.environment["LIVEPAPER_LAUNCH_AGENTS_DIR"], !o.isEmpty { return URL(fileURLWithPath: o) }
+        return home.appendingPathComponent("Library/LaunchAgents")
+    }
     public static var installedSaver: URL { screenSaversDir.appendingPathComponent(saverName) }
     public static var installedPlaylist: URL {
         installedSaver.appendingPathComponent("Contents/Resources").appendingPathComponent(LPPlaylist.directoryName)
