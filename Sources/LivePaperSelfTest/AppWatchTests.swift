@@ -219,7 +219,14 @@ extension SelfTests {
                     try awaitMain { await model.start() }
                     defer { model.stopWatchingDisk() }
                     try expect(model.isWatchingDisk)
-                    pumpMain(0.8)
+                    // Seeding the mock library just before the stream started can still be reported;
+                    // on a slow machine (CI) after more than a fixed pause. Wait until refreshes stop.
+                    var seen = model.diskRefreshCount, quietSince = Date()
+                    let settleLimit = Date().addingTimeInterval(10)
+                    while Date().timeIntervalSince(quietSince) < 1.2 && Date() < settleLimit {
+                        pumpMain(0.1)
+                        if model.diskRefreshCount != seen { seen = model.diskRefreshCount; quietSince = Date() }
+                    }
                     let baseline = model.diskRefreshCount
                     let before = model.entries.count
                     model.section = .library

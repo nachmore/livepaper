@@ -27,7 +27,10 @@ public struct ShellSnapshot: Sendable, Equatable {
 
 /// Resolves (once, then cached) the login-shell environment.
 public final class LoginShell: @unchecked Sendable {
-    public static let shared = LoginShell()
+    /// With LIVEPAPER_NO_SYSTEM_COMMANDS=1 (the CLI self-tests) the account's login shell and its rc
+    /// files are never run: the snapshot is empty and only the common directories and PATH count.
+    public static let shared: LoginShell = ProcessInfo.processInfo.environment["LIVEPAPER_NO_SYSTEM_COMMANDS"] == "1"
+        ? .fixed(ShellSnapshot()) : LoginShell()
     static let marker = "LPENV"
 
     private let shell: String
