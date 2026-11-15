@@ -648,6 +648,9 @@ enum RuntimeTests {
         try expect(jpeg.starts(with: [0xFF, 0xD8]), "JPEG")
 
         // The server refuses to write outside the request's package / workspaces / temp folders.
+        // (Failures are collected so one run reports every one of them.)
+        var failures: [String] = []
+        func check(_ ok: Bool, _ message: @autoclosure () -> String) { if !ok { failures.append(message()) } }
         let fm = FileManager.default
         let outside = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LivePaperSelfTest-\(UUID().uuidString.prefix(8))")
         try fm.createDirectory(at: outside, withIntermediateDirectories: true)
@@ -660,10 +663,11 @@ enum RuntimeTests {
                                                out: pkg.appendingPathComponent(".check/notes.docx").path), "not a PNG"),
                                 (RenderRequest(op: .thumbnail, scene: pkg.path, out: outside.appendingPathComponent("thumbnail.jpg").path), "thumbnail outside")] {
             let r = try client.sendBlocking(request, timeout: 60)
-            try expect(!r.ok && (r.note ?? "").contains("only writes"), "\(what): \(r.ok) \(r.note ?? "")")
+            print("  \(what): ok=\(r.ok) note=\(r.note ?? "-")")
+            check(!r.ok && (r.note ?? "").contains("refusing to write"), "\(what): \(r.ok) \(r.note ?? "")")
         }
-        try expectEqual(try String(contentsOf: victim, encoding: .utf8), "not an image")
-        try expectEqual(try fm.contentsOfDirectory(atPath: outside.path), ["victim.png"])
+        check((try? String(contentsOf: victim, encoding: .utf8)) == "not an image", "victim overwritten")
+        check((try? fm.contentsOfDirectory(atPath: outside.path)) == ["victim.png"], "files written outside: \((try? fm.contentsOfDirectory(atPath: outside.path)) ?? [])")
 
         // A scene that navigates away (a URL the source scanner can't see) is stopped, not loaded.
         let nav = try package("navigates", js: """
@@ -677,10 +681,13 @@ enum RuntimeTests {
         try SceneCompiler().compile(package: nav, to: navHTML)
         let n = try client.sendBlocking(RenderRequest(op: .still, html: navHTML.path, width: 320, height: 200, dpr: 1, t: 1,
                                                       out: nav.appendingPathComponent(".check/still.png").path), timeout: 60)
+        print("  navigating still: ok=\(n.ok) note=\(n.note ?? "-") errors=\(n.errors)")
         let blocked = (n.note ?? "").contains("tried to navigate") || n.errors.contains { $0.contains("tried to navigate") }
-        try expect(blocked && !(n.note ?? "").contains("hostname"), "navigation: ok=\(n.ok) note=\(n.note ?? "-") errors=\(n.errors)")
+        check(blocked && !(n.note ?? "").contains("hostname"), "navigation: ok=\(n.ok) note=\(n.note ?? "-") errors=\(n.errors)")
         let navCheck = try blocking { try await SceneChecker(render: client).check(package: nav, options: CheckOptions(quick: true)) }
-        try expect(!navCheck.passed && navCheck.jsErrors.contains { $0.contains("tried to navigate to https://lpnav.invalid/leak") },
-                   "check fails a navigating scene: \(navCheck.problems)")
+        print("  navigating check: passed=\(navCheck.passed) jsErrors=\(navCheck.jsErrors)")
+        check(!navCheck.passed && navCheck.jsErrors.contains { $0.contains("tried to navigate to https://lpnav.invalid/leak") },
+              "check fails a navigating scene: \(navCheck.problems)")
+        if !failures.isEmpty { throw TestFailure(description: failures.joined(separator: "\n    ")) }
     }
 }
