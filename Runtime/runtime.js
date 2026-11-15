@@ -504,7 +504,7 @@
       if (lp) lp.quality = 1 - 0.125 * level;
       if (lp && scaleFor(level) !== before) resizeAll();
       quietUntil = performance.now() + 1500;
-      post({ type: 'stats', reason: reason, level: level, scale: scaleFor(level), quality: 1 - 0.125 * level, frameMs: round2(stats.frameMs), fps: stats.fps });
+      post(statsMessage(reason));
     }
     return {
       scale: function () { return active() ? scaleFor(level) : targets.scale; },

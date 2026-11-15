@@ -152,9 +152,10 @@ public final class SceneCompiler: SceneCompiling, @unchecked Sendable {
         return out
     }
 
-    /// JSON that can be embedded in a script element (no `<`, no raw line separators).
+    /// JSON that can be embedded in a script element (no `<`, no raw line separators). Slashes stay
+    /// unescaped so asset names read naturally ("img/moon.png"); with `<` escaped, no `</script` can form.
     static func jsonForScript(_ value: Any) -> String {
-        let data = (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys])) ?? Data("{}".utf8)
+        let data = (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes])) ?? Data("{}".utf8)
         return String(decoding: data, as: UTF8.self)
             .replacingOccurrences(of: "<", with: "\\u003c")
             .replacingOccurrences(of: "\u{2028}", with: "\\u2028")

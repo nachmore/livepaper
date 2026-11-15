@@ -52,8 +52,12 @@ public enum SceneSourceScanner {
             case .identifier:
                 let isMember = prev?.kind == .punct && prev?.text == "."
                 let memberOf = isMember && i > 1 && tokens[i - 2].kind == .identifier ? tokens[i - 2].text : nil
-                let isObjectKey = next?.text == ":" && (prev?.text == "{" || prev?.text == ",")
-                if isObjectKey { continue }
+                let afterBraceOrComma = prev?.text == "{" || prev?.text == ","
+                let isObjectKey = next?.text == ":" && afterBraceOrComma
+                // `{ fetch() { … } }`: a method of the scene's own object or class, not a call.
+                let isMethodDefinition = next?.text == "(" && (afterBraceOrComma || prev?.text == "}" || prev?.text == ";")
+                    && tokenAfterParens(tokens, from: i + 1)?.text == "{"
+                if isObjectKey || isMethodDefinition { continue }
                 if networkGlobals.contains(t.text), !declared.contains(t.text),
                    !isMember || globalObjects.contains(memberOf ?? "") {
                     issue(t, "network access is not allowed (\(t.text)). \(offlineHint)")
@@ -84,6 +88,18 @@ public enum SceneSourceScanner {
             }
         }
         return issues
+    }
+
+    /// The token following the parenthesised group that opens at `open`, if any.
+    private static func tokenAfterParens(_ tokens: [JSToken], from open: Int) -> JSToken? {
+        var depth = 0, j = open
+        while j < tokens.count {
+            let t = tokens[j]
+            if t.kind == .punct, t.text == "(" { depth += 1 }
+            if t.kind == .punct, t.text == ")" { depth -= 1; if depth == 0 { return j + 1 < tokens.count ? tokens[j + 1] : nil } }
+            j += 1
+        }
+        return nil
     }
 
     /// Scans a text asset (SVG, JSON, shader…) for external URLs.
