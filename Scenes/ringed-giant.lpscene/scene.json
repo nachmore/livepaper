@@ -1,0 +1,26 @@
+{
+  "author" : "LivePaper",
+  "clock" : {
+    "position" : "top"
+  },
+  "created" : "2026-11-15T02:40:36Z",
+  "description" : "A slow, banded gas giant with tilted luminous rings, tiny moons, and a quiet nebula in deep space.",
+  "id" : "ringed-giant",
+  "kind" : "web",
+  "name" : "Ringed Giant",
+  "performance" : {
+    "benchMs" : 0.75,
+    "checkedAt" : "2026-11-15T03:05:11Z",
+    "energyMw" : 36
+  },
+  "runtime" : 1,
+  "schema" : 1,
+  "tags" : [
+    "night",
+    "planet",
+    "space",
+    "rings",
+    "calm"
+  ],
+  "updated" : "2026-11-15T03:03:38Z"
+}
