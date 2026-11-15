@@ -55,8 +55,8 @@ if [ -n "${LIVEPAPER_VERSION:-}" ] && [ "$LIVEPAPER_VERSION" != "$VERSION" ]; th
   fi
   VERSION="$LIVEPAPER_VERSION"
 fi
-# CFBundleVersion must be numeric and must grow: the installed saver is replaced when it differs
-# from the app's copy (InstallService compares CFBundleVersion).
+# CFBundleVersion must be numeric and must grow: at launch the app replaces the installed saver
+# only with a higher build (InstallService.updateSaver); an explicit install replaces any other.
 BUILD="${LIVEPAPER_BUILD:-$(git -C "$ROOT" rev-list --count HEAD 2>/dev/null || echo 1)}"
 if ! [[ "$BUILD" =~ ^[0-9]+$ ]]; then echo "✗ the build number must be numeric (got '$BUILD')" >&2; exit 1; fi
 if [ -z "${LIVEPAPER_BUILD:-}" ] && [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = true ]; then

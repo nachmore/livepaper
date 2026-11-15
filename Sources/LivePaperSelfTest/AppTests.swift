@@ -376,6 +376,12 @@ extension SelfTests {
             try expect(SetupChecklist.checks(for: .welcome, state: st).isEmpty)
             st.install.saverUpToDate = false
             try expectEqual(SetupChecklist.saverSummary(st.install), "Selected \u{2014} update available")
+            try expect(SetupChecklist.checks(for: .screenSaver, state: st)[0].detail.contains("update is available"))
+            // A newer build from another copy of LivePaper isn't an "update".
+            st.install.saverNewerInstalled = true
+            try expectEqual(SetupChecklist.saverSummary(st.install), "Selected \u{2014} a newer build is installed")
+            try expect(SetupChecklist.checks(for: .screenSaver, state: st)[0].detail.contains("newer build"))
+            st.install.saverNewerInstalled = false
             // A login item waiting for approval says where to allow it.
             st.install.helperRunning = false
             st.install.helperLoginItem = .requiresApproval
@@ -890,11 +896,15 @@ extension SelfTests {
                 try expect(!ok)
                 try expect(!model.isPublishing)
                 try expectEqual(model.playlist, PlaylistSettings()) // unchanged on failure
+                // … and so are the stored settings: the saver still plays the previous playlist, and
+                // nothing (the disk watcher, the CLI) may take the failed draft for the current one.
+                try expectEqual(fx.services.publish.loadSettings(), PlaylistSettings())
                 let banner = try unwrap(model.banners.banners.last)
                 try expectEqual(banner.style, .error)
                 try expectEqual(banner.actions.map(\.title), ["Try Again"])
                 banner.actions[0].perform()
                 try awaitMain(until: { model.playlist.mode == .sequence })
+                try expectEqual(fx.services.publish.loadSettings().mode, .sequence)
             }
         },
         TestCase(name: "app.model.publish-without-saver") {
@@ -1005,6 +1015,148 @@ extension SelfTests {
                 try expectEqual(report?.rows.map(\.state), [.done, .done, .done, .done, .done])
                 try expect(!model.hasCompletedOnboarding)
                 try expect(!model.installStatus.saverInstalled && !model.installStatus.helperRunning)
+            }
+        },
+        TestCase(name: "app.model.saver-update-on-launch") {
+            // Launch replaces only an older installed saver, never while the Mac is locked.
+            let outdated = InstallStatus(saverInstalled: true, saverUpToDate: false)
+            try withInstallModel("update-locked", status: outdated, locked: true) { model, install, lock in
+                try expectEqual(install.installCount, 0)
+                try expect(model.installStatus.saverUpdateAvailable, "still to do")
+                lock.isLocked = false
+                try awaitMain { await model.updateInstalledSaverIfNeeded() }
+                try expectEqual(install.installCount, 1)
+                try expect(model.installStatus.saverUpToDate && !model.isInstallBusy, "status refreshed afterwards")
+                try awaitMain { await model.updateInstalledSaverIfNeeded() }
+                try expectEqual(install.installCount, 1)
+            }
+            try withInstallModel("update-now", status: outdated, locked: false) { model, install, _ in
+                try expectEqual(install.installCount, 1)
+                try expect(model.installStatus.saverUpToDate)
+            }
+            // A newer build (another copy of LivePaper installed it) stays; so does no saver at all.
+            try withInstallModel("update-newer", status: InstallStatus(saverInstalled: true, saverNewerInstalled: true), locked: false) { model, install, _ in
+                try expectEqual(install.installCount, 0)
+                try expect(model.installStatus.saverNewerInstalled && !model.installStatus.saverUpdateAvailable)
+            }
+            try withInstallModel("update-none", status: InstallStatus(), locked: false) { _, install, _ in
+                try expectEqual(install.installCount, 0)
+            }
+        },
+        TestCase(name: "app.model.saver-update-before-uninstall") {
+            // Uninstall (and setup) wait for a launch-time update that is still running: it would
+            // otherwise put back what uninstall removes.
+            try withScratchPaths("update-uninstall") { root in
+                let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let gated = GatedInstall(base: MockInstallService(status: InstallStatus(saverInstalled: true, saverUpToDate: false)))
+                let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: gated,
+                                                 render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    let started = WatchLog<Bool>()
+                    Task { @MainActor in await model.start(); started.append(true) }
+                    try awaitMain(until: { gated.isHolding })
+                    try expect(model.isInstallBusy, "the update counts as install work")
+                    let reports = WatchLog<UninstallReport>()
+                    Task { @MainActor in reports.append(await model.uninstall(keepScenes: true)) }
+                    pumpMain(0.3)
+                    try expectEqual(gated.events, ["update"])
+                    gated.release()
+                    try awaitMain(until: { !reports.values.isEmpty && !started.values.isEmpty })
+                    try expectEqual(gated.events, ["update", "updated", "uninstall"])
+                    try expect(!model.isInstallBusy)
+                }
+            }
+        },
+        TestCase(name: "app.model.saver-update-reports-skipped") {
+            // The update republishes from the current settings and library; scenes that can't be
+            // published any more are shown like after any publish, not just logged.
+            try withScratchPaths("update-report") { root in
+                let paths = InstallPaths(saverTemplate: root.appendingPathComponent("App/LivePaper.saver"),
+                                         screenSaversDir: root.appendingPathComponent("Screen Savers"),
+                                         launchAgentsDir: root.appendingPathComponent("LaunchAgents"),
+                                         wallpaperStore: root.appendingPathComponent("Wallpaper/Index.plist"),
+                                         supportRoot: root.appendingPathComponent("Support"),
+                                         helperExecutable: root.appendingPathComponent("Helpers/LivePaperHelper"), managedPreferences: [])
+                func bundle(_ version: String, at url: URL) throws {
+                    try FileManager.default.createDirectory(at: url.appendingPathComponent("Contents/Resources"), withIntermediateDirectories: true)
+                    try PropertyListSerialization.data(fromPropertyList: ["CFBundleVersion": version], format: .xml, options: 0)
+                        .write(to: url.appendingPathComponent("Contents/Info.plist"))
+                }
+                try bundle("2", at: paths.saverTemplate)
+                try bundle("1", at: paths.installedSaver)
+                let runner = RecordingCommandRunner { exe, args in
+                    exe == "/bin/launchctl" && args.first == "print" ? CommandResult(status: 113) : nil
+                }
+                let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let publish = try unwrap(mocks.publish as? MockPublishService)
+                publish.simulatedSkips = ["neon-rain": "neon-rain has a syntax error on line 3."]
+                let install = InstallService(paths: paths, publisher: publish, runner: runner, loginItem: NoLoginItem(), preferences: ScratchPreferences())
+                let services = LivePaperServices(library: mocks.library, publish: publish, ai: mocks.ai, install: install,
+                                                 render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    try awaitMain { await model.start() }
+                    try expect(model.installStatus.saverUpToDate, "\(model.installStatus)")
+                    try expectEqual(model.lastPublishResult?.skippedScenes.map(\.id), ["neon-rain"])
+                    let banner = try unwrap(model.banners.banners.last { $0.style == .warning })
+                    try expect(banner.title.contains("left out") && banner.message?.contains("Neon Rain") == true, banner.message ?? "")
+                    try expect(runner.commands.allSatisfy { $0.first != "/usr/bin/open" && $0.first != "/usr/bin/killall" }, "\(runner.commands)")
+                }
+            }
+        },
+        TestCase(name: "app.model.preview-follows-edits") {
+            // scene.js edited in an editor (or checked with `livepaper check`, which keeps
+            // `updated`): previews compile the new code instead of serving the cached copy.
+            try withModel("preview-edits") { model, _ in
+                let entry = try unwrap(model.entry(id: "neon-rain"))
+                var first: URL?, again: URL?, edited: URL?, withAsset: URL?
+                try awaitMain { first = try await model.previewHTML(for: entry.item) }
+                try awaitMain { again = try await model.previewHTML(for: entry.item) }
+                try expectEqual(again, first)
+                let later = Date().addingTimeInterval(5)
+                let script = entry.item.packageURL.appendingPathComponent("scene.js")
+                try Data("LivePaper.scene({ draw(lp) { lp.ctx.fillRect(0, 0, 1, 1); } });\n".utf8).write(to: script)
+                try FileManager.default.setAttributes([.modificationDate: later], ofItemAtPath: script.path)
+                try awaitMain { await model.refreshFromDisk(.library) }
+                try expectEqual(model.previewRevision[entry.id], 1)
+                let current = try unwrap(model.entry(id: entry.id))
+                try expectEqual(current.manifest.updated, entry.manifest.updated)
+                try awaitMain { edited = try await model.previewHTML(for: current.item) }
+                try expect(edited != first, "recompiled after the edit")
+                let editedFile = try unwrap(edited)
+                try expect(FileManager.default.fileExists(atPath: editedFile.path))
+                // An asset added counts too.
+                let assets = entry.item.packageURL.appendingPathComponent("assets")
+                try FileManager.default.createDirectory(at: assets, withIntermediateDirectories: true)
+                try Data("png".utf8).write(to: assets.appendingPathComponent("dot.png"))
+                try awaitMain { await model.refreshFromDisk(.library) }
+                try expectEqual(model.previewRevision[entry.id], 2)
+                try awaitMain { withAsset = try await model.previewHTML(for: current.item) }
+                try expect(withAsset != edited)
+                try expectEqual(model.previewRevision["paper-lanterns"], nil)
+            }
+        },
+        TestCase(name: "app.model.preview-unsafe-id") {
+            // An AI candidate's scene.json is written by the agent: an id like "../x" must never
+            // become part of a path (the file always lands in the preview cache).
+            try withModel("preview-unsafe-id") { model, fx in
+                let entry = try unwrap(model.entry(id: "neon-rain"))
+                var manifest = entry.manifest
+                manifest.id = "../escaped-preview"
+                let candidate = SceneItem(manifest: manifest, packageURL: entry.item.packageURL, isBuiltin: false)
+                var url: URL?
+                try awaitMain { url = try await model.previewHTML(for: candidate) }
+                let out = try unwrap(url)
+                try expectEqual(out.deletingLastPathComponent().standardizedFileURL.path,
+                                fx.root.appendingPathComponent("Previews").standardizedFileURL.path)
+                try expect(FileManager.default.fileExists(atPath: out.path))
+                let outside = ((try? FileManager.default.contentsOfDirectory(atPath: fx.root.path)) ?? []).filter { $0.contains("escaped") }
+                try expectEqual(outside, [])
+                // Still a different preview from the library copy's.
+                var library: URL?
+                try awaitMain { library = try await model.previewHTML(for: entry.item) }
+                try expect(library != out)
             }
         },
         TestCase(name: "app.model.uninstall-retry") {
@@ -1402,6 +1554,73 @@ extension SelfTests {
                 try body(model, fx)
                 for s in model.runningSessions { s.cancel() }
             }
+        }
+    }
+
+    /// Whether the test's Mac counts as locked (AppEnvironment.isSessionLocked).
+    final class LockFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value: Bool
+        init(_ value: Bool) { self.value = value }
+        var isLocked: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return value }
+            set { lock.lock(); value = newValue; lock.unlock() }
+        }
+    }
+
+    /// A started AppModel whose install service starts from `status`, with a controllable lock.
+    static func withInstallModel(_ name: String, status: InstallStatus, locked: Bool,
+                                 _ body: @MainActor (AppModel, MockInstallService, LockFlag) throws -> Void) throws {
+        try withScratchPaths(name) { root in
+            let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+            let install = MockInstallService(status: status)
+            let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: install,
+                                             render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+            let lock = LockFlag(locked)
+            try MainActor.assumeIsolated {
+                var env = testEnvironment(root: root, saved: SavedStates())
+                env.isSessionLocked = { lock.isLocked }
+                let model = AppModel(services: services, environment: env)
+                try awaitMain { await model.start() }
+                try body(model, install, lock)
+            }
+        }
+    }
+
+    /// Forwards to a MockInstallService, but holds every saver update until `release()`, and logs
+    /// the order of updates and uninstalls.
+    final class GatedInstall: InstallServicing, @unchecked Sendable {
+        let base: MockInstallService
+        private let lock = NSLock()
+        private let gate = DispatchSemaphore(value: 0)
+        private var log: [String] = []
+        private var holding = false
+
+        init(base: MockInstallService) { self.base = base }
+
+        var events: [String] { lock.lock(); defer { lock.unlock() }; return log }
+        var isHolding: Bool { lock.lock(); defer { lock.unlock() }; return holding }
+        func release() { gate.signal() }
+        private func note(_ event: String, holding: Bool? = nil) {
+            lock.lock(); log.append(event); if let holding { self.holding = holding }; lock.unlock()
+        }
+
+        func status() -> InstallStatus { base.status() }
+        func installSaver() throws -> PublishResult? { note("install"); return try base.installSaver() }
+        func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome {
+            note("update", holding: true)
+            gate.wait()
+            defer { note("updated", holding: false) }
+            return try base.updateSaver(isSessionLocked: isSessionLocked)
+        }
+        func selectSaver() throws -> Bool { try base.selectSaver() }
+        func registerHelper() throws { try base.registerHelper() }
+        func unregisterHelper() throws { try base.unregisterHelper() }
+        func setLockKeysShowScene(_ on: Bool) throws { try base.setLockKeysShowScene(on) }
+        func openScreenSaverSettings() { base.openScreenSaverSettings() }
+        func performUninstall(removeLibrary: Bool) -> [InstallStep] {
+            note("uninstall")
+            return base.performUninstall(removeLibrary: removeLibrary)
         }
     }
 

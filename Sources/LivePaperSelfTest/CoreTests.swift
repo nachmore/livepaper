@@ -166,12 +166,13 @@ private final class FakeChecker: SceneChecking, @unchecked Sendable {
 private final class FakePublisher: PublishServicing, @unchecked Sendable {
     var publishCount = 0
     var error: Error?
+    var result = PublishResult(playlist: LPPlaylist())
     func loadSettings() -> PlaylistSettings { PlaylistSettings() }
     func saveSettings(_ s: PlaylistSettings) throws {}
     func publishReport() throws -> PublishResult {
         publishCount += 1
         if let error { throw error }
-        return PublishResult(playlist: LPPlaylist())
+        return result
     }
 }
 
@@ -1590,6 +1591,92 @@ extension SelfTests {
                 try expect(detected)
                 try expect(system.mutatingCommands.isEmpty)
             }
+        },
+        TestCase(name: "core.install.update") {
+            // The launch-time update (InstallServicing.updateSaver): only ever an upgrade, never a
+            // fresh install, never after an uninstall, never under a lock screen — and the publish
+            // report comes back to the app.
+            try CoreSandbox.with("update-saver") { sb in
+                let paths = sb.installPaths()
+                let template = sb.resources.appendingPathComponent("LivePaper.saver")
+                func bundle(_ version: String, at url: URL) throws {
+                    try FileManager.default.createDirectory(at: url.appendingPathComponent("Contents/Resources"), withIntermediateDirectories: true)
+                    try PropertyListSerialization.data(fromPropertyList: ["CFBundleVersion": version], format: .xml, options: 0)
+                        .write(to: url.appendingPathComponent("Contents/Info.plist"))
+                }
+                func installedBuild() -> String? {
+                    FileManager.default.contents(atPath: paths.installedSaver.appendingPathComponent("Contents/Info.plist").path)
+                        .flatMap { try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any] }?["CFBundleVersion"] as? String
+                }
+                let publisher = FakePublisher()
+                publisher.result = PublishResult(playlist: LPPlaylist(), skipped: ["broken": "broken has a syntax error."])
+                let system = FakeSystem()
+                let service = InstallService(paths: paths, publisher: publisher, runner: system.runner,
+                                             loginItem: FakeLoginItem(available: false), preferences: FakePreferences())
+                let unlocked = { false }
+                try bundle("7", at: template)
+
+                // Nothing installed: the update never installs (setup does).
+                try expectEqual(try service.updateSaver(isSessionLocked: unlocked), .skipped("not installed"))
+                try expect(!exists(paths.installedSaver) && publisher.publishCount == 0)
+
+                try bundle("6", at: paths.installedSaver)
+                try sb.write("{}", to: paths.installedPlaylist.appendingPathComponent("playlist.json"))
+                var status = service.status()
+                try expect(status.saverUpdateAvailable && !status.saverNewerInstalled, "\(status)")
+                // Locked: left alone.
+                guard case .skipped(let lockedWhy) = try service.updateSaver(isSessionLocked: { true }) else {
+                    throw TestFailure(description: "updated under the lock screen")
+                }
+                try expect(lockedWhy.contains("locked"), lockedWhy)
+                try expectEqual(installedBuild(), "6")
+                // The Mac locks while the update is under way: the check right before the swap wins,
+                // and nothing is left behind.
+                var probes = 0
+                guard case .skipped = try service.updateSaver(isSessionLocked: { probes += 1; return probes > 1 }) else {
+                    throw TestFailure(description: "swapped after the Mac locked")
+                }
+                try expect(probes >= 2, "checked again under publish.lock (\(probes))")
+                try expectEqual(installedBuild(), "6")
+                try expectEqual(children(paths.screenSaversDir), ["LivePaper.saver"])
+                try expectEqual(publisher.publishCount, 0)
+
+                // Unlocked and older: replaced, the playlist carried over, republished, report returned.
+                try expectEqual(try service.updateSaver(isSessionLocked: unlocked), .updated(publisher.result))
+                try expectEqual(installedBuild(), "7")
+                try expectEqual(read(paths.installedPlaylist.appendingPathComponent("playlist.json")), "{}")
+                try expectEqual(publisher.publishCount, 1)
+                try expect(service.status().saverUpToDate)
+                try expectEqual(try service.updateSaver(isSessionLocked: unlocked), .skipped("already this build"))
+
+                // An older LivePaper launched next to a newer saver leaves it alone …
+                try bundle("5", at: template)
+                status = service.status()
+                try expect(status.saverNewerInstalled && !status.saverUpdateAvailable && !status.saverUpToDate, "\(status)")
+                guard case .skipped(let newerWhy) = try service.updateSaver(isSessionLocked: unlocked) else {
+                    throw TestFailure(description: "downgraded the saver")
+                }
+                try expect(newerWhy.contains("newer"), newerWhy)
+                try expectEqual(installedBuild(), "7")
+                // … but an explicit install puts this LivePaper's build in place.
+                try expectEqual(try service.installSaver(), publisher.result)
+                try expectEqual(installedBuild(), "5")
+
+                // After an uninstall that had to keep the saver: no update, and the marker stays.
+                try bundle("8", at: template)
+                try sb.write("uninstalled", to: paths.uninstallMarker)
+                guard case .skipped = try service.updateSaver(isSessionLocked: unlocked) else {
+                    throw TestFailure(description: "updated after an uninstall")
+                }
+                try expect(exists(paths.uninstallMarker), "only setting LivePaper up again removes the marker")
+                try expectEqual(installedBuild(), "5")
+                try expect(system.mutatingCommands.isEmpty, "\(system.mutatingCommands)")
+            }
+            // Build numbers are commit counts: compared as numbers, and anything else doesn't compare.
+            try expect(InstallService.isNewerBuild("146", than: "99"))
+            try expect(!InstallService.isNewerBuild("99", than: "146"))
+            try expect(!InstallService.isNewerBuild("7", than: "7"))
+            try expect(!InstallService.isNewerBuild("abc", than: "7") && !InstallService.isNewerBuild("7", than: nil))
         },
         TestCase(name: "core.install.helper") {
             try CoreSandbox.with("helper") { sb in

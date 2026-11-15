@@ -134,7 +134,8 @@ directories and inject fakes for commands, preferences and login items.
   state.json                      app → helper shared state (§4.4)
   playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes)
   ai-settings.json                AISettings: Settings › AI (shared by the app, the CLI and sessions)
-  publish.lock                    flock: one publish / saver install at a time (app and CLI may race)
+  publish.lock                    flock: one publish / saver install, update or removal at a time (app and CLI
+                                  may race)
   backups/
     wallpaper-store-Index.plist   raw copy of the wallpaper store before LivePaper's first selection
                                   (forensics only — NEVER restored wholesale; WallpaperAgent rewrites the
@@ -160,7 +161,9 @@ directories and inject fakes for commands, preferences and login items.
 ~/Library/Application Support/LivePaper.uninstalled   written by uninstall (outside the data folder): the helper
                                   exits at launch while it exists; installing again removes it
 ~/Library/Application Support/com.apple.wallpaper/Store/Index.plist   read via WallpaperStore (LIVEPAPER_WALLPAPER_STORE)
-$TMPDIR/LivePaperPreviews/                        compiled preview HTML (the app clears it at launch)
+$TMPDIR/LivePaperPreviews/                        compiled preview HTML (the app clears it at launch; named
+                                  `<id>-<updated>-<hash of location, id, sources>.html`, `scene-…` when the
+                                  id isn't a valid scene id, e.g. an agent-written candidate's)
 ```
 Uninstall keeping the scenes keeps `Library/`, `state.json`, `playlist-settings.json` and
 `ai-settings.json`; everything else in the support directory goes (backups only when no step failed).
@@ -214,7 +217,11 @@ Supported files: `html`/`htm` for web scenes, `mov`/`mp4`/`m4v` for video
 reports such scenes as skipped). Publishing writes `Playlist.new/`, then atomically swaps it in
 (under `publish.lock`) and posts `com.nachmore.livepaper.published`. Scenes that fail to compile or
 have no playable video are left out and reported (`PublishResult.skipped`); if none is publishable
-the previous playlist stays. The saver reads the playlist at start only (previews also on
+the previous playlist stays. The app saves `playlist-settings.json` before publishing and puts the
+previous settings back when its publish fails while a saver is installed, so the stored settings
+always describe what the saver plays (without a saver they stay stored: installing publishes them).
+Skipped scenes are reported after every app publish, including the republish of setup and of the
+launch-time saver update (§11). The saver reads the playlist at start only (previews also on
 `published`). (The saver is sandboxed and can read only its own bundle — that's why content is
 published *into* it.)
 
@@ -559,11 +566,23 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
 * **Changes made elsewhere** (the CLI, Finder, an editor) show up without a relaunch:
   `LibraryWatcher` watches the support directory with one FSEvents stream (`Workspaces/`, `Logs/`
   and `backups/` excluded). Only `Library/<id>.lpscene` entries, their `scene.json`,
-  `thumbnail.jpg`, `history.jsonl` and `.check/report.json`, and `playlist-settings.json` count;
+  `thumbnail.jpg`, `history.jsonl`, `.check/report.json`, `scene.js` and `assets/` (what the live
+  previews compile), and `playlist-settings.json` count;
   a burst becomes one refresh about 0.5 s after the last change (FSEvents latency 0.2 s + a 0.3 s
   debounce, at most 2 s). Becoming active and opening the main window refresh too, as a safety
   net. Refreshes are quiet: no loading state, unchanged data isn't reassigned (selection, scroll
-  position and an edited playlist draft stay put), and nothing runs while nothing changes.
+  position and an edited playlist draft stay put), and nothing runs while nothing changes. Compiled
+  previews are keyed by a stamp of what they are compiled from (scene.json, scene.js, assets/), so
+  an edit that leaves `updated` alone (an editor, `livepaper check`) recompiles them too.
+* **Saver update at launch:** the saver's code lives in `~/Library/Screen Savers`, not in the app,
+  so after an app update the installed copy is the old build. At launch the app replaces it with its
+  bundled build and republishes (`InstallServicing.updateSaver`) — only when the installed build is
+  older (CFBundleVersion, the commit count: an older LivePaper launched next to a newer one never
+  downgrades it; an explicit install in setup replaces any build), only while one is installed,
+  never after an uninstall (the marker stays) and never while the Mac is locked. The lock, the
+  versions and the marker are checked again under `publish.lock` right before the swap, and
+  uninstall removes the bundle under the same lock. It runs alongside the rest of the launch;
+  uninstall and setup wait for it.
 * *Settings* — Screen Saver (status, setup), Lock (**one** toggle "Use ⌃⌘Q and the lock key for
   LivePaper lock" + the optional extra shortcut recorder + helper status), Performance (profile),
   AI (default agent, per-agent model, time limit, custom command), About (+ Uninstall).

@@ -6,7 +6,6 @@
 // Entry/SystemActions.swift. That keeps this file compilable into LivePaperSelfTest (via
 // Sources/LivePaperSelfTest/AppLogic/) where its state transitions are tested against the mocks.
 import Foundation
-import CoreGraphics
 import Observation
 import LivePaperCore
 
@@ -31,16 +30,22 @@ struct AppEnvironment {
     /// The support directory whose `Library/` and `playlist-settings.json` are watched for changes
     /// made by other processes (LibraryWatcher). nil: not watched (tests, snapshots).
     var diskWatchRoot: URL? = nil
+    /// The login session is locked right now (any thread; live: CGSSessionScreenIsLocked). The
+    /// installed saver is never swapped under a running lock screen.
+    var isSessionLocked: @Sendable () -> Bool = { false }
 
     static let onboardingCompletedKey = "onboardingCompleted"
 }
 
 /// Modification dates of the per-scene files the UI shows beyond what LibraryEntry compares, so a
-/// file rewritten under the same name (`livepaper thumbnail`, `livepaper check`) is noticed.
+/// file rewritten under the same name (`livepaper thumbnail`, `livepaper check`, an editor) is
+/// noticed.
 struct SceneFileStamps: Equatable, Sendable {
     var thumbnail: Date?
     var history: Date?
     var report: Date?
+    /// What a compiled preview is made of (`content(package:)`).
+    var content: UInt64
 
     init(package: URL) {
         func modified(_ relative: String) -> Date? {
@@ -49,6 +54,28 @@ struct SceneFileStamps: Equatable, Sendable {
         thumbnail = modified("thumbnail.jpg")
         history = modified(ProvenanceLog.fileName)
         report = modified(CheckReportFile.relativePath)
+        content = Self.content(package: package)
+    }
+
+    /// A stamp of the files SceneCompiler reads — scene.json, scene.js and everything in assets/
+    /// (names, sizes, modification dates). A preview compiled earlier is stale once it changes,
+    /// even when the manifest's `updated` didn't (an edit in an editor, `livepaper check`).
+    static func content(package: URL) -> UInt64 {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        func line(_ url: URL, _ name: String) -> String? {
+            guard let values = try? url.resourceValues(forKeys: Set(keys)), let date = values.contentModificationDate else { return nil }
+            return "\(name)\t\(date.timeIntervalSinceReferenceDate)\t\(values.fileSize ?? -1)"
+        }
+        var lines = [SceneManifest.fileName, SceneCompiler.sceneFile, SceneCompiler.assetsDirectory].compactMap {
+            line(package.appendingPathComponent($0), $0)
+        }
+        let assets = package.appendingPathComponent(SceneCompiler.assetsDirectory)
+        if let walker = FileManager.default.enumerator(at: assets, includingPropertiesForKeys: keys) {
+            for case let url as URL in walker {
+                if let l = line(url, String(url.path.dropFirst(assets.path.count))) { lines.append(l) }
+            }
+        }
+        return AppModel.stableHash(lines.sorted().joined(separator: "\n"))
     }
 }
 
@@ -113,6 +140,9 @@ final class AppModel {
     var query = LibraryQuery()
     /// Bumped when a scene's thumbnail file changes so image views reload.
     private(set) var thumbnailRevision: [String: Int] = [:]
+    /// Bumped when what a scene's live preview is compiled from changes on disk without a new
+    /// `updated` (an editor, `livepaper check`), so open previews recompile.
+    private(set) var previewRevision: [String: Int] = [:]
     private var thumbnailAttempts: Set<String> = []
     private var previewHTMLCache: [String: URL] = [:]
     private(set) var videoImport: VideoImport?
@@ -140,7 +170,12 @@ final class AppModel {
 
     // Screen saver, lock, system
     private(set) var playlist = PlaylistSettings()
-    private(set) var isPublishing = false
+    /// savePlaylist calls in progress.
+    private var playlistSaves = 0
+    var isPublishing: Bool { playlistSaves > 0 }
+    /// A playlist read finished while a save was in flight and wasn't applied (the save may roll
+    /// back what it wrote): read again once the saves are done.
+    @ObservationIgnored private var playlistRereadAfterSave = false
     /// The last successful publish, including scenes it had to leave out.
     private(set) var lastPublishResult: PublishResult?
     var lastPublished: LPPlaylist? { lastPublishResult?.playlist }
@@ -148,7 +183,11 @@ final class AppModel {
     private(set) var installStatus = InstallStatus()
     /// installStatus has been read at least once (until then nothing is known about the system).
     private(set) var installStatusLoaded = false
-    private(set) var isInstallBusy = false
+    /// Install, setup and uninstall work in progress (the launch-time saver update included).
+    var isInstallBusy: Bool { installJobs > 0 }
+    private var installJobs = 0
+    /// The launch-time saver update while it runs: uninstall and setup wait for it.
+    @ObservationIgnored private var saverUpdate: Task<Void, Never>?
     private(set) var isLocking = false
 
     // AI
@@ -180,10 +219,13 @@ final class AppModel {
         async let pl: Void = loadPlaylist()
         async let st: Void = refreshInstallStatus()
         _ = await (lib, pl, st)
-        await updateInstalledSaverIfNeeded()
+        // Alongside the rest: waiting for publish.lock (another process publishing) mustn't hold
+        // up the launch.
+        let update = beginSaverUpdateIfNeeded()
         syncLockKeysMirror()
         await detectHarnesses()
         await generateMissingThumbnails()
+        await update?.value
     }
 
     // MARK: - Library
@@ -237,6 +279,7 @@ final class AppModel {
             guard let old = fileStamps[id] else { continue }
             if old.thumbnail != nil && old.thumbnail != new.thumbnail { thumbnailRevision[id, default: 0] += 1 }
             if old.history != new.history || old.report != new.report { detailsChanged = true }
+            if old.content != new.content { previewRevision[id, default: 0] += 1 }
         }
         fileStamps = stamps
         if detailsChanged { detailsRevision += 1 }
@@ -273,16 +316,26 @@ final class AppModel {
         }
     }
 
-    /// A compiled, self-contained HTML file for live previews of a web scene (cached per version).
-    /// The key includes the package location so an AI candidate never reuses the library copy.
+    /// A compiled, self-contained HTML file for live previews of a web scene, cached per version
+    /// of what it is compiled from (SceneFileStamps.content: edits that don't touch `updated`
+    /// count too). The key includes the package location so an AI candidate never reuses the
+    /// library copy.
     func previewHTML(for item: SceneItem) async throws -> URL {
+        let package = item.packageURL
+        let content = try await offMain { SceneFileStamps.content(package: package) }
         let stamp = Int(item.manifest.updated?.timeIntervalSince1970 ?? 0)
-        let key = "\(item.id)-\(stamp)-\(String(AppModel.stableHash(item.packageURL.path), radix: 36))"
+        let version = String(AppModel.stableHash("\(package.path)\n\(item.id)\n\(content)"), radix: 36)
+        let key = "\(item.id)-\(stamp)-\(version)"
         if let cached = previewHTMLCache[key], FileManager.default.fileExists(atPath: cached.path) { return cached }
         let dir = environment.previewCacheDirectory
-        let out = dir.appendingPathComponent("\(key).html")
+        // The id names the file only when it is a valid scene id: an AI candidate's scene.json is
+        // written by the agent, and its id (say "../../x") must never become a path.
+        let name = SceneManifest.isValidID(item.id) ? item.id : "scene"
+        let out = dir.appendingPathComponent("\(name)-\(stamp)-\(version).html")
+        guard out.deletingLastPathComponent().standardizedFileURL.path == dir.standardizedFileURL.path else {
+            throw LibraryError.invalid("\(item.manifest.name) can't be previewed: its id isn't a valid file name.")
+        }
         let compiler = services.compiler
-        let package = item.packageURL
         try await offMain {
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
             try compiler.compile(package: package, to: out)
@@ -304,7 +357,7 @@ final class AppModel {
     }
 
     /// FNV-1a: stable across launches (Swift's Hasher is randomly seeded per process).
-    static func stableHash(_ s: String) -> UInt64 {
+    nonisolated static func stableHash(_ s: String) -> UInt64 {
         var h: UInt64 = 0xcbf2_9ce4_8422_2325
         for b in s.utf8 { h ^= UInt64(b); h = h &* 0x100_0000_01b3 }
         return h
@@ -489,6 +542,8 @@ final class AppModel {
         let publish = services.publish
         let settings = (try? await offMain { publish.loadSettings() }) ?? PlaylistSettings()
         guard seq > playlistAppliedSeq else { return }
+        // A save in flight wrote settings that it puts back if its publish fails.
+        guard playlistSaves == 0 else { playlistRereadAfterSave = true; return }
         playlistAppliedSeq = seq
         guard settings != playlist else { return }
         // Changed elsewhere (e.g. `livepaper publish --scenes …`): this app's last publish no longer
@@ -499,12 +554,22 @@ final class AppModel {
 
     /// Saves the settings and publishes them into the installed screen saver. With
     /// `publishNow: false` (no saver installed yet) the settings are only stored; installing the
-    /// saver publishes them.
+    /// saver publishes them. A publish that fails changes nothing: the saver keeps the previous
+    /// playlist, so the stored settings go back to it too (otherwise the disk watcher, the CLI and
+    /// the menu bar would call the failed draft current, and Save & Publish would have nothing left
+    /// to save). Only without a saver do they stay stored, for setup to publish.
     @discardableResult
     func savePlaylist(_ settings: PlaylistSettings, announce: Bool = true, publishNow: Bool = true) async -> Bool {
-        isPublishing = true
-        defer { isPublishing = false }
+        playlistSaves += 1
+        defer {
+            playlistSaves -= 1
+            if playlistSaves == 0, playlistRereadAfterSave {
+                playlistRereadAfterSave = false
+                Task { await self.loadPlaylist() }
+            }
+        }
         let publish = services.publish
+        let previous = publishNow ? try? await offMain { publish.loadSettings() } : nil
         do {
             let result = try await offMain { () -> PublishResult? in
                 try publish.saveSettings(settings)
@@ -515,20 +580,7 @@ final class AppModel {
             playlistAppliedSeq = playlistReadSeq
             playlist = settings
             guard let result else { return true }
-            lastPublishResult = result
-            let n = result.playlist.scenes.count
-            let published = n == 1 ? "1 scene published" : "\(n) scenes published"
-            if !result.skipped.isEmpty {
-                // Always shown (even for quiet publishes): the saver won't play these scenes.
-                let skipped = result.skippedScenes
-                let names = skipped.map { "\u{201C}\(sceneNames[$0.id] ?? $0.id)\u{201D}" }.joined(separator: ", ")
-                banners.post(.warning, skipped.count == 1 ? "1 scene was left out of the screen saver"
-                                                          : "\(skipped.count) scenes were left out of the screen saver",
-                             message: "\(published). Not playable: \(names). \(skipped.first.map { $0.reason } ?? "")",
-                             actions: [.init(title: "Show Playlist") { [weak self] in self?.section = .playlist }])
-            } else if announce {
-                banners.post(.success, "Screen saver updated", message: published + ".")
-            }
+            reportPublish(result, announce: announce)
             return true
         } catch {
             await refreshInstallStatus()
@@ -537,11 +589,30 @@ final class AppModel {
                 banners.post(.error, "LivePaper's screen saver isn't installed", message: error.localizedDescription,
                              actions: [.init(title: "Set Up\u{2026}") { [weak self] in self?.showOnboarding = true }])
             } else {
+                if let previous, previous != settings { _ = try? await offMain { try publish.saveSettings(previous) } }
                 banners.error("Couldn't update the screen saver", error) { [weak self] in
                     Task { await self?.savePlaylist(settings, announce: announce, publishNow: publishNow) }
                 }
             }
             return false
+        }
+    }
+
+    /// Records a successful publish. Scenes it left out always get a banner, even for quiet
+    /// publishes (the saver won't play them); otherwise `announce` posts the success banner.
+    private func reportPublish(_ result: PublishResult, announce: Bool) {
+        lastPublishResult = result
+        let n = result.playlist.scenes.count
+        let published = n == 1 ? "1 scene published" : "\(n) scenes published"
+        if !result.skipped.isEmpty {
+            let skipped = result.skippedScenes
+            let names = skipped.map { "\u{201C}\(sceneNames[$0.id] ?? $0.id)\u{201D}" }.joined(separator: ", ")
+            banners.post(.warning, skipped.count == 1 ? "1 scene was left out of the screen saver"
+                                                      : "\(skipped.count) scenes were left out of the screen saver",
+                         message: "\(published). Not playable: \(names). \(skipped.first.map { $0.reason } ?? "")",
+                         actions: [.init(title: "Show Playlist") { [weak self] in self?.section = .playlist }])
+        } else if announce {
+            banners.post(.success, "Screen saver updated", message: published + ".")
         }
     }
 
@@ -684,17 +755,41 @@ final class AppModel {
     var setupState: SetupState { SetupState(install: installStatus) }
 
     /// After an app update the copy in ~/Library/Screen Savers is still the old build (the saver's
-    /// code — shuffle, power gate, clock hand-off — lives there, not in the app). Replace it with the
-    /// bundled template, keeping the published playlist; skipped while the Mac is locked.
+    /// code — shuffle, power gate, clock hand-off — lives there, not in the app): replace it with
+    /// the bundled build, then republish the playlist from the current settings and library (the
+    /// old Playlist is carried over only so the saver never sees an empty bundle). Scenes that
+    /// can't be published any more are reported like after any publish. Only ever an upgrade
+    /// (InstallStatus.saverUpdateAvailable: an older LivePaper never replaces a newer saver), never
+    /// after an uninstall and never while the Mac is locked; InstallService checks all of that
+    /// again right before the swap.
     func updateInstalledSaverIfNeeded() async {
-        guard installStatus.saverInstalled, !installStatus.saverUpToDate else { return }
-        // Never swap the bundle under a running lock screen.
-        if let session = CGSessionCopyCurrentDictionary() as? [String: Any],
-           (session["CGSSessionScreenIsLocked"] as? Bool) == true { return }
+        await beginSaverUpdateIfNeeded()?.value
+    }
+
+    /// Starts the launch-time update (or returns the one running), nil when there is nothing to do.
+    private func beginSaverUpdateIfNeeded() -> Task<Void, Never>? {
+        if let running = saverUpdate { return running }
+        guard installStatus.saverUpdateAvailable, !environment.isSessionLocked() else { return nil }
+        installJobs += 1
+        let task = Task { @MainActor in
+            defer { self.installJobs -= 1; self.saverUpdate = nil }
+            await self.runSaverUpdate()
+        }
+        saverUpdate = task
+        return task
+    }
+
+    private func runSaverUpdate() async {
         let install = services.install
+        let isLocked = environment.isSessionLocked
         do {
-            try await offMain { try install.installSaver() }
-            NSLog("LivePaper: updated the installed screen saver to this version")
+            switch try await offMain({ try install.updateSaver(isSessionLocked: isLocked) }) {
+            case .updated(let result):
+                NSLog("LivePaper: updated the installed screen saver to this build")
+                if let result { reportPublish(result, announce: false) }
+            case .skipped(let why):
+                NSLog("LivePaper: left the installed screen saver as it is: \(why)")
+            }
         } catch {
             NSLog("LivePaper: couldn't update the installed screen saver: \(error.localizedDescription)")
         }
@@ -713,15 +808,18 @@ final class AppModel {
     /// it in System Settings (the UI then shows the guided step).
     @discardableResult
     func makeLivePaperScreenSaver() async -> Bool {
-        isInstallBusy = true
-        defer { isInstallBusy = false }
+        installJobs += 1
+        defer { installJobs -= 1 }
+        // The launch-time update is the same install: let it finish rather than race it.
+        await saverUpdate?.value
         let install = services.install
         do {
-            let selected = try await offMain { () -> Bool in
+            let published = try await offMain { () -> PublishResult? in
                 let s = install.status()
-                if !s.saverInstalled || !s.saverUpToDate { try install.installSaver() }
-                return try install.selectSaver()
+                return !s.saverInstalled || !s.saverUpToDate ? try install.installSaver() : nil
             }
+            if let published { reportPublish(published, announce: false) }
+            let selected = try await offMain { try install.selectSaver() }
             await refreshInstallStatus()
             return selected
         } catch {
@@ -740,8 +838,8 @@ final class AppModel {
     func openScreenSaverSettings() { services.install.openScreenSaverSettings() }
 
     private func runInstallStep(_ failure: String, _ step: @escaping @Sendable (InstallServicing) throws -> Void) async {
-        isInstallBusy = true
-        defer { isInstallBusy = false }
+        installJobs += 1
+        defer { installJobs -= 1 }
         let install = services.install
         do {
             try await offMain { try step(install) }
@@ -762,8 +860,10 @@ final class AppModel {
     /// caller moves the app to the Trash and quits; with failures it offers to try again, which
     /// skips the steps that already finished.
     func uninstall(keepScenes: Bool) async -> UninstallReport {
-        isInstallBusy = true
-        defer { isInstallBusy = false }
+        installJobs += 1
+        defer { installJobs -= 1 }
+        // A launch-time saver update still running would put back what this removes.
+        await saverUpdate?.value
         let install = services.install
         // Agents work inside the support directory this deletes: they must be gone first.
         await stopAllAgents()

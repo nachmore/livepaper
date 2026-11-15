@@ -91,8 +91,13 @@ enum InstallCommands {
         } else if !status.saverUpToDate {
             let installed = bundleVersion(paths.installedSaver) ?? "?"
             let bundled = bundleVersion(paths.saverTemplate) ?? "?"
-            add(section, "installed", .problem, "an older version is installed (build \(installed); this LivePaper has \(bundled)). " +
-                "Open LivePaper to update it.")
+            if status.saverNewerInstalled {
+                add(section, "installed", .info, "a newer build is installed (build \(installed); this LivePaper has \(bundled)). " +
+                    "Launching this LivePaper leaves it alone (only an older saver is updated); its setup can install this build instead.")
+            } else {
+                add(section, "installed", .problem, "an older version is installed (build \(installed); this LivePaper has \(bundled)). " +
+                    "Open LivePaper to update it.")
+            }
         } else {
             add(section, "installed", .ok, "\(displayPath(paths.installedSaver)) (build \(bundleVersion(paths.installedSaver) ?? "?"))")
         }
