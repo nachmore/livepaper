@@ -32,15 +32,17 @@ enum SceneCommands {
         let started = Date()
         if !json { checker.progress = { line in stderr("  … \(line)") } }
         let report = try await checker.check(package: pkg, options: CheckOptions(quick: args.flag("quick"), power: args.flag("power")))
+        let previews = StillPreviews.write(for: report, package: pkg)
         if json {
             print(String(decoding: try SceneChecker.reportEncoder().encode(report), as: UTF8.self))
         } else {
-            printSummary(report, package: pkg, seconds: Date().timeIntervalSince(started))
+            printSummary(report, package: pkg, seconds: Date().timeIntervalSince(started), previews: previews)
         }
         return report.passed ? ExitCode.ok : ExitCode.failed
     }
 
-    static func printSummary(_ r: CheckReport, package: URL, seconds: Double) {
+    /// - Parameter previews: the directory of small JPEG copies of the stills, when `check` wrote them.
+    static func printSummary(_ r: CheckReport, package: URL, seconds: Double, previews: URL? = nil) {
         let checkDir = package.appendingPathComponent(SceneChecker.checkDirectory)
         let name = (try? SceneManifest.load(package: package))?.name ?? package.lastPathComponent
         print("livepaper check: \(r.passed ? "PASSED" : "FAILED") — \(name) (\(displayPath(package))) in \(Int(seconds.rounded())) s")
@@ -68,6 +70,9 @@ enum SceneCommands {
         if !r.stills.isEmpty {
             let examples = r.stills.prefix(2).map { URL(fileURLWithPath: $0.path).lastPathComponent }.joined(separator: ", ")
             print("  stills       \(r.stills.count) PNGs in \(displayPath(checkDir))/ (e.g. \(examples))")
+        }
+        if let previews {
+            print("  previews     the same stills as small JPEGs (≤ \(StillPreviews.maxPixels) px) in \(displayPath(previews))/ — view these")
         }
         print("  report       \(displayPath(checkDir.appendingPathComponent(SceneChecker.reportFile)))")
         if !r.problems.isEmpty {

@@ -889,6 +889,26 @@ extension SelfTests {
                 try expectEqual(entry?.summary, "Done.")
             }
         },
+        TestCase(name: "core.ai.session.harness-error") {
+            try CoreSandbox.with("session-harness-error") { sb in
+                // A fake `codex`: a stale warning on stderr, then the real reason in its JSON stream.
+                let script = sb.root.appendingPathComponent("agents/codex")
+                try sb.write("""
+                #!/bin/sh
+                cat > /dev/null
+                echo 'ERROR codex_core::tools::router: error=apply_patch verification failed' >&2
+                echo '{"type":"thread.started","thread_id":"t"}'
+                echo '{"type":"turn.failed","error":{"message":"Request exceeds the maximum allowed size"}}'
+                exit 1
+
+                """, to: script)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+                let (ai, _) = try sessionFixture(sb, agent: "true")
+                let codex = AIHarness(kind: .codex, name: "Fake Codex", executable: script.path)
+                let events = try collect(try ai.start(.create(prompt: "x"), harness: codex, model: nil))
+                try expectEqual(events.last, .failed("Fake Codex exited with status 1: Request exceeds the maximum allowed size"))
+            }
+        },
         TestCase(name: "core.ai.session.renderer-first") {
             // With the real checker, the session makes sure a render server listens before the agent
             // starts, so the agent's `livepaper` never has to launch LivePaperRenderd itself.
@@ -1035,6 +1055,7 @@ extension SelfTests {
             try expectEqual(parser.parse(line: "{not json"), [.assistantText("{not json")])
             try expectEqual(parser.parse(line: #"{"type":"result","subtype":"error_max_turns","is_error":true}"#),
                             [.status("Claude Code stopped: error_max_turns")])
+            try expectEqual(parser.lastError, "error_max_turns")
             try expectEqual(parser.parse(line: #"{"type":"stream_event","event":{}}"#), [])
             // A leading cd into the workspace is noise; other paths stay as they are.
             try expectEqual(parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /private/var/folders/lp/T/ws; cat AGENTS.md | head -50"}}]}}"#),
@@ -1054,7 +1075,13 @@ extension SelfTests {
                 .assistantText("Replaced `#000000` with `#102040`; `livepaper check scene` passed.")])
             try expectEqual(parser.finalMessage, "Replaced `#000000` with `#102040`; `livepaper check scene` passed.")
             try expectEqual(parser.reportedModel, nil)   // codex --json doesn't say
+            try expectEqual(parser.lastError, nil)
             try expectEqual(parser.parse(line: #"{"type":"turn.failed","error":{"message":"rate limited"}}"#), [.status("Codex stopped: rate limited")])
+            try expectEqual(parser.lastError, "rate limited")
+            // Recorded from a failed run: the API error arrives as JSON inside the message.
+            let tooLarge = #"{"type":"error","message":"{\"error\":{\"code\":\"request_too_large\",\"message\":\"Request exceeds the maximum allowed size\",\"param\":null,\"type\":\"invalid_request_error\"}}"}"#
+            try expectEqual(parser.parse(line: tooLarge), [.status("Codex: Request exceeds the maximum allowed size (request_too_large)")])
+            try expectEqual(parser.lastError, "Request exceeds the maximum allowed size (request_too_large)")
             // The pre-0.5 event format.
             try expectEqual(parser.parse(line: #"{"type":"item.started","item":{"id":"item_9","type":"command_execution","command":"/bin/zsh -lc 'cd /var/folders/lp/T/ws && livepaper check scene'"}}"#),
                             [.toolUse(name: "shell", detail: "livepaper check scene")])
@@ -1087,6 +1114,7 @@ extension SelfTests {
             try expectEqual(acp.finish(), [.assistantText("Second")])
             try expectEqual(acp.parse(line: #"{"type":"runFinished","data":{"status":"error","error":"model unavailable"}}"#),
                             [.status("Kiro CLI stopped: model unavailable")])
+            try expectEqual(acp.lastError, "model unavailable")
         },
         TestCase(name: "core.ai.parsers.plain") {
             // kiro-cli text mode / custom harnesses (synthetic: the smoke run used stream-json).

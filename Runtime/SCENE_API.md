@@ -322,6 +322,8 @@ clock hidden), optionally measures live CPU energy (`--power`), and writes:
   `benchMs` (`"1512x982@2 t=30": 1.4`; entries ending in ` probe` are short runs that only locate the
   heaviest moment), `energyMw`.
 * `<scene-dir>/.check/<W>x<H>@<dpr>-t<T>.png` — the stills. Look at them: they are what users see.
+  `<scene-dir>/.check/previews/<W>x<H>@<dpr>-t<T>.jpg` are the same stills as small JPEGs (at most
+  1280 px wide), for image viewers and AI tools that can't take multi-megabyte images.
 * On success, `performance` in `scene.json`.
 
 Exit status: 0 passed · 1 the scene has problems · 2 usage error · 3 LivePaper itself could not

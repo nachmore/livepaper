@@ -12,7 +12,7 @@ full-screen canvas through the LivePaper runtime.
 | `scene/scene.json` | Manifest: `name`, `description`, `tags`, `clock.position`. Keep `id`, `kind`, `runtime`, `schema` as they are; never edit `performance` (the check writes it). |
 | `scene/scene.js` | All of the scene's code (a classic script that calls `LivePaper.scene({...})` once). |
 | `scene/assets/` | Optional small images/fonts/JSON/shaders, read with `LivePaper.image/text/asset(name)`. |
-| `scene/.check/` | Written by `livepaper check`: `report.json` and PNG stills. Read it; don't edit it. |
+| `scene/.check/` | Written by `livepaper check`: `report.json`, full-size PNG stills, and small JPEG copies of them in `previews/`. Read it; don't edit it. |
 | `sdk/SCENE_API.md` | **The API guide. Read it before writing code.** |
 | `sdk/livepaper.d.ts` | Exact types of everything the runtime provides. |
 | `sdk/templates/web/` | The starter scene (a calm aurora): a good model for structure and performance. |
@@ -69,10 +69,12 @@ full-screen canvas through the LivePaper runtime.
 1. Read `TASK.md`, then `sdk/SCENE_API.md`; skim `sdk/templates/web/scene.js` for the patterns.
 2. Write or change `scene/scene.js` (and `name`, `description`, `tags` in `scene/scene.json`).
 3. Iterate quickly with `livepaper check scene --quick`.
-4. **Look at the stills** in `scene/.check/` (e.g. `1512x982@2-t12.png`, `2560x720@1-t90.png`,
-   `1512x982@2-t600.png`) with your image-viewing/read tool. Judge them like a picky designer: is it
-   beautiful, calm, readable around the clock, well composed at every aspect ratio, still right at
-   t = 600? JavaScript errors are also printed in red at the bottom of the stills.
+4. **Look at the stills** with your image-viewing/read tool, using the small JPEG copies in
+   `scene/.check/previews/` (e.g. `1512x982@2-t12.jpg`, `2560x720@1-t90.jpg`, `1512x982@2-t600.jpg`,
+   `320x200@2-t12.jpg`; at most 1280 px wide). The full-size PNGs next to them are several MB each:
+   too large for some tools to attach, so open one only to inspect fine detail. Judge them like a
+   picky designer: is it beautiful, calm, readable around the clock, well composed at every aspect
+   ratio, still right at t = 600? JavaScript errors are also printed in red at the bottom of the stills.
 5. Read `scene/.check/report.json` when the check fails: every entry in `problems` is a sentence
    saying what is wrong, where (size and time) and what to do. Fix **all** problems; consider the
    `warnings`.

@@ -320,7 +320,8 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
 
     private func exitFailure(_ status: Int32) -> String {
         let how = status > 128 ? "was stopped by signal \(status - 128)" : "exited with status \(status)"
-        let detail = stderrTail.suffix(3).joined(separator: " ").nilIfEmpty ?? parser?.finalMessage
+        // The harness's own error report first: stderr often ends with unrelated warnings.
+        let detail = parser?.lastError ?? stderrTail.suffix(3).joined(separator: " ").nilIfEmpty ?? parser?.finalMessage
         return "\(harness.name) \(how)" + (detail.map { ": " + StreamText.truncate($0, 400) } ?? ".")
     }
 

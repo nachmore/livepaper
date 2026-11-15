@@ -202,8 +202,8 @@ public final class WorkspaceBuilder: @unchecked Sendable {
             ]
         }
         lines += [
-            "3. Run `livepaper check scene` and fix every problem it reports. Look at the PNG stills it writes to",
-            "   `scene/.check/` to judge how the scene looks.",
+            "3. Run `livepaper check scene` and fix every problem it reports. Look at the stills it writes (small JPEG",
+            "   copies in `scene/.check/previews/`) to judge how the scene looks.",
             "4. Repeat until the check passes, then reply with a short paragraph describing the scene.",
             "",
             "Only edit files inside `./scene`. Do not modify `sdk/`, `bin/`, `.livepaper/`, `AGENTS.md`, `CLAUDE.md` or `TASK.md`.",

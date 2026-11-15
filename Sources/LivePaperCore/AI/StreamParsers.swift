@@ -15,10 +15,14 @@ public protocol HarnessStreamParser: AnyObject {
     /// The model the harness says it is running (e.g. Claude Code's `init` event), when the format
     /// reports one. Recorded in the scene's history, so it is right even when no model was chosen.
     var reportedModel: String? { get }
+    /// The last error the harness reported in its own stream (a failed turn, an API error). It
+    /// explains a non-zero exit better than stderr, which often ends with unrelated noise.
+    var lastError: String? { get }
 }
 
 extension HarnessStreamParser {
     public var reportedModel: String? { nil }
+    public var lastError: String? { nil }
 }
 
 // MARK: - Shared helpers
@@ -42,6 +46,16 @@ enum StreamText {
     static func plain(_ line: String) -> AISessionEvent? {
         let text = stripANSI(line).trimmingCharacters(in: .whitespaces)
         return text.isEmpty ? nil : .assistantText(text)
+    }
+
+    /// API errors often arrive as a JSON document inside the message
+    /// (`{"error":{"code":"request_too_large","message":"Request exceeds …"}}`): "Request exceeds … (request_too_large)".
+    static func errorText(_ s: String) -> String {
+        guard let obj = jsonObject(s) else { return s }
+        let error = obj["error"] as? [String: Any] ?? obj
+        guard let message = (error["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty else { return s }
+        let code = (error["code"] as? String) ?? (error["type"] as? String)
+        return code.map { "\(message) (\($0))" } ?? message
     }
 
     static func truncate(_ s: String, _ limit: Int = 200) -> String {
@@ -107,6 +121,7 @@ public final class ClaudeStreamParser: HarnessStreamParser {
     private let root: URL
     public private(set) var finalMessage: String?
     public private(set) var reportedModel: String?
+    public private(set) var lastError: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -138,7 +153,8 @@ public final class ClaudeStreamParser: HarnessStreamParser {
                 finalMessage = result
             }
             guard obj["is_error"] as? Bool == true else { return [] }
-            let detail = (obj["result"] as? String) ?? (obj["subtype"] as? String) ?? "error"
+            let detail = StreamText.errorText((obj["result"] as? String) ?? (obj["subtype"] as? String) ?? "error")
+            lastError = detail
             return [.status("Claude Code stopped: \(StreamText.truncate(detail))")]
         default:
             return []   // "user" (tool results echo), "stream_event", future types
@@ -158,6 +174,7 @@ public final class CodexStreamParser: HarnessStreamParser {
     private let root: URL
     private var startedItems = Set<String>()
     public private(set) var finalMessage: String?
+    public private(set) var lastError: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -176,10 +193,13 @@ public final class CodexStreamParser: HarnessStreamParser {
             if item["type"] as? String == "command_execution", let id = item["id"] as? String, startedItems.contains(id) { return [] }
             return self.item(item)
         case "turn.failed":
-            let message = ((obj["error"] as? [String: Any])?["message"] as? String) ?? "turn failed"
+            let message = StreamText.errorText(((obj["error"] as? [String: Any])?["message"] as? String) ?? "turn failed")
+            lastError = message
             return [.status("Codex stopped: \(StreamText.truncate(message))")]
         case "error":
-            return [.status("Codex: \(StreamText.truncate(obj["message"] as? String ?? "error"))")]
+            let message = StreamText.errorText(obj["message"] as? String ?? "error")
+            lastError = message
+            return [.status("Codex: \(StreamText.truncate(message))")]
         default:
             return []
         }
@@ -205,7 +225,9 @@ public final class CodexStreamParser: HarnessStreamParser {
         case "web_search":
             return [.toolUse(name: "web_search", detail: StreamText.truncate(item["query"] as? String ?? ""))]
         case "error":
-            return [.status("Codex: \(StreamText.truncate(item["message"] as? String ?? "error"))")]
+            let message = StreamText.errorText(item["message"] as? String ?? "error")
+            lastError = message
+            return [.status("Codex: \(StreamText.truncate(message))")]
         default:
             return []
         }
@@ -230,7 +252,9 @@ public final class CodexStreamParser: HarnessStreamParser {
             if let text = msg["last_agent_message"] as? String, !text.isEmpty { finalMessage = text }
             return []
         case "error":
-            return [.status("Codex: \(StreamText.truncate(msg["message"] as? String ?? "error"))")]
+            let message = StreamText.errorText(msg["message"] as? String ?? "error")
+            lastError = message
+            return [.status("Codex: \(StreamText.truncate(message))")]
         default:
             return []
         }
@@ -255,6 +279,7 @@ public final class KiroStreamParser: HarnessStreamParser {
     public var finalMessage: String? { lastMessage.isEmpty ? nil : lastMessage }
     /// The session's `model` config option (`config_option_update`); "auto" when kiro chooses.
     public private(set) var reportedModel: String?
+    public private(set) var lastError: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -268,7 +293,8 @@ public final class KiroStreamParser: HarnessStreamParser {
             if let final = (data["finalText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !final.isEmpty { lastMessage = final }
             let status = data["status"] as? String ?? "success"
             guard status != "success" else { return events }
-            let reason = (data["error"] as? String) ?? (data["stopReason"] as? String) ?? status
+            let reason = StreamText.errorText((data["error"] as? String) ?? (data["stopReason"] as? String) ?? status)
+            lastError = reason
             return events + [.status("Kiro CLI stopped: \(StreamText.truncate(reason))")]
         default:
             break
