@@ -349,7 +349,8 @@ private final class FullScreenPreviewSession {
         guard phase == .open else { return false }
         switch event.keyCode {
         case 53, 49:   // Esc; Space closes too, as in Quick Look
-            close(.byUser)
+            // A held Space (the press that opened the preview, repeating) must not close it again.
+            if !event.isARepeat { close(.byUser) }
             return true
         case 123, 124: // ← →
             if !event.isARepeat { step(event.keyCode == 123 ? -1 : 1) }
@@ -382,7 +383,7 @@ private final class FullScreenPreviewSession {
         let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
         switch (modifiers, key) {
         case ([.command], "."), ([.command], "w"), ([.command, .shift], "f"):
-            close(.byUser)
+            if !event.isARepeat { close(.byUser) }
             return true
         case ([.command], "q"), ([.command], "h"), ([.command, .option], "h"):
             return false
@@ -501,7 +502,11 @@ private final class FullScreenPreviewContentView: NSView {
     }
     override func cancelOperation(_ sender: Any?) { onClick?() }
 
-    override func mouseDown(with event: NSEvent) { onClick?() }
+    /// A single click closes. The second click of a double-click doesn't: that is the one that
+    /// lands here when the preview was opened by double-clicking (or double-clicking a button).
+    override func mouseDown(with event: NSEvent) {
+        if event.clickCount <= 1 { onClick?() } else { onActivity?() }
+    }
     override func mouseMoved(with event: NSEvent) { onActivity?() }
     override func mouseDragged(with event: NSEvent) { onActivity?() }
     override func rightMouseDown(with event: NSEvent) { onActivity?() }
