@@ -243,6 +243,34 @@ private struct SessionResultPanel: View {
             }
         }
         .task(id: state.package) { await loadCandidate(state.package) }
+        .focusedSceneValue(\.fullScreenPreview, candidate.map { item in
+            FullScreenPreviewAction { [model, session] in FullScreenPreviewLauncher.previewCandidate(item, session: session, model: model) }
+        })
+    }
+
+    private func previewFullScreen() {
+        guard let candidate else { return }
+        FullScreenPreviewLauncher.previewCandidate(candidate, session: session, model: model)
+    }
+
+    /// On the live result, like the scene detail view's: see it on the whole screen, as the screen
+    /// saver would show it, before deciding (comparing with the current version when modifying).
+    private var fullScreenButton: some View {
+        Button(action: previewFullScreen) {
+            Label("Preview Full Screen", systemImage: FullScreenPreviewSymbol.name)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.5), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(10)
+        .help(session.isModify && session.resolution == nil
+              ? "Show the result on the whole screen, exactly as the screen saver will; \u{2190} \u{2192} compare it with the current version (\u{21E7}\u{2318}F, or double-click the preview)"
+              : "Show the result on the whole screen, exactly as the screen saver will (\u{21E7}\u{2318}F, or double-click the preview)")
     }
 
     // Hero: the live result once it's ready, else the selected/latest still.
@@ -275,6 +303,11 @@ private struct SessionResultPanel: View {
                     OverlayBadge(title: "Live", symbol: "play.fill").padding(8)
                 }
             }
+            .overlay(alignment: .bottomTrailing) {
+                if candidate != nil && selectedStill == nil { fullScreenButton }
+            }
+            .contentShape(Rectangle())
+            .onTapGesture(count: 2) { if selectedStill == nil { previewFullScreen() } }
             .accessibilityLabel(candidate != nil ? "Live preview of the result" : "Latest render")
     }
 

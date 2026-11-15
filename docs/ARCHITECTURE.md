@@ -534,6 +534,19 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
     **Describe it** (prompt, agent + model picker) → live session view.
   * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a
     publish that left scenes out lists them with the reason (and a banner says so).
+* **Full-screen preview** (`Views/FullScreen/`): one borderless black window on one screen (the
+  main window's, or the one under the pointer from the menu bar) at status-bar level, menu bar and
+  Dock hidden. It renders exactly like the saver: web scenes get the saver's own
+  `LIVEPAPER_CONFIG` (SaverWebConfig — playlist clock, profile fps/scale, seed, power) and video
+  scenes the saver's AVPlayerLayer + native clock; `SaverShared/` symlinks Saver/SaverLogic.swift
+  and Saver/ClockOverlay.swift into the app for that. Entry points: the scene detail button and
+  double-click, a card's hover button, context menu and Space, the Screen Saver screen's "Preview
+  Playlist", the menu-bar extra, an AI session's result panel (before accepting — modifying shows
+  the new version first and ← → compare it with the current one), and ⇧⌘F (whatever the focused
+  view publishes as `FullScreenPreviewAction`). Keys: Esc / click / Space / ⌘. close, ← → step
+  (library order, playlist order, or new/current), C clock, L simulated lock UI. Playlist previews
+  also advance on the playlist's cadence. It runs only while visible; deactivation, hiding, display
+  sleep, a session switch, a lock or a saver start close it and nothing keeps running afterwards.
 * **Changes made elsewhere** (the CLI, Finder, an editor) show up without a relaunch:
   `LibraryWatcher` watches the support directory with one FSEvents stream (`Workspaces/`, `Logs/`
   and `backups/` excluded). Only `Library/<id>.lpscene` entries, their `scene.json`,
