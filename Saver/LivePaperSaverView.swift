@@ -330,8 +330,15 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         case .lockUIShown, .lockUIHidden:
             applyLockUI(event)
             logLifecycle(event.rawValue)
+        case .previewHostActivated, .previewHostDeactivated:
+            // Posted on every app switch: only a preview cares, and only about a change.
+            let before = gate.previewHostActive
+            gate.apply(event)
+            guard gate.preview, gate.previewHostActive != before else { return }
+            logLifecycle(event.rawValue)
+            update()
         case .screenLocked, .screenUnlocked, .screensDidSleep, .screensDidWake, .saverDidStart, .saverDidStop,
-             .engineLaunched, .engineTerminated, .previewHostActivated, .previewHostDeactivated:
+             .engineLaunched, .engineTerminated:
             gate.apply(event)
             // Re-read on the moments that matter (the launch notification may not be posted for
             // the background-only engine); the engine events themselves are authoritative.

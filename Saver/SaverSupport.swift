@@ -70,6 +70,9 @@ final class SaverNotificationRelay: NSObject {
     init(distributedNames: [String], handler: @escaping (String) -> Void) {
         self.handler = handler
         super.init()
+        // A dev host scripts every event through the test hook; the real Mac's lock, sleep and app
+        // switches must not leak into its scenario.
+        guard !SaverDevOverrides.simulatedSystem else { return }
         let distributed = DistributedNotificationCenter.default()
         for name in distributedNames {
             distributed.addObserver(self, selector: #selector(received(_:)), name: NSNotification.Name(name), object: nil,
@@ -138,8 +141,9 @@ enum SaverEngineProbe {
 enum SaverDevOverrides {
     /// Set by scripts/dev/saverhost-lp.swift for itself (the real, sandboxed host never has it): the
     /// polled system facts (session lock, display sleep, ScreenSaverEngine, frontmost app) read as
-    /// "unlocked, awake, no engine, another app in front", so a scripted scenario doesn't depend on
-    /// the state of the Mac it runs on. Events still arrive through the test hook.
+    /// "unlocked, awake, no engine, another app in front", and system notifications are not observed,
+    /// so a scripted scenario doesn't depend on the state of the Mac it runs on. Events arrive only
+    /// through the test hook (`livepaperHandleNotificationNamed:`).
     static let simulatedSystemKey = "LIVEPAPER_SAVER_SIMULATED_SYSTEM"
     static let simulatedSystem: Bool = getenv(simulatedSystemKey) != nil
 }

@@ -234,8 +234,9 @@ from a real instance). System events reach the view through its `livepaperHandle
 hook — nothing is broadcast — and `LIVEPAPER_SAVER_STATE_FILE` keeps bookkeeping out of the user's
 real ScreenSaverDefaults. The host sets `LIVEPAPER_SAVER_SIMULATED_SYSTEM` for itself, so the
 saver's polled facts (session lock, display sleep, ScreenSaverEngine, frontmost app) read
-"unlocked, awake, no engine, another app in front" whatever state the Mac is in; the real host
-never sets it. Its lifecycle lines appear in the log under the process name `saverhost-lp`. It writes `report.json` and half-size PNGs (video snapshots composite the
+"unlocked, awake, no engine, another app in front" and the real Mac's notifications are not
+observed, whatever state the Mac is in (locked, display asleep, someone switching apps); the real
+host never sets it. Its lifecycle lines appear in the log under the process name `saverhost-lp`. It writes `report.json` and half-size PNGs (video snapshots composite the
 frame at the player's current time under the saver's own layers, since an `AVPlayerLayer` can't be
 read back without screen recording).
 

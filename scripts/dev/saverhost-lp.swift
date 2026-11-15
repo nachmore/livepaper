@@ -28,7 +28,8 @@
 //
 // Determinism: the host sets LIVEPAPER_SAVER_SIMULATED_SYSTEM for itself, so the saver's polled
 // facts (session lock, display sleep, ScreenSaverEngine, frontmost app) read "unlocked, awake, no
-// engine, another app in front" whatever state this Mac is in (locked, display asleep …).
+// engine, another app in front" and it observes none of the Mac's own notifications, whatever
+// state this Mac is in (locked, display asleep, someone switching apps …).
 //
 // Focus safety: activation policy .prohibited (the process can never become active or show a Dock
 // icon), every window lives at (-30000, -30000), and the whole scenario is ONE process launch.
