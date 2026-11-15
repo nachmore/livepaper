@@ -1111,7 +1111,8 @@ extension SelfTests {
                 do { try service.installSaver(); throw TestFailure(description: "publish errors propagate") } catch PublishError.nothingPublishable {}
                 try expect(service.transcript.contains(InstallStep(title: "Publish scenes into the screen saver", outcome: .skipped("no scenes yet"))))
 
-                // selectSaver: detection only for now; never writes the store.
+                // selectSaver with only recorded system commands: refuses, never writes the store
+                // (the applier itself is covered by the wallpaper.* tests).
                 try writeStore(sb.store, selected: false)
                 let before = try Data(contentsOf: sb.store)
                 let selectedNow = try service.selectSaver()
@@ -1191,9 +1192,10 @@ extension SelfTests {
                 let system = FakeSystem()
                 let prefs = FakePreferences()
                 prefs.values["com.example.test|answer|false"] = 41
+                let wallpaper = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
                 let make = { (dryRun: Bool) in
                     InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
-                                   preferences: prefs, dryRun: dryRun, uid: 501)
+                                   preferences: prefs, dryRun: dryRun, uid: 501, wallpaperSystem: wallpaper, wallpaperClock: clock)
                 }
                 // A full install: helper, saver, changed preference, store backup, support data.
                 try sb.writeExecutable("#!/bin/sh", to: paths.helperExecutable)
@@ -1203,8 +1205,12 @@ extension SelfTests {
                 try make(false).changeSystemDefault(domain: "com.example.test", key: "answer", to: 43)
                 try make(false).changeSystemDefault(domain: "com.example.test", key: "fresh", to: "x")
                 try make(false).setLockKeysShowScene(true)
-                try writeStore(sb.store, selected: true)
-                try writeStore(paths.wallpaperStoreBackup, selected: false)
+                let otherSaver = sb.savers.appendingPathComponent("Example.saver/Contents/Info.plist")
+                try sb.write("{}", to: otherSaver)
+                try writeStore(sb.store, selected: false, other: otherSaver.deletingLastPathComponent().deletingLastPathComponent().path)
+                let storeBefore = try Data(contentsOf: sb.store)
+                try check(try make(false).selectSaver(), "selected (with a fake WallpaperAgent)")
+                try expect(WallpaperStore(url: sb.store).isSelected())
                 for name in ["Library/a.lpscene/scene.json", "Workspaces/s/TASK.md", "Logs/x.log", "state.json", "playlist-settings.json"] {
                     try sb.write("{}", to: sb.support.appendingPathComponent(name))
                 }
@@ -1228,6 +1234,7 @@ extension SelfTests {
                 try expect(steps.allSatisfy { $0.outcome == .done }, "\(steps)")
                 try expect(!system.helperLoaded && !exists(paths.fallbackAgentPlist) && !exists(sb.saver))
                 try expect(!WallpaperStore(url: sb.store).isSelected(), "store restored from the backup")
+                try expectEqual(try Data(contentsOf: sb.store), storeBefore)
                 try expectEqual(prefs.values["com.example.test|answer|false"] as? Int, 41)
                 try expect(prefs.values["com.example.test|fresh|false"] == nil, "a key that didn't exist is removed again")
                 try expect(prefs.values["com.apple.loginwindow|immediateLockLaunchesScreenSaver|false"] == nil, "lock keys restored")
@@ -1279,28 +1286,6 @@ extension SelfTests {
                 try expectEqual(prefs.values[key] as? Bool, true)
             }
         },
-        TestCase(name: "core.install.wallpaper-store") {
-            try CoreSandbox.with("store") { sb in
-                try writeStore(sb.store, selected: true)
-                let store = WallpaperStore(url: sb.store)
-                try expect(store.isSelected())
-                try writeStore(sb.store, selected: false)
-                try expect(!store.isSelected(), "the saver mentioned outside Idle doesn't count")
-                let encoded = ["AllSpacesAndDisplays": ["Idle": ["Content": ["Choices": [["Files": ["file:///x/Screen%20Savers/LivePaper.saver/"]]]]]]]
-                try PropertyListSerialization.data(fromPropertyList: encoded, format: .binary, options: 0).write(to: sb.store)
-                try expect(store.isSelected(), "plain string choices")
-                try expect(!WallpaperStore(url: sb.root.appendingPathComponent("missing.plist")).isSelected())
-
-                let backup = sb.root.appendingPathComponent("backup.plist")
-                try store.restore(from: backup)   // no backup: nothing to do
-                try sb.write("not a plist", to: backup)
-                let current = try Data(contentsOf: sb.store)
-                var rejected = false
-                do { try store.restore(from: backup) } catch { rejected = true }
-                try expect(rejected, "an invalid backup is rejected")
-                try expectEqual(try Data(contentsOf: sb.store), current)
-            }
-        },
         TestCase(name: "core.services.live") {
             try CoreSandbox.with("live") { sb in
                 let services = LivePaperServices.live()
@@ -1315,18 +1300,12 @@ extension SelfTests {
     ] }
 }
 
-/// A plausible store: the Idle choice embeds a binary plist whose module URL names the saver.
-/// `selected: false` mentions the saver only under Desktop (which must not count).
-private func writeStore(_ url: URL, selected: Bool) throws {
-    let saverConfig = try PropertyListSerialization.data(fromPropertyList: [
-        "module": ["relative": "file:///Users/x/Library/Screen%20Savers/LivePaper.saver/"]], format: .binary, options: 0)
-    let other = try PropertyListSerialization.data(fromPropertyList: ["module": "Flurry"], format: .binary, options: 0)
-    let idle: [String: Any] = ["Content": ["Choices": [["Configuration": selected ? saverConfig : other,
-                                                        "Provider": "com.apple.wallpaper.choice.screen-saver"]]]]
-    let root: [String: Any] = ["AllSpacesAndDisplays": ["Idle": idle, "Desktop": ["Content": ["Choices": [["Configuration": saverConfig]]]]],
-                               "Displays": [:], "Spaces": [:]]
+/// A realistic generated store (StoreFixture, WallpaperStoreTests.swift): LivePaper chosen for
+/// every display and Space, or another saver everywhere.
+/// - Parameter other: the other saver's path (restore puts it back only if that bundle exists).
+private func writeStore(_ url: URL, selected: Bool, other: String = StoreFixture.otherSaverPath) throws {
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try PropertyListSerialization.data(fromPropertyList: root, format: .binary, options: 0).write(to: url)
+    try StoreFixture.data(saver: selected ? StoreFixture.livePaperPath : other).write(to: url)
 }
 
 // MARK: - Smoke test with a real harness (opt-in)
