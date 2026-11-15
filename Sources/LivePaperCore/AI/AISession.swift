@@ -12,7 +12,19 @@ import Darwin
 import Foundation
 import os
 
-public final class AISession: AISessionHandle, @unchecked Sendable {
+/// A session handle that can also stop its agent synchronously, for a process that is about to
+/// exit. The agent runs in its own process group, so it doesn't die with its parent, and
+/// `cancel()` leaves the SIGKILL escalation to a timer that never fires once the parent is gone:
+/// an agent (or a tool it started) that ignores SIGTERM would otherwise keep running.
+public protocol AISessionTerminating: AISessionHandle {
+    /// Stops the agent's whole process group and returns once nothing in it is left: SIGTERM, up
+    /// to `grace` seconds to exit, then SIGKILL. The session then ends as after `cancel()`. Blocks
+    /// for at most `grace` + `AISession.killWait` (plus however long a launch in progress takes to
+    /// spawn); returns false if something in the group was still there at the end. Idempotent.
+    @discardableResult func terminateNow(grace: TimeInterval) -> Bool
+}
+
+public final class AISession: AISessionTerminating, @unchecked Sendable {
     public let id: String
     public var workspace: URL { ws.root }
     public let events: AsyncStream<AISessionEvent>
@@ -44,6 +56,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
     static let stillPollInterval: TimeInterval = 1
     /// stderr lines kept for the failure message.
     static let stderrTailLines = 8
+    /// How long `stopGroup` waits for SIGKILLed processes to be gone.
+    public static let killWait: TimeInterval = 0.5
+    /// After the harness exits, how long whatever it left in its group gets to exit on SIGTERM.
+    static let leftoverGrace: TimeInterval = 1
 
     private let ws: AIWorkspace
     private let deps: Dependencies
@@ -55,6 +71,9 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
     private var phase = Phase.idle
     private var stopReason: StopReason?
     private var child: ChildProcess?
+    /// The harness's process group while anything in it may still run: from the spawn until the
+    /// leftovers were stopped after the harness exited (so after that, a recycled pid is never signalled).
+    private var group: pid_t?
     private var parser: HarnessStreamParser?
     private var stdoutLines = LineSplitter()
     private var stderrLines = LineSplitter()
@@ -90,6 +109,39 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         }
     }
 
+    public func terminateNow(grace: TimeInterval) -> Bool {
+        // Serialised behind a pending launch, so a harness being spawned right now is caught too.
+        let pgid: pid_t? = queue.sync {
+            if phase != .done, stopReason == nil { stopReason = .cancelled }
+            switch phase {
+            case .idle, .checking: finish(.failed("Cancelled."))
+            case .running, .done: break   // running: the harness's exit ends the stream
+            }
+            return group
+        }
+        guard let pgid else { return true }
+        log.info("session \(self.id, privacy: .public): stopping process group \(pgid) now")
+        return Self.stopGroup(pgid, grace: grace)
+    }
+
+    /// SIGTERM to process group `pgid`, up to `grace` seconds for it to empty, then SIGKILL for
+    /// whatever is left and up to `killWait` for that to go. Blocks; true once nobody is left.
+    /// (The group can outlive its leader — orphaned grandchildren — so this watches the group.)
+    static func stopGroup(_ pgid: pid_t, grace: TimeInterval) -> Bool {
+        func gone(within timeout: TimeInterval) -> Bool {
+            let deadline = Date().addingTimeInterval(timeout)
+            while killpg(pgid, 0) == 0 {
+                if Date() >= deadline { return false }
+                usleep(10_000)
+            }
+            return true
+        }
+        guard killpg(pgid, SIGTERM) == 0 else { return errno == ESRCH }   // ESRCH: nobody left
+        if gone(within: grace) { return true }
+        _ = killpg(pgid, SIGKILL)
+        return gone(within: killWait)
+    }
+
     // MARK: - Running the harness
 
     private var sceneScript: URL { ws.scene.appendingPathComponent("scene.js") }
@@ -123,6 +175,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
             finish(.failed(error.localizedDescription)); return
         }
         child = process
+        group = process.pid
         phase = .running
         log.info("session \(self.id, privacy: .public): started \(invocation.executable, privacy: .public) pid \(process.pid)")
 
@@ -138,8 +191,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
 
         Thread {
             let status = process.waitForExit()
-            // Whatever the harness left running in its group (MCP servers, watchers) goes too.
-            process.terminateGroup(grace: 1)
+            // Whatever the harness left running in its group (MCP servers, watchers) goes too —
+            // synchronously, so the group is known to be empty before it's forgotten.
+            _ = Self.stopGroup(process.pid, grace: Self.leftoverGrace)
+            self.queue.async { self.group = nil }
             // A grandchild that escaped the group could hold the pipes open; don't wait forever.
             _ = pipes.wait(timeout: .now() + 5)
             self.queue.async { self.harnessExited(status: status) }

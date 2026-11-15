@@ -880,6 +880,47 @@ extension SelfTests {
                 handle.cancel()   // after the end: harmless
             }
         },
+        TestCase(name: "core.ai.session.terminate-now") {
+            // For quitting: terminateNow() returns only once the agent's whole process group is gone,
+            // even when the agent and its grandchild ignore SIGTERM. (cancel() leaves the SIGKILL to
+            // a timer, which never fires once the app has exited.)
+            try CoreSandbox.with("session-terminate") { sb in
+                let agent = """
+                trap '' TERM
+                echo $$ > .livepaper/agent.pid
+                sh -c 'while :; do sleep 1; done' &
+                echo $! > .livepaper/grandchild.pid
+                echo started
+                while :; do sleep 1; done
+                """
+                let (ai, harness) = try sessionFixture(sb, agent: agent, timeout: 600)
+                let handle = try ai.start(.create(prompt: "x"), harness: harness, model: nil)
+                guard let session = handle as? AISessionTerminating else { throw TestFailure(description: "AISession can't stop synchronously") }
+                let internalDir = AIWorkspace(root: handle.workspace).internalDirectory
+                final class Outcome: @unchecked Sendable { var stopped = false, took = 0.0, survivors: [Int32] = [] }
+                let outcome = Outcome()
+                let events = try collect(handle) { event in
+                    guard event == .assistantText("started") else { return }
+                    let began = Date()
+                    outcome.stopped = session.terminateNow(grace: 0.3)
+                    outcome.took = Date().timeIntervalSince(began)
+                    // Checked the moment it returns: nothing may be left for a timer to kill later.
+                    let pids = ["agent.pid", "grandchild.pid"].compactMap {
+                        Int32(read(internalDir.appendingPathComponent($0)).trimmingCharacters(in: .whitespacesAndNewlines))
+                    }
+                    guard pids.count == 2 else { outcome.survivors = [-1]; return }   // the agent didn't record them
+                    outcome.survivors = pids.filter { kill($0, 0) == 0 }
+                    if killpg(pids[0], 0) == 0 { outcome.survivors.append(-pids[0]) }   // the group (the agent's pid is its id)
+                }
+                try expect(outcome.stopped, "terminateNow reported survivors")
+                try expectEqual(outcome.survivors, [])
+                try expect(outcome.took < 0.3 + AISession.killWait + 0.5, "bounded: \(outcome.took)s")
+                try expectEqual(events.last, .failed("Cancelled."))
+                let again = Date()
+                try expect(session.terminateNow(grace: 5), "after the end: harmless")
+                try expect(Date().timeIntervalSince(again) < 0.5, "and immediate")
+            }
+        },
         TestCase(name: "core.ai.session.reported-model") {
             try CoreSandbox.with("session-model") { sb in
                 // A fake `claude` speaking stream-json: the model it reports is what history records.
