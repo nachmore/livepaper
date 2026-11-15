@@ -55,7 +55,8 @@ jobs:
     timeout-minutes: 60
     concurrency:
       # A newer push to the same branch / PR cancels this job (publishing has its own group below).
-      group: build-${{ github.event_name }}-${{ github.ref }}
+      # A re-run of an older run gets a group of its own, so it can't cancel the newest build.
+      group: build-${{ github.event_name }}-${{ github.ref }}${{ github.run_attempt != '1' && format('-rerun-{0}', github.run_id) || '' }}
       cancel-in-progress: true
     outputs:
       channel: ${{ steps.version.outputs.channel }}

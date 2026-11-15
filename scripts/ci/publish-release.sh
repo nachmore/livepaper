@@ -10,9 +10,9 @@
 #   SIGNING                             developer-id | adhoc (ad-hoc notes explain how to open the app)
 #   GH_TOKEN                            a token with contents: write (the workflow's GITHUB_TOKEN)
 #
-#   nightly  the rolling pre-release "nightly": its assets are replaced, its title and notes (the
-#            commits since the previous nightly) rewritten, then the tag is moved to this commit —
-#            never backwards (re-running an older run publishes nothing).
+#   nightly  the rolling pre-release "nightly", replaced (release and tag) by one for this commit
+#            with notes listing the commits since the previous nightly — never backwards: re-running
+#            an older run publishes nothing.
 #   beta     a versioned pre-release for tag vX.Y.Z-beta.N (never "latest").
 #   stable   the release for tag vX.Y.Z, marked latest.
 #   beta and stable notes: an install header, the commits since the previous beta or release (for
@@ -20,17 +20,19 @@
 #   history instead. Re-running the job replaces the assets of an existing release (notes stay).
 #
 # --dry-run prints the gh commands instead of running them and needs no network (NIGHTLY_PREVIOUS
-# may name the previous nightly's commit, DRY_RUN_STATE=published pretends the release exists).
+# may name the previous nightly's commit, DRY_RUN_STATE=published pretends the release exists,
+# DRY_RUN_MAIN names main's newest commit and DRY_RUN_WORKFLOWS_DIFFER=1 pretends its workflows differ).
 # Run from the repository checkout (git history is used).
 set -euo pipefail
 
 DRY=0
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
-[ $# = 1 ] && [ -d "$1" ] || { sed -n '2,24p' "$0" >&2; exit 2; }
+[ $# = 1 ] && [ -d "$1" ] || { sed -n '2,25p' "$0" >&2; exit 2; }
 DIST="$(cd "$1" && pwd)"
 
 fail() { echo "✗ $*" >&2; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=Publish::$*" >&2; exit 1; }
 step() { echo "▸ $*"; }
+notice() { echo "! $*"; [ -z "${GITHUB_ACTIONS:-}" ] || echo "::notice title=Publish::$*"; }
 case "${CHANNEL:-}" in nightly|beta|stable) ;; *) fail "nothing to publish for channel '${CHANNEL:-}'" ;; esac
 for v in VERSION TAG ASSET_BASE BUILD_NUMBER GITHUB_SHA GITHUB_REPOSITORY SIGNING; do
   [ -n "${!v:-}" ] || fail "$v is not set"
@@ -67,11 +69,12 @@ FILES=(); for f in "${ASSETS[@]}"; do FILES+=("$DIST/$f"); done
 # MARK: Notes -------------------------------------------------------------------------------------
 
 NOTES="$(mktemp "${TMPDIR:-/tmp}/livepaper-notes.XXXXXX")"
-trap 'rm -f "$NOTES"' EXIT
-ZWSP="$(printf '\342\200\213')"
-# Commit subjects become Markdown: a zero-width space after "@" keeps a handle from notifying
-# anyone, and "<" is escaped so a subject can't start HTML (or an <!-- comment) in the notes.
-md_subjects() { sed -e "s/@/@$ZWSP/g" -e 's/</\&lt;/g'; }
+trap 'rm -f "$NOTES" "$NOTES.previous"' EXIT
+# Commit subjects become Markdown. Outside `code spans` (left as they are): < > & are escaped so a
+# subject can't turn into HTML, and an @handle goes in backticks so it doesn't notify anyone.
+md_subjects() {
+  perl -pe 's{(\x60[^\x60]*\x60)|([<>&])|(?<![A-Za-z0-9\x60])\@([A-Za-z0-9][A-Za-z0-9_-]*)}{defined $1 ? $1 : defined $2 ? ($2 eq "<" ? "&lt;" : $2 eq ">" ? "&gt;" : "&amp;") : "\x60\@$3\x60"}ge'
+}
 # commit_list <git log arguments…>: up to 100 commit subjects as a Markdown list.
 commit_list() {
   local total
@@ -115,33 +118,37 @@ release_state() {
   query release view "$1" --json isDraft --jq 'if .isDraft then "draft" else "published" end' || true
 }
 
-# The commit the nightly tag points at on GitHub (empty when there is no such tag yet).
-nightly_commit() {
-  if [ "$DRY" = 1 ]; then echo "${NIGHTLY_PREVIOUS:-}"; return 0; fi
+# The commit that ref $1 (tags/nightly, heads/main) points at on GitHub; empty when it doesn't exist.
+remote_commit() {
+  if [ "$DRY" = 1 ]; then
+    case "$1" in tags/nightly) echo "${NIGHTLY_PREVIOUS:-}" ;; *) echo "${DRY_RUN_MAIN:-$GITHUB_SHA}" ;; esac
+    return 0
+  fi
   local ref
-  ref="$(query api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq '.object.sha + " " + .object.type' || true)"
+  ref="$(query api "repos/$GITHUB_REPOSITORY/git/ref/$1" --jq '.object.sha + " " + .object.type' || true)"
   if [ "${ref#* }" = tag ]; then   # an annotated tag: its commit
     ref="$(query api "repos/$GITHUB_REPOSITORY/git/tags/${ref%% *}" --jq .object.sha || true)"
   fi
   echo "${ref%% *}"
 }
 
-# Points tag `nightly` at this commit (lightweight; created if missing). Through the API, so the
-# checkout needs no push credentials.
-move_nightly_tag() {
-  if [ -n "$1" ]; then
-    gh_do api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true --silent
-  else
-    gh_do api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" --silent
+# GitHub doesn't let a workflow's GITHUB_TOKEN create or edit a release whose commit has other
+# .github/workflows/ files than the default branch (REST: "Create a release", "Update a release").
+# True when this commit's workflows are main's current ones.
+workflows_match_main() {
+  local tip changed
+  tip="$(remote_commit heads/main)"
+  [ -n "$tip" ] || { echo "  couldn't read main's current commit" >&2; return 1; }
+  [ "$tip" = "$GITHUB_SHA" ] && return 0
+  if [ "$DRY" = 1 ]; then [ -z "${DRY_RUN_WORKFLOWS_DIFFER:-}" ]; return; fi
+  git cat-file -e "$tip^{commit}" 2>/dev/null || git fetch --quiet --no-tags origin "$tip" 2>/dev/null || true
+  if git cat-file -e "$tip^{commit}" 2>/dev/null; then
+    git diff --quiet "$GITHUB_SHA" "$tip" -- .github/workflows
+    return
   fi
-}
-
-# Replaces the release's files (each one is deleted, then uploaded: one retry if that fails).
-upload_assets() {
-  gh_do release upload "$1" "${FILES[@]}" --clobber && return 0
-  echo "  upload failed; retrying in 15 s" >&2
-  sleep 15
-  gh_do release upload "$1" "${FILES[@]}" --clobber
+  changed="$(query api "repos/$GITHUB_REPOSITORY/compare/$GITHUB_SHA...$tip" \
+    --jq '[.files[]?.filename | select(startswith(".github/workflows/"))] | length' || echo unknown)"
+  [ "$changed" = 0 ]
 }
 
 # The version tag the notes start from: for stable the previous stable release, for a beta the
@@ -163,46 +170,49 @@ STATE="$(release_state "$TAG")"
 step "$CHANNEL: $TITLE → $TAG (${STATE:-new release}; $SIGNING)"
 
 if [ "$CHANNEL" = nightly ]; then
-  PREV="$(nightly_commit)"
+  PREV="$(remote_commit tags/nightly)"
   known() { git cat-file -e "$1^{commit}" 2>/dev/null; }
   if [ -n "$PREV" ] && [ "$PREV" != "$GITHUB_SHA" ] && known "$PREV" && git merge-base --is-ancestor "$GITHUB_SHA" "$PREV"; then
     # A re-run of an older workflow run: never move the nightly backwards.
-    echo "! the nightly already has $(git rev-parse --short=7 "$PREV"), which is newer than $SHORT: nothing to publish"
+    notice "the nightly already has $(git rev-parse --short=7 "$PREV"), which is newer than $SHORT: nothing to publish"
     exit 0
   fi
-  if [ -n "$PREV" ] && [ "$PREV" != "$GITHUB_SHA" ] && known "$PREV" && git merge-base --is-ancestor "$PREV" "$GITHUB_SHA"; then
+  if ! workflows_match_main; then
+    notice "main has moved on to a commit with other workflow files, and GitHub won't let this run's token publish a release for $SHORT: the nightly is left to the run for main's newest commit"
+    exit 0
+  fi
+  if [ -n "$PREV" ] && [ "$PREV" = "$GITHUB_SHA" ] && [ "$DRY" = 0 ] \
+      && query release view nightly --json body --jq .body > "$NOTES.previous" && [ -s "$NOTES.previous" ]; then
+    # A re-run after this commit was published: keep the notes, which list its changes.
+    mv "$NOTES.previous" "$NOTES"
+  elif [ -n "$PREV" ] && [ "$PREV" != "$GITHUB_SHA" ] && known "$PREV" && git merge-base --is-ancestor "$PREV" "$GITHUB_SHA"; then
     { echo "### Changes since the previous nightly"; echo; commit_list "$PREV..$GITHUB_SHA"; echo
       echo "[All changes]($REPO_URL/compare/$PREV...$GITHUB_SHA)"; } >> "$NOTES"
   else
-    # The first nightly, a re-run of this one (the tag already moved here), or main was rewritten.
+    # The first nightly, or main was rewritten since the previous one.
     { echo "### Recent changes"; echo; commit_list --max-count=30 "$GITHUB_SHA"; echo
       echo "[History]($REPO_URL/commits/$GITHUB_SHA)"; } >> "$NOTES"
   fi
+  rm -f "$NOTES.previous"
+  # Replace the release and its tag rather than edit them: editing goes through the old commit,
+  # which GitHub refuses once main's workflows have changed since (see workflows_match_main), and
+  # a moved tag would be subject to the same rule. Assets, notes and checks are all ready by now.
   if [ -n "$STATE" ]; then
-    upload_assets nightly
-    # Drop anything else attached to it (renamed assets from older workflow versions).
-    if [ "$DRY" = 0 ]; then
-      while IFS= read -r asset; do
-        keep=0; for f in "${ASSETS[@]}"; do [ "$asset" = "$f" ] && keep=1; done
-        [ "$keep" = 1 ] || [ -z "$asset" ] || gh_do release delete-asset nightly "$asset" --yes
-      done < <(query release view nightly --json assets --jq '.assets[].name' || true)
-    fi
-    if [ "$PREV" = "$GITHUB_SHA" ]; then
-      # Re-run after the tag moved: the notes already list this nightly's changes; keep them.
-      gh_do release edit nightly --title "$TITLE" --prerelease --draft=false
-    else
-      gh_do release edit nightly --title "$TITLE" --notes-file "$NOTES" --prerelease --draft=false
-    fi
-  else
-    gh_do release create nightly "${FILES[@]}" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES" \
-      --prerelease --latest=false
+    gh_do release delete nightly --cleanup-tag --yes
+  elif [ -n "$PREV" ]; then
+    gh_do api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" --silent
   fi
-  # Last, so a failure above leaves the tag where it was and a re-run lists the same changes.
-  move_nightly_tag "$PREV"
+  gh_do release create nightly "${FILES[@]}" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES" \
+    --prerelease --latest=false
+  if [ "$DRY" = 0 ]; then
+    now="$(remote_commit tags/nightly)"
+    [ "$now" = "$GITHUB_SHA" ] || fail "the nightly tag points at ${now:-nothing}, not $GITHUB_SHA"
+  fi
 else
+  workflows_match_main || fail "$TAG's .github/workflows differ from main's current ones, and GitHub doesn't let the workflow's token publish such a release. Tag main's current commit instead (scripts/release.sh), or attach this run's packages to a release by hand."
   if [ -n "$STATE" ]; then
     # A re-run: the release (maybe a draft left by a failed upload) gets the new assets; its notes stay.
-    upload_assets "$TAG"
+    gh_do release upload "$TAG" "${FILES[@]}" --clobber
     if [ "$CHANNEL" = beta ]; then
       gh_do release edit "$TAG" --title "$TITLE" --prerelease --draft=false
     else

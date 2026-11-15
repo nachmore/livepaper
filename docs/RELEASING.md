@@ -38,11 +38,15 @@ The workflow runs on every push (any branch, `v*` tags) and every pull request, 
 A newer push to the same branch or pull request cancels the older run's build. Publishing is never
 cancelled half-way: publishes of the same ref queue, and a newer one waiting replaces an older one.
 
-**Nightly** keeps one release, tagged `nightly`: each run uploads `LivePaper-nightly.zip`,
-`LivePaper-nightly.dmg` and `SHA256SUMS` over the old ones (deleting anything else attached), renames
-it `Nightly 0.1.0 (build 142, abc1234)`, rewrites its notes — install steps, then the commits since
-the previous nightly — and finally moves the `nightly` tag to the new commit. It never moves
-backwards: re-running an older run whose commit the nightly has already passed publishes nothing.
+**Nightly** is one release, tagged `nightly`. Each run replaces it — the old release and its tag
+are deleted and a new pre-release `Nightly 0.1.0 (build 142, abc1234)` is created at the new commit
+with `LivePaper-nightly.zip`, `LivePaper-nightly.dmg`, `SHA256SUMS` and notes: install steps, then the
+commits since the previous nightly. (Replacing rather than editing is deliberate: GitHub doesn't let
+a workflow's token create or edit a release whose commit has other `.github/workflows/` files than
+`main`, and an edited nightly would still point at its old commit. For a few seconds per push there
+is no nightly; people watching releases get a notification per nightly.) It never goes backwards:
+re-running an older run whose commit the nightly has already passed publishes nothing, and an older
+commit whose workflows differ from `main`'s newest leaves the nightly to that newer commit's run.
 Stable download links:
 `https://github.com/nachmore/livepaper/releases/download/nightly/LivePaper-nightly.dmg` (and `.zip`).
 
@@ -52,7 +56,9 @@ notes cover all its betas) and then GitHub's generated notes for the same range 
 contributors, the full-changelog link; GitHub only lists pull requests, hence the commit list). The
 first beta and the first release have no predecessor: their notes list the history instead, without
 GitHub's part (its automatic starting point could be the nightly). Re-running a failed publish
-replaces the assets of the release it already created and leaves its notes alone.
+replaces the assets of the release it already created and leaves its notes alone. For the same
+GitHub rule, a tag whose `.github/workflows/` differ from `main`'s current ones can't be published by
+CI (the job says so): tag `main`'s newest commit, as `scripts/release.sh` does.
 
 ## Cutting a beta or a release
 
@@ -183,5 +189,7 @@ instead of running them.
   any of that; they run against temporary directories (README › Development).
 * **Notarization rejected** — the job prints `notarytool log` for the submission; usually a binary
   without the hardened runtime or a secure timestamp.
-* **`hdiutil: create failed - Resource busy`** — known runner flakiness; `package.sh` retries,
-  otherwise re-run the job.
+* **`hdiutil: … Resource busy`** — known runner flakiness; `package.sh` retries creating and
+  detaching the image, otherwise re-run the job.
+* **"main has moved on to a commit with other workflow files"** — a newer push changed the
+  workflow before this run published; the newer run publishes the nightly. Not an error.
