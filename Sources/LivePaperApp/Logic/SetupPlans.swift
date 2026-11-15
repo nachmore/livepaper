@@ -161,7 +161,7 @@ struct UninstallPlan: Equatable, Sendable {
         ]
         if restoresLockKeys {
             items.append(Item(id: "lock-keys", action: .restore, title: "Restore what \u{2303}\u{2318}Q and the lock key do",
-                              detail: "They lock straight to the wallpaper again, as before LivePaper."))
+                              detail: "They work as they did before LivePaper changed them."))
         }
         let scenes = userSceneCount == 1 ? "1 scene" : "\(userSceneCount) scenes"
         if keepScenes {

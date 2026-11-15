@@ -168,10 +168,10 @@ private final class FakePublisher: PublishServicing, @unchecked Sendable {
     var error: Error?
     func loadSettings() -> PlaylistSettings { PlaylistSettings() }
     func saveSettings(_ s: PlaylistSettings) throws {}
-    func publish() throws -> LPPlaylist {
+    func publishReport() throws -> PublishResult {
         publishCount += 1
         if let error { throw error }
-        return LPPlaylist()
+        return PublishResult(playlist: LPPlaylist())
     }
 }
 
@@ -557,9 +557,23 @@ extension SelfTests {
                 let partial = try publish.publishReport()
                 try expectEqual(partial.playlist.scenes.map(\.id), ["mine"])
                 try expect(partial.skipped["zen"]?.contains("syntax error") == true)
+                try expectEqual(partial.skippedScenes.map(\.id), ["zen"])
+                // A video the saver can't play is reported instead of being published to be dropped.
+                let avi = try sb.writeVideoScene(in: sb.library, id: "old-clip", name: "Old Clip")
+                try FileManager.default.moveItem(at: avi.appendingPathComponent("video.mov"), to: avi.appendingPathComponent("video.avi"))
+                var manifest = try SceneManifest.load(package: avi)
+                manifest.video?.file = "video.avi"
+                try manifest.write(package: avi)
+                try publish.saveSettings(PlaylistSettings(sceneIDs: ["old-clip", "zen", "mine", "clip"]))
+                let mixed = try publish.publishReport()
+                try expectEqual(mixed.playlist.scenes.map(\.id), ["mine", "clip"])
+                try expectEqual(mixed.skippedScenes.map(\.id), ["old-clip", "zen"])
+                try expect(mixed.skipped["old-clip"]?.contains(".avi") == true, mixed.skipped["old-clip"] ?? "")
+                try expect(!children(playlistDir).contains("old-clip.avi"))
+                try publish.saveSettings(PlaylistSettings(sceneIDs: ["zen", "mine"]))
                 compiler.failing = ["zen", "mine"]
                 do { try publish.publish(); throw TestFailure(description: "expected nothingPublishable") } catch PublishError.nothingPublishable {}
-                try expectEqual(try LPPlaylist.load(from: playlistDir).generation, 3)
+                try expectEqual(try LPPlaylist.load(from: playlistDir).generation, 4)
                 try expect(!exists(sb.saver.appendingPathComponent("Contents/Resources/Playlist.new")), "staging removed")
             }
         },
@@ -704,7 +718,36 @@ extension SelfTests {
                 try ai.saveSettings(s)
                 try sb.write(#"{"timeoutMinutes":"oops","models":{"codex":"x"}}"#, to: url)
                 try expectEqual(ai.loadSettings(), AISettings(models: ["codex": "x"]))
+                // Per-harness models: blank means "the harness's default".
+                var m = AISettings()
+                m.setModel("  opus ", for: .claude)
+                m.setModel("", for: .codex)
+                try expectEqual(m.models, ["claude": "opus"])
+                try expectEqual(m.model(for: .claude), "opus")
+                try expectEqual(m.model(for: .codex), nil)
+                m.models["kiro"] = "   "
+                try expectEqual(m.model(for: .kiro), nil)
+                m.setModel(nil, for: .claude)
+                try expect(m.models["claude"] == nil)
+                // The protocol carries the settings (the app edits them through AIServicing).
+                let service: AIServicing = ai
+                try service.saveSettings(AISettings(preferredHarness: "codex:/x", timeoutMinutes: 45))
+                try expectEqual(service.loadSettings().timeoutMinutes, 45)
             }
+        },
+        TestCase(name: "core.ai.custom-template") {
+            try expectEqual(CustomAdapter.templateProblem("mytool --prompt-file {prompt_file} --cwd {workspace} {model}"), nil)
+            try expectEqual(CustomAdapter.templateProblem("'my tool' {instructions} --scene {scene}"), nil)
+            try expect(CustomAdapter.templateProblem("mytool") == nil, "the task also arrives on stdin")
+            try expect(CustomAdapter.templateProblem("   ") != nil)
+            try expect(CustomAdapter.templateProblem("mytool {prompt}")?.contains("{prompt}") == true, "unknown placeholder")
+            try expect(CustomAdapter.templateProblem("mytool 'unterminated")?.contains("quote") == true)
+            try expect(CustomAdapter.templateProblem("{prompt_file} mytool") != nil, "starts with the program")
+            let h = AIHarness.custom(template: "  '/opt/my tool/bin/agent' --task {prompt_file} ")
+            try expectEqual(h.kind, .custom)
+            try expectEqual(h.executable, "/opt/my tool/bin/agent")
+            try expectEqual(h.customTemplate, "'/opt/my tool/bin/agent' --task {prompt_file}")
+            try expectEqual(AIService.customHarness(template: "x {prompt_file}"), AIHarness.custom(template: "x {prompt_file}"))
         },
         TestCase(name: "core.ai.session.success") {
             try CoreSandbox.with("session-ok") { sb in
@@ -998,11 +1041,13 @@ extension SelfTests {
                     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
                     try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0).write(to: url)
                 }
-                let install = { (trusted: Bool) in
+                let prefs = FakePreferences()
+                let loginItem = FakeLoginItem(available: true)
+                let install = { () in
                     InstallService(paths: sb.installPaths(managed: [managed, userManaged]), publisher: nil, runner: system.runner,
-                                   loginItem: FakeLoginItem(available: false), preferences: FakePreferences(), accessibility: { trusted })
+                                   loginItem: loginItem, preferences: prefs)
                 }
-                try expectEqual(install(false).status(), InstallStatus(passwordImmediately: true))
+                try expectEqual(install().status(), InstallStatus(passwordImmediately: true))
 
                 try sb.installFakeSaver(version: "1")
                 let template = sb.resources.appendingPathComponent("LivePaper.saver")
@@ -1013,13 +1058,16 @@ extension SelfTests {
                 try writeStore(sb.store, selected: true)
                 system.helperLoaded = true
                 system.screenLock = "garbage"
-                var s = install(true).status()
+                loginItem.current = .requiresApproval
+                try install().setLockKeysShowScene(true)
+                var s = install().status()
                 try expectEqual(s, InstallStatus(saverInstalled: true, saverUpToDate: false, saverSelected: true, helperRunning: true,
-                                                 passwordImmediately: true, accessibilityTrusted: true, managedByMDM: true))
+                                                 helperLoginItem: .requiresApproval, passwordImmediately: true, managedByMDM: true,
+                                                 lockKeysShowScene: true, lockKeysChangedByLivePaper: true))
                 try make(["CFBundleVersion": "1"], template.appendingPathComponent("Contents/Info.plist"))
-                try expect(install(true).status().saverUpToDate)
+                try expect(install().status().saverUpToDate)
                 system.screenLock = "2026-11-14 18:32:04.037 sysadminctl[1:2] screenLock delay is 300 seconds"
-                s = install(true).status()
+                s = install().status()
                 try expect(!s.passwordImmediately, "sysadminctl wins over the profile")
                 try expect(system.mutatingCommands.isEmpty, "status() only reads: \(system.mutatingCommands)")
             }
@@ -1128,14 +1176,12 @@ extension SelfTests {
                 let tahoe = InstallService(paths: sb.installPaths(), publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
                                            preferences: FakePreferences(), osMajorVersion: 26)
                 tahoe.openScreenSaverSettings()
-                tahoe.openAccessibilitySettings()
                 InstallService(paths: sb.installPaths(), publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
                                preferences: FakePreferences(), osMajorVersion: 14).openScreenSaverSettings()
                 InstallService(paths: sb.installPaths(), publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
                                preferences: FakePreferences(), dryRun: true).openScreenSaverSettings()
                 try expectEqual(system.runner.commands, [
                     ["/usr/bin/open", "x-apple.systempreferences:com.apple.Wallpaper-Settings.extension?ScreenSaver"],
-                    ["/usr/bin/open", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"],
                     ["/usr/bin/open", "x-apple.systempreferences:com.apple.ScreenSaver-Settings.extension"]])
             }
         },
@@ -1156,6 +1202,7 @@ extension SelfTests {
                 try make(false).changeSystemDefault(domain: "com.example.test", key: "answer", to: 42)
                 try make(false).changeSystemDefault(domain: "com.example.test", key: "answer", to: 43)
                 try make(false).changeSystemDefault(domain: "com.example.test", key: "fresh", to: "x")
+                try make(false).setLockKeysShowScene(true)
                 try writeStore(sb.store, selected: true)
                 try writeStore(paths.wallpaperStoreBackup, selected: false)
                 for name in ["Library/a.lpscene/scene.json", "Workspaces/s/TASK.md", "Logs/x.log", "state.json", "playlist-settings.json"] {
@@ -1170,9 +1217,9 @@ extension SelfTests {
                 let plan = make(true).performUninstall(removeLibrary: false)
                 try expectEqual(plan.map(\.title), [
                     "Stop the helper (gui/501/\(LPPaths.helperLabel))", "Remove the helper LaunchAgent plist",
-                    "Restore the previous screen saver choice", "Restore changed system settings", "Remove \(paths.installedSaver.path)",
-                    "Delete LivePaper's caches, workspaces and backups (keeping the scene library)"])
-                try expectEqual(plan.map(\.outcome), Array(repeating: .planned, count: 6))
+                    "Restore the previous screen saver choice", InstallService.restoreLockKeysTitle, "Restore changed system settings",
+                    "Remove \(paths.installedSaver.path)", "Delete LivePaper's caches, workspaces and backups (keeping the scene library)"])
+                try expectEqual(plan.map(\.outcome), Array(repeating: .planned, count: 7))
                 try expectEqual(snapshot(), before)
                 try expectEqual(system.mutatingCommands.count, commandsBefore)
                 try expectEqual(prefs.values["com.example.test|answer|false"] as? Int, 43)
@@ -1183,6 +1230,7 @@ extension SelfTests {
                 try expect(!WallpaperStore(url: sb.store).isSelected(), "store restored from the backup")
                 try expectEqual(prefs.values["com.example.test|answer|false"] as? Int, 41)
                 try expect(prefs.values["com.example.test|fresh|false"] == nil, "a key that didn't exist is removed again")
+                try expect(prefs.values["com.apple.loginwindow|immediateLockLaunchesScreenSaver|false"] == nil, "lock keys restored")
                 try expectEqual(children(sb.support), ["Library", "playlist-settings.json", "state.json"])
 
                 let again = make(false).performUninstall(removeLibrary: false)
@@ -1191,7 +1239,7 @@ extension SelfTests {
                 try expect(!exists(sb.support), "support directory deleted")
             }
         },
-        TestCase(name: "core.install.lock-takeover") {
+        TestCase(name: "core.install.lock-keys") {
             try CoreSandbox.with("takeover") { sb in
                 let prefs = FakePreferences()
                 let system = FakeSystem()
@@ -1201,20 +1249,31 @@ extension SelfTests {
                                    preferences: prefs, dryRun: dryRun)
                 }
                 let service = make(false)
-                try expect(!service.systemLockTakeoverEnabled)
-                try make(true).setSystemLockTakeover(true)
+                let install: InstallServicing = service   // the protocol is what the app uses
+                try expect(!service.lockKeysShowScene && !service.status().lockKeysChangedByLivePaper)
+                try make(true).setLockKeysShowScene(true)
                 try expect(prefs.values[key] == nil, "dry run changes nothing")
-                try service.setSystemLockTakeover(true)
-                try expect(service.systemLockTakeoverEnabled)
-                try service.setSystemLockTakeover(false)
+                try install.setLockKeysShowScene(true)
+                try expectEqual(prefs.values[key] as? Bool, true)
+                try expect(service.status().lockKeysShowScene && service.status().lockKeysChangedByLivePaper)
+                // The backup lives with every other changed preference (one place, restored by uninstall).
+                let changes = try JSONDecoder().decode([DefaultsChange].self, from: Data(contentsOf: sb.installPaths().defaultsBackup))
+                try expectEqual(changes.map(\.key), ["immediateLockLaunchesScreenSaver"])
+                try expect(changes[0].previous == nil, "the key didn't exist before")
+                try install.setLockKeysShowScene(false)
                 try expect(prefs.values[key] == nil && !exists(sb.installPaths().defaultsBackup), "back to unset, backup gone")
+                try expect(!service.status().lockKeysChangedByLivePaper)
                 // The user had it on before LivePaper: off means off, uninstall puts "on" back.
                 prefs.values[key] = true
-                try service.setSystemLockTakeover(true)
-                try service.setSystemLockTakeover(false)
-                try expect(!service.systemLockTakeoverEnabled)
-                try service.uninstall(removeLibrary: true)
+                try install.setLockKeysShowScene(true)
+                try expect(!service.status().lockKeysChangedByLivePaper, "already on: nothing changed")
+                try install.setLockKeysShowScene(false)
+                try expect(!service.lockKeysShowScene && service.status().lockKeysChangedByLivePaper)
+                let steps = install.performUninstall(removeLibrary: true)
+                try expect(steps.contains(InstallStep(title: InstallService.restoreLockKeysTitle, outcome: .done)), "\(steps)")
                 try expectEqual(prefs.values[key] as? Bool, true)
+                // The old names still work for code written against them.
+                try expect(InstallService.lockTakeoverKey == InstallService.lockKeysKey && service.systemLockTakeoverEnabled)
             }
         },
         TestCase(name: "core.install.wallpaper-store") {

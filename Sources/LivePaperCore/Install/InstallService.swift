@@ -383,10 +383,15 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     }
 
     /// On: sets the preference, remembering the value from before LivePaper's first change for
-    /// uninstall. Off: restores that value, and turns it off explicitly if it was "on" (the backup
-    /// then keeps "on" so uninstall leaves the Mac as LivePaper found it).
+    /// uninstall (already on: nothing changes, nothing to restore). Off: restores that value, and
+    /// turns it off explicitly if it was "on" (the backup then keeps "on" so uninstall leaves the
+    /// Mac as LivePaper found it).
     public func setLockKeysShowScene(_ on: Bool) throws {
         if on {
+            if lockKeysShowScene {
+                record("Set \(Self.lockKeysDomain) \(Self.lockKeysKey)", .skipped("already on"))
+                return
+            }
             try changeSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, to: true)
             return
         }

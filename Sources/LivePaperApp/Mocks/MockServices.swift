@@ -323,7 +323,8 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     func setLockKeysShowScene(_ on: Bool) throws {
         mutate { s in
             if on {
-                if !s.lockKeysChangedByLivePaper { lockKeysBefore = s.lockKeysShowScene; s.lockKeysChangedByLivePaper = true }
+                guard !s.lockKeysShowScene else { return }   // already on: nothing to restore later
+                if !s.lockKeysChangedByLivePaper { lockKeysBefore = false; s.lockKeysChangedByLivePaper = true }
                 s.lockKeysShowScene = true
                 return
             }

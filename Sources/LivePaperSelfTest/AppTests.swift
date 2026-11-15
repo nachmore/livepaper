@@ -208,22 +208,23 @@ extension SelfTests {
             try expect(CheckReportFile.decode(Data("{}".utf8)) == nil)
         },
         TestCase(name: "app.ai.preferences") {
-            let store = InMemoryPreferences()
-            try expectEqual(AIPreferences.load(from: store), AIPreferences())
-            var p = AIPreferences(defaultHarnessID: "codex:/bin/codex", model: " opus ", timeoutMinutes: 30,
-                                  customCommand: "mytool --prompt {prompt_file} --dir {workspace}")
-            p.save(to: store)
-            try expectEqual(AIPreferences.load(from: store), p)
-            try expectEqual(p.timeout, 1800)
-            try expectEqual(p.customHarness?.executable, "mytool")
-            p.customCommand = "mytool --dir {workspace}"
-            try expect(p.customHarness == nil)
-            try expect(AIPreferences.customCommandProblem("x {prompt} {bogus}")?.contains("{bogus}") == true)
-            try expectEqual(AIPreferences.customCommandProblem(""), nil)
-            // Unknown future keys and missing keys decode to defaults.
-            let decoded = try JSONDecoder().decode(AIPreferences.self, from: Data(#"{"model":"m","future":1}"#.utf8))
-            try expectEqual(decoded.timeoutMinutes, AIPreferences.defaultTimeoutMinutes)
-            let hs = [AIHarness(kind: .claude, name: "C", executable: "/c"), AIHarness(kind: .codex, name: "X", executable: "/x")]
+            try expect(AIPreferences.customCommandProblem("") == nil, "no custom command is fine")
+            try expectEqual(AIPreferences.customCommandProblem("mytool --prompt {prompt_file} --dir {workspace}"), nil)
+            try expect(AIPreferences.customCommandProblem("x {prompt_file} {bogus}")?.contains("{bogus}") == true)
+            try expectEqual(AIPreferences.placeholders, CustomAdapter.placeholders)
+            try expectEqual(AIPreferences.timeoutChoices(including: 20), AIPreferences.timeoutChoices)
+            try expectEqual(AIPreferences.timeoutChoices(including: 25), [5, 10, 20, 25, 30, 45, 60])
+            var settings = AISettings(customTemplate: "mytool --prompt {prompt_file}")
+            try expectEqual(AIPreferences.customHarness(settings)?.executable, "mytool")
+            settings.customTemplate = "mytool {nope}"
+            try expect(AIPreferences.customHarness(settings) == nil, "an unusable template offers no harness")
+            // Detection's own custom entry is replaced by the one from the (current) settings.
+            let hs = [AIHarness(kind: .claude, name: "C", executable: "/c"), AIHarness(kind: .codex, name: "X", executable: "/x"),
+                      AIHarness.custom(template: "stale {prompt_file}")]
+            settings.customTemplate = "fresh {prompt_file}"
+            try expectEqual(AIPreferences.availableHarnesses(detected: hs, settings: settings).map(\.executable), ["/c", "/x", "fresh"])
+            settings.customTemplate = nil
+            try expectEqual(AIPreferences.availableHarnesses(detected: hs, settings: settings).count, 2)
             try expectEqual(AIPreferences.preferredHarness(in: hs, preferredID: "codex:/x")?.kind, .codex)
             try expectEqual(AIPreferences.preferredHarness(in: hs, preferredID: "gone")?.kind, .claude)
         },
@@ -303,37 +304,61 @@ extension SelfTests {
             st.install.helperRunning = true; st.install.managedByMDM = true
             try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.state), [.needed, .managed, .done])
             try expect(!SetupChecklist.isComplete(.lock, state: st), "lock keys still off")
-            st.lockKeysShowScene = true
+            st.install.lockKeysShowScene = true
             try expect(SetupChecklist.isComplete(.lock, state: st), "managed never blocks")
             try expectEqual(SetupChecklist.firstIncompleteStep(state: st), .firstScene)
             try expect(SetupChecklist.checks(for: .welcome, state: st).isEmpty)
             st.install.saverUpToDate = false
             try expectEqual(SetupChecklist.saverSummary(st.install), "Selected \u{2014} update available")
+            // A login item waiting for approval says where to allow it.
+            st.install.helperRunning = false
+            st.install.helperLoginItem = .requiresApproval
+            try expect(st.helperNeedsApproval)
+            let helper = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .helper })
+            try expectEqual(helper.state, .needed)
+            try expect(helper.detail.contains("Login Items"), helper.detail)
+            st.install.helperLoginItem = .enabled
+            try expect(!st.helperNeedsApproval)
         },
-        TestCase(name: "app.setup.lock-takeover") {
-            let dir = try tempDir("lock-takeover")
-            defer { try? FileManager.default.removeItem(at: dir) }
-            let backup = dir.appendingPathComponent("backups/loginwindow-lock.json")
-            // Key absent before LivePaper: restore removes it again.
-            let absent = InMemoryBoolPreference()
-            let lock = LockTakeover(preference: absent, backupURL: backup)
-            try expect(!lock.isEnabled && !lock.hasBackup)
-            try lock.restore() // no backup: no-op
-            try lock.setEnabled(true)
-            try expect(lock.isEnabled && lock.hasBackup)
-            try lock.setEnabled(false)
-            try lock.setEnabled(true) // the backup keeps the value from before the first change
-            try lock.restore()
-            try expectEqual(absent.read(), nil)
-            try expect(!lock.hasBackup)
-            // Already on before LivePaper: nothing changes, nothing to restore.
-            let on = InMemoryBoolPreference(true)
-            let lock2 = LockTakeover(preference: on, backupURL: backup)
-            try lock2.setEnabled(true)
-            try expect(!lock2.hasBackup)
-            try lock2.setEnabled(false)
-            try lock2.restore()
-            try expectEqual(on.read(), true)
+        TestCase(name: "app.setup.uninstall-report") {
+            let home = "/Users/someone"
+            let report = UninstallReport.make([
+                InstallStep(title: "Unregister the helper login item", outcome: .done),
+                InstallStep(title: "Restore the previous screen saver choice", outcome: .skipped("LivePaper didn't change it")),
+                InstallStep(title: "Remove /Users/someone/Library/Screen Savers/LivePaper.saver", outcome: .failed("Permission denied")),
+            ], home: home)
+            try expectEqual(report.rows.map(\.state), [.done, .skipped, .failed])
+            try expectEqual(report.rows[2].title, "Remove ~/Library/Screen Savers/LivePaper.saver")
+            try expectEqual(report.rows[1].detail, "Nothing to do: LivePaper didn't change it.")
+            try expectEqual(report.rows[2].detail, "Permission denied")
+            try expect(!report.succeeded && report.summary.hasPrefix("1 step"), report.summary)
+            let ok = UninstallReport.make([InstallStep(title: "x", outcome: .done)], home: home)
+            try expect(ok.succeeded && ok.failures.isEmpty)
+        },
+        TestCase(name: "app.lock.distributed-channel") {
+            // The real channel on private names (nobody else listens), with this test as the helper.
+            let tag = "com.nachmore.livepaper.selftest.\(UUID().uuidString.prefix(8))"
+            try MainActor.assumeIsolated {
+                let channel = DistributedHelperLockChannel(requestName: tag + ".lockNow", acceptedName: tag + ".lockNowAccepted")
+                let center = DistributedNotificationCenter.default()
+                var received: [String] = []
+                let helper = center.addObserver(forName: .init(tag + ".lockNow"), object: nil, queue: .main) { note in
+                    let id = note.userInfo?[LPNotification.requestIDKey] as? String ?? ""
+                    received.append(id)
+                    center.postNotificationName(.init(tag + ".lockNowAccepted"), object: nil,
+                                                userInfo: [LPNotification.requestIDKey: id], deliverImmediately: true)
+                }
+                var answered = false
+                try awaitMain { answered = await channel.requestLock(timeout: 5) }
+                try expect(answered, "the helper's answer arrives")
+                try expectEqual(received.count, 1)
+                try expect(!(received.first ?? "").isEmpty, "requests carry an id")
+                center.removeObserver(helper)
+                let started = Date()
+                try awaitMain { answered = await channel.requestLock(timeout: 0.3) }
+                try expect(!answered, "no helper: no answer")
+                try expect(Date().timeIntervalSince(started) < 3, "gives up after the timeout")
+            }
         },
         TestCase(name: "app.setup.uninstall-plan") {
             try withScratchPaths("plan") { root in
@@ -451,19 +476,56 @@ extension SelfTests {
                 model.updateLock { $0.hotkey = LPHotkey(keyCode: 37, modifiers: [.option, .command]) } // unchanged: not saved
                 try expectEqual(saved.count, 1)
                 try expectEqual(model.sharedState.lock.hotkey?.modifiers, [.option, .command])
-                // The lock keys: the system preference changes and state.json mirrors it.
+                // The lock keys go through InstallServicing; state.json mirrors the result.
                 try expect(!model.lockKeysShowScene)
-                model.setLockKeysShowScene(true)
+                try awaitMain { await model.setLockKeysShowScene(true) }
                 try expect(model.lockKeysShowScene)
-                try expectEqual(fx.lockPreference.read(), true)
-                try expectEqual(saved.last?.lock.takeOverSystemLock, true)
-                try expectEqual(saved.last?.lock.takeOverLockKey, true)
+                try expect(fx.services.install.status().lockKeysShowScene, "changed through the install service")
+                try expectEqual(saved.last?.lock.lockKeysShowScene, true)
                 try expect(model.uninstallPlan(keepScenes: true).items.contains { $0.id == "lock-keys" })
-                var ok = false
-                try awaitMain { ok = await model.uninstall(keepScenes: true) }
-                try expect(ok)
-                try expectEqual(fx.lockPreference.read(), nil) // restored: the key didn't exist before
-                try expect(!model.lockKeysShowScene)
+                var report: UninstallReport?
+                try awaitMain { report = await model.uninstall(keepScenes: true) }
+                try expect(report?.succeeded == true)
+                try expect(report?.rows.contains { $0.title == InstallService.restoreLockKeysTitle && $0.state == .done } == true)
+                try expect(!model.lockKeysShowScene, "uninstall restored the lock keys")
+                try expectEqual(saved.last?.lock.lockKeysShowScene, false)
+                try expect(!model.uninstallPlan(keepScenes: true).items.contains { $0.id == "lock-keys" })
+            }
+        },
+        TestCase(name: "app.model.lock-keys-real-install") {
+            // The bug this guards against: the app kept its own backup of the lock-keys preference,
+            // which uninstall never restored. Now the app only talks to InstallService.
+            try withScratchPaths("lock-real") { root in
+                let prefs = ScratchPreferences()
+                let paths = InstallPaths(saverTemplate: root.appendingPathComponent("missing.saver"),
+                                         screenSaversDir: root.appendingPathComponent("Screen Savers"),
+                                         launchAgentsDir: root.appendingPathComponent("LaunchAgents"),
+                                         wallpaperStore: root.appendingPathComponent("Wallpaper/Index.plist"),
+                                         supportRoot: root.appendingPathComponent("Support"),
+                                         helperExecutable: root.appendingPathComponent("Helpers/LivePaperHelper"), managedPreferences: [])
+                let runner = RecordingCommandRunner { exe, args in
+                    exe == "/bin/launchctl" && args.first == "print" ? CommandResult(status: 113) : nil
+                }
+                let install = InstallService(paths: paths, publisher: nil, runner: runner, loginItem: NoLoginItem(), preferences: prefs)
+                let mock = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let services = LivePaperServices(library: mock.library, publish: mock.publish, ai: mock.ai, install: install,
+                                                 render: mock.render, checker: mock.checker, compiler: mock.compiler)
+                let key = "com.apple.loginwindow|immediateLockLaunchesScreenSaver"
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    try awaitMain { await model.start() }
+                    try awaitMain { await model.setLockKeysShowScene(true) }
+                    try expectEqual(prefs.values[key] as? Bool, true)
+                    try expect(model.lockKeysShowScene && model.installStatus.lockKeysChangedByLivePaper)
+                    try expect(!FileManager.default.fileExists(atPath: paths.backups.appendingPathComponent("loginwindow-lock.json").path),
+                               "no second backup location")
+                    var report: UninstallReport?
+                    try awaitMain { report = await model.uninstall(keepScenes: true) }
+                    try expect(report?.succeeded == true, "\(report?.failures ?? [])")
+                    try expect(prefs.values[key] == nil, "restored: the key didn't exist before LivePaper")
+                    try expect(!model.lockKeysShowScene)
+                    try expect(runner.commands.allSatisfy { $0.first != "/usr/bin/open" }, "nothing opened")
+                }
             }
         },
         TestCase(name: "app.model.onboarding-install") {
@@ -478,14 +540,115 @@ extension SelfTests {
                 try awaitMain { await model.registerHelper() }
                 try expect(model.installStatus.helperRunning)
                 try expectEqual(SetupChecklist.firstIncompleteStep(state: model.setupState), .lock)
-                model.setLockKeysShowScene(true)
+                try awaitMain { await model.setLockKeysShowScene(true) }
                 try expectEqual(SetupChecklist.firstIncompleteStep(state: model.setupState), .firstScene)
                 model.completeOnboarding()
                 try expect(model.hasCompletedOnboarding && !model.showOnboarding)
-                var ok = false
-                try awaitMain { ok = await model.uninstall(keepScenes: true) }
-                try expect(ok)
+                var report: UninstallReport?
+                try awaitMain { report = await model.uninstall(keepScenes: true) }
+                try expectEqual(report?.rows.map(\.state), [.done, .done, .done, .done, .done])
                 try expect(!model.hasCompletedOnboarding)
+                try expect(!model.installStatus.saverInstalled && !model.installStatus.helperRunning)
+            }
+        },
+        TestCase(name: "app.model.uninstall-retry") {
+            try withModel("uninstall-retry") { model, fx in
+                let install = try unwrap(fx.services.install as? MockInstallService)
+                try install.installSaver()
+                try awaitMain { await model.registerHelper() }
+                install.failingUninstallStep = "Remove"
+                model.completeOnboarding()
+                var report: UninstallReport?
+                try awaitMain { report = await model.uninstall(keepScenes: false) }
+                let failed = try unwrap(report)
+                try expectEqual(failed.failures.map(\.title), ["Remove \(LPPaths.installedSaver.path)".replacingOccurrences(of: NSHomeDirectory() + "/", with: "~/")])
+                try expect(model.hasCompletedOnboarding, "an unfinished uninstall keeps the setup state")
+                try expect(model.installStatus.saverInstalled && !model.installStatus.helperRunning)
+                install.failingUninstallStep = nil
+                try awaitMain { report = await model.uninstall(keepScenes: false) }
+                try expect(report?.succeeded == true)
+                try expect(report?.rows.first?.state == .skipped, "finished steps are skipped on retry")
+                try expect(!model.hasCompletedOnboarding && !model.installStatus.saverInstalled)
+            }
+        },
+        TestCase(name: "app.model.publish-skipped") {
+            try withModel("publish-skipped") { model, fx in
+                let publish = try unwrap(fx.services.publish as? MockPublishService)
+                publish.simulatedSkips = ["neon-rain": "neon-rain has a syntax error on line 3."]
+                try awaitMain { _ = await model.savePlaylist(PlaylistSettings(mode: .sequence, sceneIDs: ["paper-lanterns", "neon-rain"]),
+                                                             announce: false) }
+                let result = try unwrap(model.lastPublishResult)
+                try expectEqual(result.playlist.scenes.map(\.id), ["paper-lanterns"])
+                try expectEqual(result.skippedScenes.map(\.id), ["neon-rain"])
+                try expectEqual(model.lastPublished?.scenes.count, 1)
+                // Even a quiet publish says what was left out.
+                let banner = try unwrap(model.banners.banners.last)
+                try expectEqual(banner.style, .warning)
+                try expect(banner.message?.contains("Neon Rain") == true && banner.message?.contains("syntax error") == true,
+                           banner.message ?? "")
+                model.section = .library
+                banner.actions.first?.perform()
+                try expectEqual(model.section, .playlist)
+                publish.simulatedSkips = [:]
+                try awaitMain { await model.addToPlaylist("aurora-lake") }
+                try expect(model.lastPublishResult?.skipped.isEmpty == true)
+            }
+        },
+        TestCase(name: "app.model.ai-settings") {
+            try withModel("ai-settings") { model, fx in
+                try expectEqual(model.aiSettings, AISettings())
+                model.aiSettings.setModel("opus", for: .claude)
+                model.aiSettings.timeoutMinutes = 30
+                model.aiSettings.customTemplate = "mytool --task {prompt_file}"
+                // Saved through AIServicing (ai-settings.json), not the app's own preferences.
+                try expectEqual(fx.services.ai.loadSettings().models, ["claude": "opus"])
+                try expectEqual(fx.services.ai.loadSettings().timeoutMinutes, 30)
+                try expectEqual(model.availableHarnesses.last?.executable, "mytool")
+                let claude = try unwrap(model.availableHarnesses.first { $0.kind == .claude })
+                try expectEqual(model.defaultModel(for: claude), "opus")
+                model.aiSettings.preferredHarness = claude.id
+                try expectEqual(model.preferredHarness?.id, claude.id)
+                let session = try unwrap(model.startSession(.create(prompt: "Ink drops blooming in water"), harness: claude, model: "  "))
+                try expect(session.model == "opus", "an empty model field uses the default from Settings")
+                let other = try unwrap(model.startSession(.create(prompt: "Ink drops blooming in water"), harness: claude, model: "haiku"))
+                try expectEqual(other.model, "haiku")
+                for s in model.runningSessions { s.cancel() }
+                // A new model (next launch) reads them back.
+                let again = AppModel(services: fx.services, environment: testEnvironment(root: fx.root, saved: SavedStates()))
+                try expectEqual(again.aiSettings.models, ["claude": "opus"])
+            }
+        },
+        TestCase(name: "app.model.lock-now") {
+            try withModel("lock-now") { model, fx in
+                try awaitMain { _ = await model.registerHelper() }
+                var route: AppModel.LockRoute?
+                // Mock environment: never locks for real.
+                try awaitMain { route = await model.lockNow() }
+                try expectEqual(route, .sample)
+                // Live-like environment: the helper answers…
+                let answering = FixedHelperLockChannel(answers: true)
+                var started = 0
+                let live = AppModel(services: fx.services, environment: testEnvironment(root: fx.root, saved: SavedStates(), mock: false,
+                                                                                     helperLock: answering, startScreenSaver: { started += 1 }))
+                try awaitMain { await live.refreshInstallStatus() }
+                try awaitMain { route = await live.lockNow() }
+                try expectEqual(route, .helper)
+                try expectEqual(answering.requests, 1)
+                try expect(started == 0, "the helper runs the lock flow")
+                try expect(live.banners.banners.contains { $0.title.contains("isn't your screen saver") }, "warns when not selected")
+                // …or nobody does, and the app starts the screen saver itself.
+                let silent = FixedHelperLockChannel(answers: false)
+                let fallback = AppModel(services: fx.services, environment: testEnvironment(root: fx.root, saved: SavedStates(), mock: false,
+                                                                                         helperLock: silent, startScreenSaver: { started += 1 }))
+                try awaitMain { route = await fallback.lockNow() }
+                try expectEqual(route, .screenSaverEngine)
+                try expectEqual(started, 1)
+                struct Refused: Error {}
+                let failing = AppModel(services: fx.services, environment: testEnvironment(root: fx.root, saved: SavedStates(), mock: false,
+                                                                                        helperLock: silent, startScreenSaver: { throw Refused() }))
+                try awaitMain { route = await failing.lockNow() }
+                try expectEqual(route, .failed)
+                try expect(failing.banners.banners.contains { $0.style == .error })
             }
         },
         TestCase(name: "app.model.run-check") {
@@ -593,11 +756,12 @@ extension SelfTests {
     /// Points every LPPaths override at a scratch root for the duration of `body`.
     static func withScratchPaths(_ name: String, _ body: (URL) throws -> Void) throws {
         let root = try tempDir(name)
-        let keys = ["LIVEPAPER_HOME", "LIVEPAPER_SAVERS_DIR", "LIVEPAPER_WALLPAPER_STORE"]
+        let keys = ["LIVEPAPER_HOME", "LIVEPAPER_SAVERS_DIR", "LIVEPAPER_WALLPAPER_STORE", "LIVEPAPER_LAUNCH_AGENTS_DIR"]
         let previous = keys.map { ProcessInfo.processInfo.environment[$0] }
         setenv("LIVEPAPER_HOME", root.appendingPathComponent("Support").path, 1)
         setenv("LIVEPAPER_SAVERS_DIR", root.appendingPathComponent("Screen Savers").path, 1)
         setenv("LIVEPAPER_WALLPAPER_STORE", root.appendingPathComponent("Wallpaper/Index.plist").path, 1)
+        setenv("LIVEPAPER_LAUNCH_AGENTS_DIR", root.appendingPathComponent("LaunchAgents").path, 1)
         defer {
             for (key, value) in zip(keys, previous) {
                 if let value { setenv(key, value, 1) } else { unsetenv(key) }
@@ -614,8 +778,20 @@ extension SelfTests {
     struct ModelFixture {
         let services: LivePaperServices
         let saved: SavedStates
-        /// Stands in for `com.apple.loginwindow immediateLockLaunchesScreenSaver`.
-        let lockPreference: InMemoryBoolPreference
+        /// The scratch root (LPPaths point into root/Support etc.).
+        let root: URL
+    }
+
+    /// An environment over a scratch root. `mock: false` exercises the live-only paths (lock now)
+    /// with injected stand-ins, so nothing reaches the system either way.
+    @MainActor
+    static func testEnvironment(root: URL, saved: SavedStates, mock: Bool = true,
+                                helperLock: HelperLockChannel? = nil,
+                                startScreenSaver: @escaping @MainActor () async throws -> Void = {}) -> AppEnvironment {
+        AppEnvironment(isMock: mock, defaults: InMemoryPreferences(), stateURL: root.appendingPathComponent("Support/state.json"),
+                       saveState: { saved.all.append($0) }, helperLock: helperLock ?? FixedHelperLockChannel(answers: false),
+                       startScreenSaver: startScreenSaver,
+                       previewCacheDirectory: root.appendingPathComponent("Previews"), appVersion: "0.0.0-test", appBundlePath: nil)
     }
 
     /// A started AppModel over fresh mock services (zero delays) in a scratch directory.
@@ -623,20 +799,32 @@ extension SelfTests {
         try withScratchPaths(name) { root in
             let services = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
             let saved = SavedStates()
-            let fx = ModelFixture(services: services, saved: saved, lockPreference: InMemoryBoolPreference())
+            let fx = ModelFixture(services: services, saved: saved, root: root)
             try MainActor.assumeIsolated {
-                let lock = LockTakeover(preference: fx.lockPreference, backupURL: root.appendingPathComponent("Support/backups/loginwindow-lock.json"))
-                let env = AppEnvironment(isMock: true, defaults: InMemoryPreferences(), lockTakeover: lock,
-                                         stateURL: root.appendingPathComponent("Support/state.json"),
-                                         saveState: { saved.all.append($0) },
-                                         previewCacheDirectory: root.appendingPathComponent("Previews"),
-                                         appVersion: "0.0.0-test", appBundlePath: nil)
-                let model = AppModel(services: services, environment: env)
+                let model = AppModel(services: services, environment: testEnvironment(root: root, saved: saved))
                 try awaitMain { await model.start() }
                 try body(model, fx)
                 for s in model.runningSessions { s.cancel() }
             }
         }
+    }
+
+    /// In-memory CFPreferences stand-in for InstallService (never touches the real domains).
+    final class ScratchPreferences: PreferencesAccessing, @unchecked Sendable {
+        var values: [String: Any] = [:]
+        func value(domain: String, key: String, currentHost: Bool) -> Any? { values["\(domain)|\(key)"] }
+        func set(_ value: Any?, domain: String, key: String, currentHost: Bool) -> Bool {
+            values["\(domain)|\(key)"] = value
+            return true
+        }
+    }
+
+    /// Not running from an app bundle: no SMAppService login item.
+    struct NoLoginItem: LoginItemRegistering {
+        var isAvailable: Bool { false }
+        var status: LoginItemStatus { .notFound }
+        func register() throws -> LoginItemStatus { .notFound }
+        func unregister() throws {}
     }
 
     @MainActor private final class Completion { var done = false; var error: Error? }
