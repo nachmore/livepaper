@@ -297,8 +297,9 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   the displays sleep, while System Settings isn't frontmost and while their window is hidden; web
   previews run at 15 fps. Every lifecycle step is logged (os_log category `lifecycle`, notice level).
 * Reads `Playlist/playlist.json`; keeps entries whose file is a plain name with a supported
-  extension (§4.3) that exists; picks a scene (shuffle with no-repeat across sessions and displays
-  agreeing per 30 s epoch); crossfades every `cycleMinutes`; fallback scene when nothing plays.
+  extension (§4.3) that exists; picks a scene (shuffle with no-repeat across recent sessions, an
+  ended session is never rejoined, displays agreeing per 30 s epoch from what the session froze at
+  its start); crossfades every `cycleMinutes`; fallback scene when nothing plays.
 * **Web scenes:** `WKWebView` (`PassiveWebView`: no hit-testing), `loadHTMLString(baseURL: nil)`
   (the only navigation `SceneNavigationGate` lets through; no new windows or downloads),
   non-persistent data store, `window.LIVEPAPER_CONFIG = {clock, clockPosition, fps, scale, seed,

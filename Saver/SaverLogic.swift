@@ -96,25 +96,42 @@ enum SaverPlaylistLoader {
 // MARK: - Sessions (no-repeat across sessions, agreement across displays)
 
 /// What the saver remembers between runs (ScreenSaverDefaults in the real host).
+///
+/// Two kinds of fields: the ones that define the session (`epoch`, `startedAt`, `avoid`, `startRecent`)
+/// are fixed when the session starts, so every display that joins it later builds the same deck; the
+/// history (`lastShown`, `recent`, `endedAt`) changes while it runs and is what the NEXT session reads.
 struct SaverSessionRecord: Codable, Equatable {
-    /// The 30 s epoch the session started in; doubles as the shuffle seed.
+    /// The shuffle seed: normally the 30 s epoch the session started in, but one past the previous
+    /// session's epoch when that one is the same or later (a quick re-lock), so the shuffle differs.
     var epoch: Int
-    /// Session start (seconds since 1970), aligned to the epoch start.
+    /// Session start (seconds since 1970): the start of `epoch`, or the actual start time when the
+    /// epoch was bumped ahead of the clock. Displays join within `joinWindow` of it, and the cycle
+    /// schedule steps from it.
     var startedAt: TimeInterval
     /// Scene the session avoids starting with (the one shown last in the previous session).
     var avoid: String?
     /// Scene on screen most recently (the next session avoids it).
     var lastShown: String?
-    /// Scenes shown recently, most recent first (shuffle avoids starting a session with any of the
-    /// newest half of the deck). Optional for records written by older builds.
+    /// Scenes shown recently, most recent first; grows as scenes show. The next session's first scene
+    /// avoids the newest half of the deck in it (shuffle). Optional for records written by older builds.
     var recent: [String]? = nil
+    /// `recent` as it was when this session started: what THIS session's first scene avoids. Frozen —
+    /// by the time a second display joins, `recent` already holds the scene the first display is
+    /// showing, and a deck built from it would start elsewhere. Nil in records from older builds.
+    var startRecent: [String]? = nil
     /// When the session ended (willstop). Only a session that is still running can be joined, so a
     /// quick unlock → lock starts a NEW session instead of replaying the previous one.
     var endedAt: TimeInterval? = nil
 
     static let recentCapacity = 12
 
-    /// Records `id` as on screen now.
+    /// The session as every display of it plays it. Built only from the fields fixed at its start, so
+    /// `noteShown` and `endedAt` never change it.
+    var session: SaverSession {
+        SaverSession(epoch: epoch, startedAt: Date(timeIntervalSince1970: startedAt), avoid: avoid, recent: startRecent ?? [])
+    }
+
+    /// Records `id` as on screen now (history only; the session is unchanged).
     mutating func noteShown(_ id: String) {
         lastShown = id
         var list = (recent ?? []).filter { $0 != id }
@@ -128,7 +145,7 @@ struct SaverSession: Equatable {
     var epoch: Int
     var startedAt: Date
     var avoid: String?
-    /// Recently shown scenes, most recent first (see `SaverDeck.recent`).
+    /// Recently shown scenes when the session started, most recent first (see `SaverDeck.recent`).
     var recent: [String] = []
 
     /// Seed for the scene shuffle (identical on every display of the session).
@@ -143,6 +160,9 @@ enum SaverSessionPlanner {
     /// A display starting this long after a session began still joins it (one epoch plus grace,
     /// so displays straddling an epoch boundary agree too).
     static let joinWindow: TimeInterval = 45
+    /// A stored epoch more than this many epochs (one day) ahead of the clock is not followed: the
+    /// clock was moved back, or the record is damaged (and `+ 1` must never overflow).
+    static let maxEpochLead = 2880
 
     /// Decides which session a starting display belongs to.
     /// - Returns: the session, the record to persist (non-preview instances only), and whether an
@@ -153,18 +173,50 @@ enum SaverSessionPlanner {
         // session that already ended — the user unlocked and locked again quickly — must not be
         // replayed: that showed the same scene lock after lock.
         if let stored, stored.endedAt == nil, t - stored.startedAt >= -epochLength, t - stored.startedAt < joinWindow {
-            return (SaverSession(epoch: stored.epoch, startedAt: Date(timeIntervalSince1970: stored.startedAt), avoid: stored.avoid,
-                                 recent: stored.recent ?? []), stored, true)
+            return (stored.session, stored, true)
         }
         var epoch = Int((t / epochLength).rounded(.down))
-        // A new session in the same 30 s epoch as an ended one still needs a different shuffle.
-        if let stored, epoch <= stored.epoch { epoch = stored.epoch + 1 }
+        // A new session in the same 30 s epoch as an ended one still needs a different shuffle (and
+        // so does one after quick re-locks ran the epoch ahead of the clock, up to `maxEpochLead`).
+        if let stored, epoch <= stored.epoch, stored.epoch < epoch + maxEpochLead { epoch = stored.epoch + 1 }
         let start = t >= TimeInterval(epoch) * epochLength ? TimeInterval(epoch) * epochLength : t
         let recent = stored?.recent ?? (stored?.lastShown.map { [$0] } ?? [])
         let record = SaverSessionRecord(epoch: epoch, startedAt: start, avoid: stored?.lastShown, lastShown: nil,
-                                        recent: recent, endedAt: nil)
-        return (SaverSession(epoch: epoch, startedAt: Date(timeIntervalSince1970: start), avoid: record.avoid, recent: recent),
-                record, false)
+                                        recent: recent, startRecent: recent, endedAt: nil)
+        return (record.session, record, false)
+    }
+
+    /// The record to save after a display put `id` on screen, or nil when there is nothing new.
+    /// `own` is the record of the session this display plays, `stored` what the shared store holds.
+    /// When the store holds the same session or a newer one, the scene goes into THAT record, so
+    /// displays never drop each other's history: one that skipped a failing scene, or one still in
+    /// the session a late display (> `joinWindow`) started after. Only an older record — the previous
+    /// session, when this display's session has just begun — is replaced by `own`.
+    static func recordShown(_ id: String, own: SaverSessionRecord, stored: SaverSessionRecord?) -> SaverSessionRecord? {
+        var record = own
+        if let stored, stored.session == own.session || isSession(stored, newerThan: own) { record = stored }
+        guard record.lastShown != id else { return nil }
+        record.noteShown(id)
+        return record
+    }
+
+    /// Whether `record` is a session that began after `other`'s: `plan` gives every new session a
+    /// later epoch than the stored one — unless that was more than `maxEpochLead` ahead, which this
+    /// treats as older too. Never overflows, whatever the records hold.
+    static func isSession(_ record: SaverSessionRecord, newerThan other: SaverSessionRecord) -> Bool {
+        let (gap, overflow) = record.epoch.subtractingReportingOverflow(other.epoch)
+        return !overflow && gap > 0 && gap < maxEpochLead
+    }
+
+    /// The record to save when the saver stops (willstop), or nil when the store already says so.
+    /// Marks whatever the store holds — it is what the next session reads, and every session ends at
+    /// willstop — instead of saving this display's own copy: each display's view handles willstop,
+    /// and the last one to save its copy would drop what the others recorded.
+    static func recordEnded(at t: TimeInterval, own: SaverSessionRecord, stored: SaverSessionRecord?) -> SaverSessionRecord? {
+        var record = stored ?? own
+        guard record.endedAt == nil else { return nil }
+        record.endedAt = t
+        return record
     }
 }
 
@@ -212,7 +264,7 @@ struct SaverRandom {
     mutating func next(below n: Int) -> Int { Int(next() % UInt64(max(1, n))) }
 }
 
-/// The order scenes play in. Deterministic for a given (ids, mode, seed, avoid), so every display of
+/// The order scenes play in. Deterministic for a given (ids, mode, seed, avoid, recent), so every display of
 /// a session computes the same scene for the same step without talking to each other.
 struct SaverDeck: Equatable {
     let ids: [String]
@@ -220,12 +272,18 @@ struct SaverDeck: Equatable {
     let seed: UInt64
     /// Scene to avoid at step 0 (shown last in the previous session).
     let avoid: String?
-    /// Recently shown scenes, most recent first. Shuffle never starts a session with one of the
-    /// newest ⌊n/2⌋ of them, so locking repeatedly walks through the deck instead of repeating.
+    /// Recently shown scenes when the session started, most recent first. Shuffle never starts a
+    /// session with one of the newest ⌊n/2⌋ of them (or `avoid`), so locking repeatedly walks through
+    /// the deck instead of repeating.
     var recent: [String] = []
 
     init(ids: [String], mode: LPPlaylistMode, seed: UInt64, avoid: String?, recent: [String] = []) {
         self.ids = ids; self.mode = mode; self.seed = seed; self.avoid = avoid; self.recent = recent
+    }
+
+    /// The deck every display of `session` plays.
+    init(ids: [String], mode: LPPlaylistMode, session: SaverSession) {
+        self.init(ids: ids, mode: mode, seed: session.shuffleSeed, avoid: session.avoid, recent: session.recent)
     }
 
     /// The ids the first scene of a session must not be (empty for one-scene decks).

@@ -12,6 +12,7 @@
 //   2b. explicit start — didstart while unlocked renders (password delay / hot corner); didstop
 //                       pauses; a lock while the displays sleep loads nothing until wake
 //   3. queued state   — lock UI already up before the page is ready → scene starts with its clock hidden
+//   3b. shuffle       — a second display joining a shuffle session plays the same deck and scene
 //   4. publish after signing — rewrites Playlist/ inside the signed bundle, a new view plays it
 //   5. video scene    — AVPlayerLayer plays, native clock fades out/in with the lock UI, sleep pauses
 //   6. preview        — small preview instance renders without a lock once System Settings is
@@ -383,8 +384,35 @@ func writePlaylist(mode: String, generation: Int, scenes: [[String: String]]) th
         harness.dispose(queued)
     }
 
-    // 4. Publish into the signed bundle --------------------------------------------------------
+    // The signature as the test playlist left it (phase 4 compares after its rewrite).
     notes["codesign.afterTestPlaylist"] = codesignVerify()
+
+    // 3b. Shuffle across displays ---------------------------------------------------------------
+    // The default test playlist is sequence mode, which never reads the scene history, so check
+    // agreement in shuffle mode too: the second display plans after the first recorded its scene.
+    try? FileManager.default.removeItem(atPath: statePath)
+    do {
+        try writePlaylist(mode: "shuffle", generation: 5, scenes: ["a", "b", "c"].map {
+            ["id": "test-web-\($0)", "name": "Test web scene \($0)", "kind": "web", "file": "test-web.html", "clock": "top"]
+        })
+    } catch { check("shuffle playlist", false, "\(error)") }
+    if let one = harness.makeView(size: fullSize, preview: false), let two = harness.makeView(size: NSSize(width: 1280, height: 800), preview: false) {
+        one.startAnimation()
+        deliver("com.apple.screenIsLocked", to: one)
+        two.startAnimation()
+        deliver("com.apple.screenIsLocked", to: two)
+        let ready = await waitUntil(8) { (currentDiag(one)["ready"] as? Bool) == true && (currentDiag(two)["ready"] as? Bool) == true }
+        let a = diagnostics(one), b = diagnostics(two)
+        check("shuffle: second display agrees on session, deck and scene",
+              ready && a["session"] as? Int == b["session"] as? Int && a["deck"] as? [String] == b["deck"] as? [String]
+                && a["scene"] as? String == b["scene"] as? String && (a["deck"] as? [String])?.count == 3,
+              "session \(a["session"] ?? "?")/\(b["session"] ?? "?"), deck \(a["deck"] ?? "?")/\(b["deck"] ?? "?"), "
+                + "scene \(a["scene"] ?? "?")/\(b["scene"] ?? "?")")
+        harness.dispose(two)
+        harness.dispose(one)
+    }
+
+    // 4. Publish into the signed bundle --------------------------------------------------------
     do {
         try writePlaylist(mode: "single", generation: 2, scenes: [
             ["id": "test-video", "name": "Test video", "kind": "video", "file": "test-video.mov", "clock": "top", "fit": "fill"],

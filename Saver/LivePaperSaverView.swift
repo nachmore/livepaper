@@ -239,8 +239,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
 
         let store = SaverSessionStores.shared
         let planned = SaverSessionPlanner.plan(now: Date(), stored: store.load())
-        let deck = SaverDeck(ids: content.entries.map(\.id), mode: playlist.mode, seed: planned.session.shuffleSeed,
-                             avoid: planned.session.avoid, recent: planned.session.recent)
+        let deck = SaverDeck(ids: content.entries.map(\.id), mode: playlist.mode, session: planned.session)
         let schedule = SaverSchedule(startedAt: planned.session.startedAt, cycleMinutes: playlist.cycleMinutes,
                                      deckCount: deck.count, mode: playlist.mode, cycles: !gate.preview)
         plan = Plan(deck: deck, schedule: schedule, session: planned.session, record: planned.record)
@@ -355,11 +354,14 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             gate.apply(event)
             logLifecycle(event.rawValue, previewLike ? "ignored by previews" : "")
             if !previewLike {
-                // Mark the session ended so a quick re-lock starts a new one (different scene).
-                if var plan, plan.record.endedAt == nil {
-                    plan.record.endedAt = Date().timeIntervalSince1970
-                    self.plan = plan
-                    SaverSessionStores.shared.save(plan.record)
+                // Mark the session ended so a quick re-lock starts a new one (different scene). Every
+                // display's view gets here; the first marks the stored record, the rest find it marked.
+                if let plan {
+                    let store = SaverSessionStores.shared
+                    if let ended = SaverSessionPlanner.recordEnded(at: Date().timeIntervalSince1970, own: plan.record,
+                                                                   stored: store.load()) {
+                        store.save(ended)
+                    }
                 }
                 prepareToExit()
             }
@@ -454,12 +456,15 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         install(host, crossfade: crossfade)
     }
 
-    /// Bookkeeping for no-repeat: the next session avoids the scene shown last. Previews never write.
+    /// Bookkeeping for no-repeat: adds the scene to the recent history the next session's first scene
+    /// avoids (never to this session's deck: see `SaverSessionRecord.startRecent`). Previews never write.
     private func rememberShown(_ id: String) {
-        guard !gate.preview, var plan, plan.record.lastShown != id else { return }
+        guard !gate.preview, var plan else { return }
+        let store = SaverSessionStores.shared
+        let update = SaverSessionPlanner.recordShown(id, own: plan.record, stored: store.load())
         plan.record.noteShown(id)
         self.plan = plan
-        SaverSessionStores.shared.save(plan.record)
+        if let update { store.save(update) }
     }
 
     private func fallbackContext() -> SceneContext {
