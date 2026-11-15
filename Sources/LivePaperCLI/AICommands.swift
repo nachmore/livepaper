@@ -204,10 +204,16 @@ final class SessionPrinter {
     private var checkStarted = Date()
     /// The session's candidate package (workspace/scene), where check writes its report.
     private var candidate = URL(fileURLWithPath: ".")
+    private var workspace = URL(fileURLWithPath: ".")
+    /// Stills reported since the last other event: one `livepaper check` writes a dozen or more,
+    /// so they are printed as one line when the next event arrives.
+    private var pendingStills: [URL] = []
+    static let stillNamesShown = 4
 
     init(json: Bool) { self.json = json }
 
     func started(session: AISessionHandle, harness: AIHarness, model: String?, request: AISessionRequest) {
+        workspace = session.workspace
         candidate = AIWorkspace(root: session.workspace).scene
         if json {
             emit(["event": "started", "session": session.id, "workspace": session.workspace.path, "harness": harness.kind.rawValue,
@@ -226,6 +232,8 @@ final class SessionPrinter {
 
     func event(_ event: AISessionEvent) {
         if json { emitJSON(event); return }
+        if case .stillRendered(let url) = event { pendingStills.append(url); return }
+        flushStills()
         switch event {
         case .status(let s):
             if s.hasPrefix("Validating") { checkStarted = Date() }
@@ -234,8 +242,8 @@ final class SessionPrinter {
             for line in text.split(separator: "\n", omittingEmptySubsequences: false) { print("  \(line)") }
         case .toolUse(let name, let detail):
             print("  ▸ \(name)\(detail.isEmpty ? "" : "  \(detail)")")
-        case .stillRendered(let url):
-            print("  ◻ still \(displayPath(url))")
+        case .stillRendered:
+            break   // batched by flushStills()
         case .checkResult(let report):
             print("")
             SceneCommands.printSummary(report, package: candidate, seconds: Date().timeIntervalSince(checkStarted))
@@ -247,7 +255,35 @@ final class SessionPrinter {
         }
     }
 
+    /// "◻ 13 stills in scene/.check/: 1512x982@2-t0.png, …" — paths relative to the workspace
+    /// (printed at the start), grouped by directory.
+    private func flushStills() {
+        guard !pendingStills.isEmpty else { return }
+        defer { pendingStills = [] }
+        var groups: [(dir: URL, names: [String])] = []
+        for url in pendingStills {
+            let dir = url.deletingLastPathComponent()
+            if let i = groups.firstIndex(where: { $0.dir.path == dir.path }) {
+                if !groups[i].names.contains(url.lastPathComponent) { groups[i].names.append(url.lastPathComponent) }
+            } else {
+                groups.append((dir, [url.lastPathComponent]))
+            }
+        }
+        for g in groups {
+            let shown = g.names.prefix(Self.stillNamesShown).joined(separator: ", ")
+            let more = g.names.count > Self.stillNamesShown ? ", … (+\(g.names.count - Self.stillNamesShown))" : ""
+            let count = g.names.count == 1 ? "1 still" : "\(g.names.count) stills"
+            print("  ◻ \(count) in \(workspaceRelative(g.dir))/: \(shown)\(more)")
+        }
+    }
+
+    private func workspaceRelative(_ url: URL) -> String {
+        let root = workspace.resolvingSymlinksInPath().path, p = url.resolvingSymlinksInPath().path
+        return p.hasPrefix(root + "/") ? String(p.dropFirst(root.count + 1)) : displayPath(url)
+    }
+
     func failed(_ message: String, workspace: URL, checked: Bool) {
+        flushStills()
         if json { return }   // the "failed" event already carries the message
         stderr("livepaper ai: \(message)")
         stderr("  the workspace (agent logs in .livepaper/) is kept in \(displayPath(workspace))")
@@ -255,6 +291,7 @@ final class SessionPrinter {
     }
 
     func note(_ s: String) {
+        flushStills()
         if json { emit(["event": "note", "message": s]) } else { print(s) }
     }
 

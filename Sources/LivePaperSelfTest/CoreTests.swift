@@ -1036,6 +1036,11 @@ extension SelfTests {
             try expectEqual(parser.parse(line: #"{"type":"result","subtype":"error_max_turns","is_error":true}"#),
                             [.status("Claude Code stopped: error_max_turns")])
             try expectEqual(parser.parse(line: #"{"type":"stream_event","event":{}}"#), [])
+            // A leading cd into the workspace is noise; other paths stay as they are.
+            try expectEqual(parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /private/var/folders/lp/T/ws; cat AGENTS.md | head -50"}}]}}"#),
+                            [.toolUse(name: "Bash", detail: "cat AGENTS.md | head -50")])
+            try expectEqual(parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls /var/folders/lp/T/ws2/x /var/folders/lp/T/ws"}}]}}"#),
+                            [.toolUse(name: "Bash", detail: "ls /var/folders/lp/T/ws2/x .")])
             try expectEqual(parser.parse(line: "   "), [])
         },
         TestCase(name: "core.ai.parsers.codex") {
@@ -1051,6 +1056,8 @@ extension SelfTests {
             try expectEqual(parser.reportedModel, nil)   // codex --json doesn't say
             try expectEqual(parser.parse(line: #"{"type":"turn.failed","error":{"message":"rate limited"}}"#), [.status("Codex stopped: rate limited")])
             // The pre-0.5 event format.
+            try expectEqual(parser.parse(line: #"{"type":"item.started","item":{"id":"item_9","type":"command_execution","command":"/bin/zsh -lc 'cd /var/folders/lp/T/ws && livepaper check scene'"}}"#),
+                            [.toolUse(name: "shell", detail: "livepaper check scene")])
             try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"exec_command_begin","command":["bash","-lc","ls scene"]}}"#),
                             [.toolUse(name: "shell", detail: "ls scene")])
             try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"agent_message","message":"Done."}}"#), [.assistantText("Done.")])

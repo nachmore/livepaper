@@ -62,8 +62,19 @@ enum StreamText {
         // Longest first: "/private/var/…/" must go before "/var/…/" can match inside it.
         for r in roots.sorted(by: { $0.count > $1.count }) {
             out = out.replacingOccurrences(of: "file://" + r + "/", with: "").replacingOccurrences(of: r + "/", with: "")
+            // The workspace itself (`cd /…/ws; ls`), but not a longer path that merely starts with it.
+            out = out.replacingOccurrences(of: NSRegularExpression.escapedPattern(for: r) + #"(?![^\s;&|'")])"#, with: ".",
+                                           options: .regularExpression)
         }
         return out
+    }
+
+    /// `cd . && livepaper check scene` → `livepaper check scene`: agents often prefix commands
+    /// with a cd into the workspace they already run in.
+    static func dropWorkspaceCD(_ command: String) -> String {
+        guard let range = command.range(of: #"^cd (\.|"\."|'\.')\s*(&&|;)\s*"#, options: .regularExpression) else { return command }
+        let rest = command[range.upperBound...]
+        return rest.isEmpty ? command : String(rest)
     }
 
     /// `/bin/zsh -lc 'livepaper check scene'` → `livepaper check scene` (Codex wraps every command
@@ -78,7 +89,10 @@ enum StreamText {
     static func toolDetail(_ input: Any?, root: URL) -> String {
         guard let dict = input as? [String: Any] else { return "" }
         for key in ["command", "file_path", "path", "pattern", "url", "query", "description", "prompt"] {
-            if let v = dict[key] as? String, !v.isEmpty { return truncate(relative(v, to: root)) }
+            if let v = dict[key] as? String, !v.isEmpty {
+                let shown = relative(v, to: root)
+                return truncate(key == "command" ? dropWorkspaceCD(shown) : shown)
+            }
             if let v = dict[key] as? [String], !v.isEmpty { return truncate(relative(v.joined(separator: " "), to: root)) }
         }
         return ""
@@ -181,7 +195,7 @@ public final class CodexStreamParser: HarnessStreamParser {
             return [.status("Thinking…")]
         case "command_execution":
             let command = StreamText.unwrapShell(item["command"] as? String ?? "")
-            return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.relative(command, to: root)))]
+            return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.dropWorkspaceCD(StreamText.relative(command, to: root))))]
         case "file_change":
             let paths = (item["changes"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
             return [.toolUse(name: "edit", detail: StreamText.truncate(paths.map { StreamText.relative($0, to: root) }.joined(separator: ", ")))]
