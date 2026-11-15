@@ -276,6 +276,10 @@ public final class KiroStreamParser: HarnessStreamParser {
     private var thinking = false
     private var announcedTools = Set<String>()
     private var lastMessage = ""
+    /// Message text since the last tool call: the agent's closing reply. kiro's `finalText` is
+    /// every message of the turn run together ("Too dark. Let me look.\nI've built …"), which
+    /// makes a poor summary.
+    private var replySinceLastTool = ""
     public var finalMessage: String? { lastMessage.isEmpty ? nil : lastMessage }
     /// The session's `model` config option (`config_option_update`); "auto" when kiro chooses.
     public private(set) var reportedModel: String?
@@ -290,7 +294,12 @@ public final class KiroStreamParser: HarnessStreamParser {
         case "runFinished":
             let data = obj["data"] as? [String: Any] ?? [:]
             let events = flush()
-            if let final = (data["finalText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !final.isEmpty { lastMessage = final }
+            let reply = replySinceLastTool.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !reply.isEmpty {
+                lastMessage = reply
+            } else if let final = (data["finalText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !final.isEmpty {
+                lastMessage = final
+            }
             let status = data["status"] as? String ?? "success"
             guard status != "success" else { return events }
             let reason = StreamText.errorText((data["error"] as? String) ?? (data["stopReason"] as? String) ?? status)
@@ -305,6 +314,7 @@ public final class KiroStreamParser: HarnessStreamParser {
             thinking = false
             guard let chunk = Self.text(of: update["content"]) else { return [] }
             text += chunk
+            replySinceLastTool += chunk
             return drainCompleteParagraphs()
         case "agent_thought_chunk":
             guard !thinking else { return [] }
@@ -312,6 +322,7 @@ public final class KiroStreamParser: HarnessStreamParser {
             return flush() + [.status("Thinking…")]
         case "tool_call":
             thinking = false
+            replySinceLastTool = ""
             let id = update["toolCallId"] as? String ?? UUID().uuidString
             guard announcedTools.insert(id).inserted else { return [] }
             return flush() + [toolEvent(update)]

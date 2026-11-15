@@ -1115,6 +1115,15 @@ extension SelfTests {
             try expectEqual(acp.parse(line: #"{"type":"runFinished","data":{"status":"error","error":"model unavailable"}}"#),
                             [.status("Kiro CLI stopped: model unavailable")])
             try expectEqual(acp.lastError, "model unavailable")
+            // The summary is the closing reply, not every message of the turn (finalText) run together.
+            let turn = KiroStreamParser(workspaceRoot: Recorded.workspace)
+            for line in [
+                #"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Too dark. Let me look."}}}}"#,
+                #"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"tool_call","toolCallId":"t9","title":"Read File","rawInput":{"path":"x.png"}}}}"#,
+                #"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I built the scene."}}}}"#,
+                #"{"type":"runFinished","data":{"status":"success","finalText":"Too dark. Let me look.\nI built the scene."}}"#,
+            ] { _ = turn.parse(line: line) }
+            try expectEqual(turn.finalMessage, "I built the scene.")
         },
         TestCase(name: "core.ai.parsers.plain") {
             // kiro-cli text mode / custom harnesses (synthetic: the smoke run used stream-json).
