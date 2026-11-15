@@ -863,6 +863,60 @@ extension SelfTests {
                 handle.cancel()   // after the end: harmless
             }
         },
+        TestCase(name: "core.ai.session.reported-model") {
+            try CoreSandbox.with("session-model") { sb in
+                // A fake `claude` speaking stream-json: the model it reports is what history records.
+                let script = sb.root.appendingPathComponent("agents/claude")
+                try sb.write("""
+                #!/bin/sh
+                cat > /dev/null
+                echo '{"type":"system","subtype":"init","model":"claude-test-9-9"}'
+                printf '// v2\\n' > scene/scene.js
+                echo '{"type":"result","subtype":"success","is_error":false,"result":"Done."}'
+
+                """, to: script)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+                let (ai, _) = try sessionFixture(sb, agent: "true")
+                let claude = AIHarness(kind: .claude, name: "Fake Claude", executable: script.path)
+                let handle = try ai.start(.create(prompt: "x"), harness: claude, model: "opus")
+                let events = try collect(handle)
+                let scene = AIWorkspace(root: handle.workspace).scene
+                try expectEqual(events.last, .finished(package: scene))
+                try expect(events.contains(.status("Claude Code started (claude-test-9-9)")))
+                let entry = SceneHistory.entries(in: scene).first
+                try expectEqual(entry?.model, "claude-test-9-9")
+                try expectEqual(entry?.harness, "claude")
+                try expectEqual(entry?.summary, "Done.")
+            }
+        },
+        TestCase(name: "core.ai.session.renderer-first") {
+            // With the real checker, the session makes sure a render server listens before the agent
+            // starts, so the agent's `livepaper` never has to launch LivePaperRenderd itself.
+            try CoreSandbox.with("session-renderer", extraEnv: ["LIVEPAPER_NO_SPAWN": "1"]) { sb in
+                let socket = URL(fileURLWithPath: "/tmp/lp-test-\(UUID().uuidString.prefix(8)).sock")
+                let marker = sb.root.appendingPathComponent("probed")
+                let listener = try LineSocket.listen(path: socket.path)
+                defer { close(listener); unlink(socket.path) }
+                _ = fcntl(listener, F_SETFL, fcntl(listener, F_GETFL) & ~O_NONBLOCK)   // block in accept()
+                Thread {
+                    while true {
+                        let fd = accept(listener, nil, nil)
+                        if fd < 0 { return }
+                        FileManager.default.createFile(atPath: marker.path, contents: Data())
+                        close(fd)
+                    }
+                }.start()
+                let checker = SceneChecker(render: RenderClient(socket: socket))
+                let (ai, harness) = try sessionFixture(sb, checker: checker, agent: """
+                for i in 1 2 3 4 5 6 7 8 9 10; do [ -f '\(marker.path)' ] && break; sleep 0.2; done
+                [ -f '\(marker.path)' ] && echo 'renderer was probed first'
+                true
+                """)
+                let events = try collect(try ai.start(.create(prompt: "x"), harness: harness, model: nil))
+                try expect(events.contains(.assistantText("renderer was probed first")), "\(events)")
+                try expectEqual(events.last, .failed("Fake agent finished without changing the scene."))
+            }
+        },
     ] + coreParsers }
 }
 
@@ -975,6 +1029,7 @@ extension SelfTests {
                 .toolUse(name: "Read", detail: "AGENTS.md"), .toolUse(name: "Edit", detail: "scene/scene.js"),
                 .toolUse(name: "Bash", detail: "livepaper check scene"), .assistantText(final)])
             try expectEqual(parser.finalMessage, final)
+            try expectEqual(parser.reportedModel, "claude-haiku-5-5")
             // Fallbacks: plain text passes through, errors are reported, unknown events ignored.
             try expectEqual(parser.parse(line: "\u{1B}[33mWarning: settings file ignored\u{1B}[0m"), [.assistantText("Warning: settings file ignored")])
             try expectEqual(parser.parse(line: "{not json"), [.assistantText("{not json")])
@@ -993,6 +1048,7 @@ extension SelfTests {
                 .toolUse(name: "shell", detail: "livepaper check scene"),
                 .assistantText("Replaced `#000000` with `#102040`; `livepaper check scene` passed.")])
             try expectEqual(parser.finalMessage, "Replaced `#000000` with `#102040`; `livepaper check scene` passed.")
+            try expectEqual(parser.reportedModel, nil)   // codex --json doesn't say
             try expectEqual(parser.parse(line: #"{"type":"turn.failed","error":{"message":"rate limited"}}"#), [.status("Codex stopped: rate limited")])
             // The pre-0.5 event format.
             try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"exec_command_begin","command":["bash","-lc","ls scene"]}}"#),
@@ -1010,6 +1066,13 @@ extension SelfTests {
                 .toolUse(name: "Run LivePaper scene check once", detail: "livepaper check scene"),
                 .assistantText(final)])
             try expectEqual(parser.finalMessage, final)
+            try expectEqual(parser.reportedModel, nil)
+            // The session's model option (kiro-cli 3.3 sends it before the first turn, then again).
+            let option = #"{"type":"sessionUpdate","data":{"sessionId":"s","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"mode","currentValue":"vibe"},{"id":"model","category":"model","currentValue":"MODEL"}]}}}"#
+            try expectEqual(parser.parse(line: option.replacingOccurrences(of: "MODEL", with: "auto")), [])
+            try expectEqual(parser.reportedModel, "auto")
+            try expectEqual(parser.parse(line: option.replacingOccurrences(of: "MODEL", with: "claude-opus-5.5")), [])
+            try expectEqual(parser.reportedModel, "claude-opus-5.5")
             // Bare ACP notifications; text is emitted per paragraph.
             let acp = KiroStreamParser(workspaceRoot: Recorded.workspace)
             try expectEqual(acp.parse(line: #"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"First.\n\nSecond"}}}}"#),

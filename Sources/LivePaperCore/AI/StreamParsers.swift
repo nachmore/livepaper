@@ -12,6 +12,13 @@ public protocol HarnessStreamParser: AnyObject {
     func finish() -> [AISessionEvent]
     /// The agent's final message, when the format reports one (used as the history summary).
     var finalMessage: String? { get }
+    /// The model the harness says it is running (e.g. Claude Code's `init` event), when the format
+    /// reports one. Recorded in the scene's history, so it is right even when no model was chosen.
+    var reportedModel: String? { get }
+}
+
+extension HarnessStreamParser {
+    public var reportedModel: String? { nil }
 }
 
 // MARK: - Shared helpers
@@ -85,6 +92,7 @@ enum StreamText {
 public final class ClaudeStreamParser: HarnessStreamParser {
     private let root: URL
     public private(set) var finalMessage: String?
+    public private(set) var reportedModel: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -92,7 +100,8 @@ public final class ClaudeStreamParser: HarnessStreamParser {
         switch obj["type"] as? String {
         case "system":
             guard obj["subtype"] as? String == "init" else { return [] }
-            let model = (obj["model"] as? String).map { " (\($0))" } ?? ""
+            reportedModel = (obj["model"] as? String)?.trimmingCharacters(in: .whitespaces).nilIfEmpty
+            let model = reportedModel.map { " (\($0))" } ?? ""
             return [.status("Claude Code started\(model)")]
         case "assistant":
             let content = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
@@ -230,6 +239,8 @@ public final class KiroStreamParser: HarnessStreamParser {
     private var announcedTools = Set<String>()
     private var lastMessage = ""
     public var finalMessage: String? { lastMessage.isEmpty ? nil : lastMessage }
+    /// The session's `model` config option (`config_option_update`); "auto" when kiro chooses.
+    public private(set) var reportedModel: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -264,6 +275,13 @@ public final class KiroStreamParser: HarnessStreamParser {
             let id = update["toolCallId"] as? String ?? UUID().uuidString
             guard announcedTools.insert(id).inserted else { return [] }
             return flush() + [toolEvent(update)]
+        case "config_option_update":
+            let options = update["configOptions"] as? [[String: Any]] ?? []
+            if let model = options.first(where: { $0["id"] as? String == "model" })?["currentValue"] as? String,
+               let value = model.trimmingCharacters(in: .whitespaces).nilIfEmpty {
+                reportedModel = value
+            }
+            return []
         case "tool_call_update":
             // Some agents only fill in the title/input in a later update; announce once.
             guard let id = update["toolCallId"] as? String, !announcedTools.contains(id),

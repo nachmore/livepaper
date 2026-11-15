@@ -29,6 +29,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         var searchPath: () -> [String]
         var extraArguments: [String]
         var timeout: TimeInterval
+        /// Makes sure the render server runs before the harness starts, so the agent's `livepaper`
+        /// calls find it instead of starting LivePaperRenderd from inside the agent's process tree
+        /// (where a sandbox such as Codex's would also confine it). Failures are left to the check.
+        var prepareRenderer: () -> Void = {}
     }
 
     private enum StopReason { case cancelled, timedOut }
@@ -104,6 +108,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
             finish(.failed(error.localizedDescription)); return
         }
         sceneBefore = try? Data(contentsOf: sceneScript)
+        deps.prepareRenderer()
         parser = adapter.makeParser(workspaceRoot: ws.root)
         stdoutLog = Self.openLog(ws.stdoutLog)
         stderrLog = Self.openLog(ws.stderrLog)
@@ -248,7 +253,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         try m.write(package: ws.scene)
         let summary = parser?.finalMessage ?? (try? String(contentsOf: ws.lastMessageFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        try SceneHistory.append(SceneHistoryEntry(date: now, action: action, harness: harness.kind.rawValue, model: model,
+        // What the harness reported running beats what was asked for ("opus" → the full model id),
+        // and covers sessions that used the harness's own default.
+        let usedModel = parser?.reportedModel ?? model
+        try SceneHistory.append(SceneHistoryEntry(date: now, action: action, harness: harness.kind.rawValue, model: usedModel,
                                                   prompt: prompt, summary: summary), to: ws.scene)
     }
 
