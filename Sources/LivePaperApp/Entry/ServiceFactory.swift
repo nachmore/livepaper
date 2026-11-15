@@ -26,11 +26,13 @@ enum ServiceFactory {
         if !mock {
             // Constructing the live services is cheap and writes nothing (LivePaperServices.live()).
             let cache = FileManager.default.temporaryDirectory.appendingPathComponent("LivePaperPreviews")
-            return (LivePaperServices.live(), environment(mock: false, defaults: UserDefaults.standard, cache: cache))
+            return (LivePaperServices.live(), environment(mock: false, defaults: UserDefaults.standard, cache: cache,
+                                                          diskWatchRoot: LPPaths.supportRoot))
         }
         let root = MockServices.temporaryRoot()
         redirectPaths(into: root)
-        let env = environment(mock: true, defaults: InMemoryPreferences(), cache: root.appendingPathComponent("Previews"))
+        // The mock library and playlist settings live directly under `root` (same layout as the support directory).
+        let env = environment(mock: true, defaults: InMemoryPreferences(), cache: root.appendingPathComponent("Previews"), diskWatchRoot: root)
         return (mockServices(root: root, pace: pace), env)
     }
 
@@ -58,7 +60,7 @@ enum ServiceFactory {
     }
 
     @MainActor
-    static func environment(mock: Bool, defaults: PreferenceStore, cache: URL) -> AppEnvironment {
+    static func environment(mock: Bool, defaults: PreferenceStore, cache: URL, diskWatchRoot: URL? = nil) -> AppEnvironment {
         let bundle = Bundle.main
         let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0-dev"
         let appPath = (!mock && bundle.bundleURL.pathExtension == "app") ? bundle.bundleURL.path : nil
@@ -71,7 +73,8 @@ enum ServiceFactory {
         return AppEnvironment(isMock: mock, defaults: defaults, stateURL: stateURL, saveState: { try $0.save(to: stateURL) },
                               helperLock: helperLock, startScreenSaver: startScreenSaver, previewCacheDirectory: cache,
                               appVersion: version, appBundlePath: appPath,
-                              openLockScreenSettings: mock ? {} : { SystemActions.openLockScreenSettings() })
+                              openLockScreenSettings: mock ? {} : { SystemActions.openLockScreenSettings() },
+                              diskWatchRoot: diskWatchRoot)
     }
 }
 

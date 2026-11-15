@@ -507,6 +507,14 @@ Budgets (`CheckBudgets`):
     **Describe it** (prompt, agent + model picker) → live session view.
   * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a
     publish that left scenes out lists them with the reason (and a banner says so).
+* **Changes made elsewhere** (the CLI, Finder, an editor) show up without a relaunch:
+  `LibraryWatcher` watches the support directory with one FSEvents stream (`Workspaces/`, `Logs/`
+  and `backups/` excluded). Only `Library/<id>.lpscene` entries, their `scene.json`,
+  `thumbnail.jpg`, `history.jsonl` and `.check/report.json`, and `playlist-settings.json` count;
+  a burst becomes one refresh about 0.5 s after the last change (FSEvents latency 0.2 s + a 0.3 s
+  debounce, at most 2 s). Becoming active and opening the main window refresh too, as a safety
+  net. Refreshes are quiet: no loading state, unchanged data isn't reassigned (selection, scroll
+  position and an edited playlist draft stay put), and nothing runs while nothing changes.
 * *Settings* — Screen Saver (status, setup), Lock (**one** toggle "Use ⌃⌘Q and the lock key for
   LivePaper lock" + the optional extra shortcut recorder + helper status), Performance (profile),
   AI (default agent, per-agent model, time limit, custom command), About (+ Uninstall).

@@ -24,6 +24,8 @@ struct MainWindowView: View {
         }
         .background(WindowAccessor { DockIconPolicy.shared.mainWindowAppeared($0) })
         .refreshesInstallStatusOnActivation()
+        // Opening the window re-reads the library and playlist (a safety net next to the disk watcher).
+        .onAppear { Task { await model.refreshFromDisk() } }
         .frame(minWidth: 860, minHeight: 560)
     }
 }

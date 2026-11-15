@@ -90,6 +90,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             if let refusedAtLaunch { Self.present(refusedAtLaunch, model: model) }
         }
         if !model.environment.isMock { observeLockState(model) }
+        observeActivation(model)
+    }
+
+    /// The disk watcher (AppModel.startWatchingDisk) reports changes other processes make; becoming
+    /// active re-reads them anyway, as a cheap safety net.
+    private func observeActivation(_ model: AppModel) {
+        let center = NotificationCenter.default
+        observers.append((center, center.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { _ = Task { await model.refreshFromDisk() } }
+        }))
     }
 
     /// The helper's refusals (shown at once: the user just asked to lock) and the moment the user
@@ -151,6 +161,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         // Fallback for a quit that skipped applicationShouldTerminate (normally a no-op by now).
         for session in AppBootstrap.model.runningSessions { session.cancel() }
+        AppBootstrap.model.stopWatchingDisk()
+        for (center, observer) in observers { center.removeObserver(observer) }
+        observers.removeAll()
     }
 }
 
