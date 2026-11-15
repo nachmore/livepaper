@@ -14,7 +14,7 @@ motion is the share of the frame that visibly changes within 5 s and within 2 s,
 | Scene | | Made with (in order) | Frame time 1512×982@2 · 5120×1440@1 | Energy | Brightness (frame · clock) | Motion within 5 s · 2 s (16:9 / 5:4) |
 |---|---|---|---|---|---|---|
 | **Abyssal Lanterns** `abyssal-lanterns` | Translucent bioluminescent drifters — bells, fringed discs, frilly-armed and comb jellies — pulse and travel through the deep night ocean, through three depths of sinking marine snow, under swaying moonlight shafts and a rippling net of surface light, with drifting plankton haze, sparks blooming at the edges and passing waves of plankton light. | Claude Code (claude-opus-5-5) ×5 | 1.61 · 1.77 ms | 90 mW | 12–20 · 15–20 | 66 / 76 % · 48 / 62 %, 9 of 9 regions |
-| **Ink and Ember** `ink-and-ember` | A sumi-e mountain range at dusk on dark handmade paper: pines on the crag and ridge crests sway as gusts travel through them, mist veils drift and breathe at their own depths, dry-brush cloud wisps form and dissolve, a slow river shimmers with the seal-red sun's broken reflection, a lantern boat sheds embers and a small flock passes now and then. | Codex (openai.gpt-5.6-luna) ×2, Codex (openai.gpt-5.6-sol) ×2, Claude Code (claude-opus-5-5) ×3 | 0.82 · 0.74 ms | 69 mW | 45–48 · 29–34 | 69 / 67 % · 37 / 34 %, 9 of 9 |
+| **Ink and Ember** `ink-and-ember` | A sumi-e mountain range at dusk on dark handmade paper: pines on the crag and ridge crests sway as gusts travel through them, mist veils drift and breathe at their own depths, dry-brush cloud wisps form and dissolve, a slow river shimmers with the seal-red sun's broken reflection, a lantern boat sheds embers and a small flock passes now and then. | Codex (openai.gpt-5.6-luna) ×2, Codex (openai.gpt-5.6-sol) ×2, Claude Code (claude-opus-5-5) ×4 | 0.81 · 0.73 ms | 125 mW⁴ | 45–48 · 29–34 | 69 / 67 % · 37 / 34 %, 9 of 9 |
 | **Liquid Glass** `liquid-glass` | Deep midnight, violet and teal colour fields flowing behind a thick pane of curved glass, with dark wisps folding through the top band, an undulating ember ribbon trailed by warm motes, glints sliding along the glass edges and morphing pool caustics (WebGL). | Kiro CLI (claude-opus-5.5) ×2, Claude Code (claude-opus-5-5) ×2 | 1.79 · 2.36 ms | 30 mW¹ | 42–52 · 6–20 | 86 / 82 % · 50 / 49 %, 9 of 9 |
 | **Rain on the River** `rain-on-the-river` | A night skyline of original towers in soft rain across a wide river: mist drifting through the towers, windows changing, slow rooftop lights and a sweeping beacon, traffic on the lit cable-stayed bridge and the far shore, and a lit barge trailing a fading wake through long, wavering reflections. | Claude Code (claude-opus-5-5), Kiro CLI (claude-opus-5.5), Claude Code, Codex (openai.gpt-6.1-sol) ×2 | 2.78 · 3.42 ms | 64 mW | 22–24 · 9–16 | 100 / 100 % · 100 / 100 %², 9 of 9 |
 | **Ringed Giant** `ringed-giant` | A banded gas giant turning once every five minutes, its zonal winds shearing the bands and carrying storms into the night side, the whole ringed system nodding gently under a distant star; glints orbit the rings, three moons pass in front of and behind rings and globe, and parallax stars, fine dust, far nebula filaments and the odd faint meteor keep deep space alive. | Codex (openai.gpt-5.6-luna) ×2, Codex (openai.gpt-5.6-sol), Claude Code (claude-opus-5-5) ×3, Codex (openai.gpt-6.1-sol) | 1.32 · 1.67 ms | 56 mW³ | 21–24 · 3–5 | 100 / 99 % · 99 / 98 %, 9 of 9 |
@@ -27,7 +27,9 @@ GPU, which the CPU-energy figure doesn't include. ² The falling rain alone chan
 city underneath (mist, windows, lights, bridge traffic, the barge) was brought to life in the
 November 2026 rounds by comparing stills a few seconds apart. ³ The planet's surface is remapped in
 JavaScript at 8 Hz and cross-faded every frame; at full quality on power (60 fps, scale 1) it draws
-about 170–200 mW, the most of the five (the others: 70–185 mW).
+about 170–200 mW, the most of the five (the others: 70–185 mW). ⁴ Measured while the Mac was busy
+with other work: in interleaved `livepaper live` runs the version before the time-continuity fix
+(69 mW when it was recorded) measured the same, 121–133 mW against 120–138 mW.
 
 ### The motion pass (November 2026)
 
@@ -40,24 +42,39 @@ alive everywhere" brief — Claude Code for most, Codex (gpt-6.1-sol, `model_rea
 |---|---|---|
 | Ringed Giant | 7 / 9 %, 2 / 1 of 9 (fails) | 100 / 99 %, 9 / 9 |
 | Ink and Ember | 2 / 2 %, 0 / 0 of 9 (fails) | 69 / 67 %, 9 / 9 |
-| Abyssal Lanterns | 30 / 40 %, 6 / 6 of 9 | 66 / 76 %, 9 / 9 (and battery energy from ~135–155 to ~60–90 mW) |
+| Abyssal Lanterns | 30 / 41 %, 6 / 6 of 9 | 66 / 76 %, 9 / 9 (and battery energy from ~135–155 to ~60–90 mW) |
 | Liquid Glass | 47 / 45 %, 7 / 7 of 9 | 86 / 82 %, 9 / 9 |
 | Rain on the River | 100 / 100 %, 9 / 9 (rain only) | 100 / 100 %, 9 / 9 (city alive too) |
 
 ## Adding or updating a built-in scene
 
-1. Author it in a scratch library: `LIVEPAPER_HOME=$(mktemp -d) livepaper ai create "…" --harness …`
-   (or copy `Scenes/<id>.lpscene` into `$LIVEPAPER_HOME/Library/` to work on a built-in as your own
-   scene) and refine with `livepaper ai modify <id> "…"` until the stills in `.check/` are excellent
-   at 32:9, 16:10, 5:4, thumbnail size and t = 600, and the `motion` line shows the whole frame gently
-   alive (look at `.check/previews/motion-*.jpg`; stills a few seconds apart show *what* moves).
-2. On the library copy: `livepaper check <pkg> --power` (records `performance` in `scene.json`) and
+1. Author it in a scratch library. Do every step in one shell, which keeps the library (and its own
+   render server) for all the commands that follow:
+
+   ```sh
+   export LIVEPAPER_HOME=$(mktemp -d)
+   livepaper ai create "…" --harness …
+   # or, to work on a built-in as your own scene (mkdir first: cp would otherwise make the
+   # package itself the Library folder):
+   mkdir -p "$LIVEPAPER_HOME/Library" && cp -R Scenes/<id>.lpscene "$LIVEPAPER_HOME/Library/"
+   livepaper ai modify <id> "…"
+   ```
+
+   Refine with `livepaper ai modify` until the stills in `.check/` are excellent at 32:9, 16:10,
+   5:4, thumbnail size and t = 600, and the `motion` line shows the whole frame gently alive (look
+   at `.check/previews/motion-*.jpg`; stills a few seconds apart show *what* moves).
+2. On the library copy, `<pkg>` being `"$LIVEPAPER_HOME/Library/<id>.lpscene"`:
+   `livepaper check <pkg> --power` (records `performance` in `scene.json`) and
    `livepaper thumbnail <pkg> [--t <moment>]` (the app renders thumbnails only for the user's own
    scenes, so built-ins ship `thumbnail.jpg`). The energy reading is noisy while other work runs on
    the Mac: repeat `livepaper live <pkg>` two or three times and trust the median.
 3. Copy `scene.json`, `scene.js`, `thumbnail.jpg`, `history.jsonl` (and `assets/`, if any) into
-   `Scenes/<id>.lpscene/` — not `.check/` or `history/` — and list it here.
+   `Scenes/<id>.lpscene/` — not `.check/` or `history/` — and list it here. Then stop the scratch
+   library's render server with `livepaper server stop` and `unset LIVEPAPER_HOME`.
 4. `swift run LivePaperSelfTest scenes.` checks the packages: manifest, compile, recorded budgets,
-   thumbnail, provenance, no machine-specific paths, and that this page lists every scene.
-   `LIVEPAPER_SELFTEST_E2E=1 swift run LivePaperSelfTest runtime.e2e.motionBuiltins` prints their
-   motion numbers again (it uses or starts one render server).
+   thumbnail, provenance, no machine-specific paths, and that this page lists every scene. For Ink
+   and Ember it also follows the draw calls (in JavaScriptCore, no rendering) from t = 0 to 100 hours:
+   nothing may jump between frames — when a period wraps, say — and nothing may drift faster, slower
+   or backwards the longer the scene runs.
+   `LIVEPAPER_SELFTEST_E2E=1 swift run LivePaperSelfTest runtime.e2e.motionBuiltins` prints the
+   built-ins' motion numbers again (it uses or starts one render server).

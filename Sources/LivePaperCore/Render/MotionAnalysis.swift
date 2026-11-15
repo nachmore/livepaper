@@ -108,7 +108,7 @@ public struct MotionSummary: Codable, Sendable, Equatable {
 }
 
 /// Thresholds of the motion check (part of `CheckBudgets`), calibrated on the built-in scenes
-/// (docs/ARCHITECTURE.md §9): the two the user found too static measure 2–12 % within 5 s in 0–2
+/// (docs/ARCHITECTURE.md §9): the two the user found too static measure 2–9 % within 5 s in 0–2
 /// regions; the others 30–100 % in 6–9 regions. Real scenes' busy/flicker levels (90th percentile
 /// of tiles ≤ 3.4, falling rain included) stay far below their limits; strobing and fast pans hit 100 %.
 public struct MotionBudgets: Sendable, Equatable {

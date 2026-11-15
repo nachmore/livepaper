@@ -8,7 +8,11 @@
  */
 const U = LivePaper.util;
 const TAU = U.TAU;
+/* The sun crosses from left to right once per SUN_CYCLE seconds. Over the last SUN_FADE of the
+   cycle it sinks and fades into the haze, and over the first it rises and fades back in, so the
+   wrap back to the left happens while it (and its reflection) is invisible. It starts risen. */
 const SUN_CYCLE = 960;
+const SUN_FADE = 0.05;
 
 const RIDGE_SPECS = [
   {
@@ -121,10 +125,11 @@ LivePaper.scene({
   draw(lp) {
     const ctx = lp.ctx;
     const t = lp.env.reducedMotion ? lp.t * 0.25 : lp.t;
-    const phase = (t % SUN_CYCLE) / SUN_CYCLE;
+    const phase = (t / SUN_CYCLE + SUN_FADE) % 1;
+    const sunVis = U.smoothstep(0, SUN_FADE, phase) * (1 - U.smoothstep(1 - SUN_FADE, 1, phase));
     const arc = Math.sin(Math.PI * phase);
     const sunX = lp.w * (0.34 + 0.36 * phase);
-    const sunY = lp.h * (0.555 - 0.070 * arc);
+    const sunY = lp.h * (0.555 - 0.070 * arc + 0.025 * (1 - sunVis));
     const sunSize = lp.min * 0.235;
     const sp = lp.w / 1512;
     const ox = [];
@@ -135,9 +140,11 @@ LivePaper.scene({
     ctx.drawImage(paper.canvas, 0, 0, lp.w, lp.h);
     drawSkyMottle(ctx, lp, t);
     drawWisps(ctx, lp, t);
-    ctx.globalAlpha = 0.94;
-    ctx.drawImage(sun.canvas, sunX - sunSize * 0.5, sunY - sunSize * 0.5, sunSize, sunSize);
-    ctx.globalAlpha = 1;
+    if (sunVis > 0.002) {
+      ctx.globalAlpha = 0.94 * sunVis;
+      ctx.drawImage(sun.canvas, sunX - sunSize * 0.5, sunY - sunSize * 0.5, sunSize, sunSize);
+      ctx.globalAlpha = 1;
+    }
     drawBirds(ctx, lp, t);
 
     drawBlock(ctx, ridges[0], ox[0]);
@@ -154,7 +161,7 @@ LivePaper.scene({
     drawDrift(ctx, lp, mists[3], t);
     drawBlock(ctx, ridges[4], ox[4]);
     drawTreeList(ctx, ridgeTrees[4], t, ox[4]);
-    drawWater(ctx, lp, t, sunX, sunSize);
+    drawWater(ctx, lp, t, sunX, sunSize, sunVis);
     drawBoat(ctx, lp, t);
     drawDrift(ctx, lp, mists[4], t);
     ctx.drawImage(foreground.canvas, 0, 0, lp.w, lp.h);
@@ -1105,11 +1112,14 @@ function drawWisps(ctx, lp, t) {
     const life = wrap(t / c.cycle + c.phase, 1);
     const env = U.smoothstep(0.0, 0.32, life) * (1 - U.smoothstep(0.62, 1.0, life));
     if (env < 0.01) continue;
-    const grow = 0.86 + 0.20 * life;           // the stroke spreads as it forms and fades
+    const grow = 0.86 + 0.20 * life;           // the stroke spreads (about its centre) as it forms and fades
     const w = c.w * grow;
     const h = c.h * (0.9 + 0.25 * life);
-    const span = lp.w + w;
-    const x = wrap(c.off * span + t * c.speed * sp, span) - w;
+    // Wrap over a fixed length (the screen plus the widest stroke): a length that changed with t
+    // would bend the drift, slower and then backwards the longer the scene runs.
+    const wMax = c.w * 1.06;
+    const span = lp.w + wMax;
+    const x = wrap(c.off * span + t * c.speed * sp, span) - (wMax + w) * 0.5;
     // a slow rise and fall (a few px over ~20 s) so the horizontal bristles visibly drift
     const y = skyH * c.yq + Math.sin(t * TAU / (17 + i * 2.3) + i * 1.7) * lp.min * 0.007 - h * 0.5;
     let a = c.alpha * env;
@@ -1294,7 +1304,7 @@ function buildWater(lp, top) {
   return { canvas: L.canvas, w: W, h: H, top: top, edges: edges };
 }
 
-function drawWater(ctx, lp, t, sunX, sunSize) {
+function drawWater(ctx, lp, t, sunX, sunSize, sunVis) {
   const wt = water;
   const sp = lp.w / 1512;
   const N = wt.edges.length - 1;
@@ -1310,7 +1320,7 @@ function drawWater(ctx, lp, t, sunX, sunSize) {
     ctx.drawImage(wt.canvas, 0, y0, wt.w, hh, x - wt.w, wt.top + y0, wt.w, hh);
     ctx.drawImage(wt.canvas, 0, y0, wt.w, hh, x, wt.top + y0, wt.w, hh);
   }
-  // the sun's vermilion reflection, broken into shimmering brush strokes
+  // the sun's vermilion reflection, broken into shimmering brush strokes (gone while the sun is set)
   const n = 12;
   for (let j = 0; j < n; j++) {
     const q = (j + 0.5) / n;
@@ -1318,7 +1328,7 @@ function drawWater(ctx, lp, t, sunX, sunSize) {
     const w = sunSize * (0.40 - 0.16 * q) * (0.55 + 0.8 * U.noise1(j * 2.3 + t * 0.21));
     const h = Math.max(1.6, wt.h * (0.013 + 0.012 * q));
     const x = sunX + (U.noise1(j * 1.91 + t * 0.33 + 4) - 0.5) * sunSize * 0.32 * (0.4 + q);
-    const a = 0.85 * (1 - q * 0.5) * U.smoothstep(0.18, 0.68, U.noise1(j * 3.7 + t * 0.42 + 9));
+    const a = 0.85 * sunVis * (1 - q * 0.5) * U.smoothstep(0.18, 0.68, U.noise1(j * 3.7 + t * 0.42 + 9));
     if (a < 0.01) continue;
     ctx.globalAlpha = a;
     ctx.drawImage(sunDab, x - w * 0.5, y - h * 0.5, w, h);
