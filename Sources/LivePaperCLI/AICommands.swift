@@ -184,7 +184,7 @@ enum AICommands {
         case .create: item = try library.importPackage(at: package)
         case .modify(let id, _): item = try library.replaceContents(id: id, with: package)
         }
-        out.result(accepted: true, item: item)
+        if case .modify = request { out.result(accepted: true, item: item, replaced: true) } else { out.result(accepted: true, item: item) }
         return ExitCode.ok
     }
 }
@@ -258,7 +258,7 @@ final class SessionPrinter {
         if json { emit(["event": "note", "message": s]) } else { print(s) }
     }
 
-    func result(accepted: Bool, item: SceneItem?) {
+    func result(accepted: Bool, item: SceneItem?, replaced: Bool = false) {
         if json {
             var o: [String: Any] = ["event": accepted ? "accepted" : "declined"]
             if let item { o["id"] = item.id; o["name"] = item.manifest.name; o["path"] = item.packageURL.path }
@@ -266,7 +266,8 @@ final class SessionPrinter {
             return
         }
         guard accepted, let item else { return }
-        print("added \u{201C}\(item.manifest.name)\u{201D} (\(item.id)) → \(displayPath(item.packageURL))")
+        print("\(replaced ? "updated" : "added") \u{201C}\(item.manifest.name)\u{201D} (\(item.id)) → \(displayPath(item.packageURL))" +
+              (replaced ? " (previous version in its history/)" : ""))
         print("next: `livepaper publish` puts it in the screen saver")
     }
 

@@ -63,7 +63,7 @@ enum InstallCommands {
         // LivePaper itself
         let app = CLIEnvironment.appBundle
         if let app {
-            add("LivePaper", "app", .ok, "\(displayPath(app)) (\(CLIEnvironment.version.display))")
+            add("LivePaper", "app", .ok, "\(displayPath(app)) · \(CLIEnvironment.version.display)")
         } else {
             add("LivePaper", "app", .info, "development build (\(displayPath(CLIEnvironment.executable)))")
         }
