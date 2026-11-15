@@ -234,7 +234,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// - Throws: when the store was written but the change couldn't be confirmed or was rolled back.
     public func selectSaver() throws -> Bool {
         let title = "Select LivePaper as the screen saver"
-        if store.isSelectedEverywhere() {
+        // Nothing to change (also when it was picked by hand in System Settings). A selection of
+        // LivePaper.saver at another location still gets rewritten to the installed one.
+        if let document = try? store.read(), (try? document.planSelect(store.module, at: Date()))?.isEmpty == true {
             record(title, .skipped("already selected"))
             return true
         }

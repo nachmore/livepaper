@@ -923,6 +923,30 @@ extension SelfTests {
                 try expect(fx.mutatingCommands.isEmpty, "\(fx.mutatingCommands)")
             }
         },
+        TestCase(name: "wallpaper.install.select-moved") {
+            // Picked by hand in System Settings: nothing to do. At an old location: rewritten, and
+            // LivePaper is never recorded as the choice to restore.
+            try StoreSandbox.with("install-moved", store: try StoreFixture.data(saver: StoreFixture.livePaperPath)) { sb in
+                let fx = InstallFixture(sb)
+                let service = fx.service()
+                try check(try service.selectSaver())
+                try expectEqual(service.transcript.last, InstallStep(title: selectTitle, outcome: .done))
+                try expectEqual(fx.system.restarts, 1)
+                let moved = try sb.document()
+                try expectEqual(moved.selection(of: sb.module).livePaper, StoreFixture.explicitPaths)
+                try expect(StoreFixture.explicitPaths.allSatisfy { moved.idleSlot(at: $0).map(sb.module.isCurrentChoice) == true })
+                try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots, [])
+                try check(try service.selectSaver())
+                try expectEqual(service.transcript.last, InstallStep(title: selectTitle, outcome: .skipped("already selected")))
+                // Uninstall has no original to put back for SystemDefault: the user's own choice stays;
+                // the sub-slots fall back to it.
+                let steps = fx.service().performUninstall(removeLibrary: false)
+                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .done)
+                let after = try sb.document()
+                try expect(sb.module.isChosen(in: after.idleSlot(at: .systemDefault)!))
+                try expectEqual(after.selection(of: sb.module).livePaper, [.systemDefault])
+            }
+        },
         TestCase(name: "wallpaper.install.select-refused") {
             try StoreSandbox.with("install-refused") { sb in
                 let fx = InstallFixture(sb)

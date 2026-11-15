@@ -1119,7 +1119,7 @@ extension SelfTests {
                 try expect(!selectedNow)
                 try expectEqual(try Data(contentsOf: sb.store), before)
                 try expect(!exists(sb.installPaths().wallpaperStoreBackup))
-                try writeStore(sb.store, selected: true)
+                try writeStore(sb.store, selected: true, livePaper: sb.saver.path)
                 let detected = try service.selectSaver()
                 try expect(detected)
                 try expect(system.mutatingCommands.isEmpty)
@@ -1302,10 +1302,13 @@ extension SelfTests {
 
 /// A realistic generated store (StoreFixture, WallpaperStoreTests.swift): LivePaper chosen for
 /// every display and Space, or another saver everywhere.
-/// - Parameter other: the other saver's path (restore puts it back only if that bundle exists).
-private func writeStore(_ url: URL, selected: Bool, other: String = StoreFixture.otherSaverPath) throws {
+/// - Parameters:
+///   - livePaper: where the selected LivePaper.saver is (selectSaver rewrites other locations).
+///   - other: the other saver's path (restore puts it back only if that bundle exists).
+private func writeStore(_ url: URL, selected: Bool, livePaper: String = StoreFixture.livePaperPath,
+                        other: String = StoreFixture.otherSaverPath) throws {
     try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-    try StoreFixture.data(saver: selected ? StoreFixture.livePaperPath : other).write(to: url)
+    try StoreFixture.data(saver: selected ? livePaper : other).write(to: url)
 }
 
 // MARK: - Smoke test with a real harness (opt-in)
