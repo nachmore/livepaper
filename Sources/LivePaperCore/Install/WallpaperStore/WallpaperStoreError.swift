@@ -28,19 +28,27 @@ public enum WallpaperStoreError: Error, LocalizedError, Sendable, Equatable {
     case storeBusy
     /// The `.saver` must exist before the store points at it.
     case saverMissing(String)
+    /// Undoing the selection would leave this root Idle slot (SystemDefault / AllSpacesAndDisplays)
+    /// pointing at LivePaper: there is no recorded original, no usable pre-LivePaper copy and no
+    /// built-in screen saver to put there instead.
+    case noPreviousChoice(String)
 
     // After the store was written.
 
     case agentRestartFailed(String)
     /// The change didn't survive WallpaperAgent's restart, even after retrying.
     case notConfirmed(String)
-    /// The restarted agent's store had different Desktop choices; LivePaper put the previous store back.
+    /// The restarted agent's store had different Desktop choices; LivePaper put the previous store
+    /// back and confirmed that the restarted agent kept it.
     case rolledBack(String)
+    /// As `rolledBack`, but putting the previous store back couldn't be confirmed: the Desktop
+    /// choices may have been reset. The message names the saved copy of the previous store.
+    case rollbackFailed(String)
 
     /// True when the store on disk may differ from before the call.
     public var wroteStore: Bool {
         switch self {
-        case .agentRestartFailed, .notConfirmed, .rolledBack: return true
+        case .agentRestartFailed, .notConfirmed, .rolledBack, .rollbackFailed: return true
         default: return false
         }
     }
@@ -52,7 +60,7 @@ public enum WallpaperStoreError: Error, LocalizedError, Sendable, Equatable {
         case .sessionLocked, .sessionUnknown, .conflictingProcess, .storeBusy, .agentRestartFailed, .notConfirmed, .rolledBack:
             return true
         case .unavailable, .moduleForcedByMDM, .wallpaperChangesDisabledByMDM, .unsupportedStoreVersion, .storeMissing,
-             .undecodable, .unsupportedShape, .verificationFailed, .saverMissing:
+             .undecodable, .unsupportedShape, .verificationFailed, .saverMissing, .noPreviousChoice, .rollbackFailed:
             return false
         }
     }
@@ -72,9 +80,11 @@ public enum WallpaperStoreError: Error, LocalizedError, Sendable, Equatable {
         case .verificationFailed(let why): return "the edited wallpaper settings failed verification (\(why))"
         case .storeBusy: return "macOS kept updating the wallpaper settings; try again in a moment"
         case .saverMissing(let path): return "the LivePaper screen saver isn't installed (\(path))"
+        case .noPreviousChoice(let path): return "LivePaper has no earlier screen saver to put back for \(path)"
         case .agentRestartFailed(let why): return "couldn't restart WallpaperAgent (\(why))"
         case .notConfirmed(let why): return "macOS didn't keep the change (\(why))"
         case .rolledBack(let why): return "macOS changed other wallpaper settings, so LivePaper put the previous settings back (\(why))"
+        case .rollbackFailed(let why): return "macOS changed other wallpaper settings and LivePaper couldn't confirm that the previous settings are back (\(why))"
         }
     }
 }

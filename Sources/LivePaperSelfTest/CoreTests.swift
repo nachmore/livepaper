@@ -179,16 +179,23 @@ private final class FakeLoginItem: LoginItemRegistering, @unchecked Sendable {
     var isAvailable: Bool
     var current: LoginItemStatus = .notRegistered
     var registerError: Error?
+    /// Like SMAppService: register() of an already registered item throws kSMErrorAlreadyRegistered.
+    var refusesWhenRegistered = false
+    /// What registering does to launchd (loads the job).
+    var onRegister: (() -> Void)?
     var registerCalls = 0, unregisterCalls = 0
     init(available: Bool) { isAvailable = available }
     var status: LoginItemStatus { current }
     func register() throws -> LoginItemStatus {
         registerCalls += 1
+        if refusesWhenRegistered && current == .enabled { throw Self.smError(12) }
         if let registerError { throw registerError }
         current = .enabled
+        onRegister?()
         return current
     }
     func unregister() throws { unregisterCalls += 1; current = .notRegistered }
+    static func smError(_ code: Int) -> NSError { NSError(domain: "SMAppServiceErrorDomain", code: code) }
 }
 
 private final class FakePreferences: PreferencesAccessing, @unchecked Sendable {
@@ -201,22 +208,36 @@ private final class FakePreferences: PreferencesAccessing, @unchecked Sendable {
     }
 }
 
-/// launchctl/sysadminctl stand-in whose helper "loaded" state follows bootstrap/bootout.
+/// launchctl/sysadminctl stand-in: which jobs (by label) are loaded follows bootstrap/bootout; a
+/// loaded job in `stopped` exited (the helper was quit) until `kickstart` starts it.
 private final class FakeSystem: @unchecked Sendable {
-    var helperLoaded = false
+    var loaded: Set<String> = []
+    var stopped: Set<String> = []
+    /// The login item's job is loaded (and running unless stopped).
+    var helperLoaded: Bool {
+        get { !loaded.isEmpty }
+        set { loaded = newValue ? [LPPaths.helperLabel] : [] }
+    }
     var screenLock = "2026-11-14 18:32:04.037 sysadminctl[8213:4276522] screenLock delay is immediate\n"
+    static let fallbackLabel = "\(LPPaths.helperLabel).fallback"
     lazy var runner = RecordingCommandRunner { [unowned self] exe, args in
+        let label = args.dropFirst().first.map { ($0 as NSString).lastPathComponent } ?? ""
         switch (exe, args.first) {
         case ("/usr/sbin/sysadminctl", _):
             return CommandResult(status: 0, stderr: screenLock)
         case ("/bin/launchctl", "print"):
-            return helperLoaded ? CommandResult(status: 0, stdout: "gui/501/\(LPPaths.helperLabel) = {\n\tstate = running\n\tpid = 4242\n}\n")
-                                : CommandResult(status: 113, stdout: "Could not find service \"\(LPPaths.helperLabel)\" in domain for user gui: 501\n")
+            return loaded.contains(label)
+                ? CommandResult(status: 0, stdout: "gui/501/\(label) = {\n\tstate = \(stopped.contains(label) ? "not running" : "running")\n}\n")
+                : CommandResult(status: 113, stdout: "Could not find service \"\(label)\" in domain for user gui: 501\n")
         case ("/bin/launchctl", "bootstrap"):
-            helperLoaded = true; return nil
+            let plist = args.count > 2 ? (NSDictionary(contentsOfFile: args[2])?["Label"] as? String) : nil
+            loaded.insert(plist ?? "?"); stopped.remove(plist ?? "?"); return nil
         case ("/bin/launchctl", "bootout"):
-            defer { helperLoaded = false }
-            return helperLoaded ? nil : CommandResult(status: 3, stderr: "Boot-out failed: 3: No such process\n")
+            defer { loaded.remove(label); stopped.remove(label) }
+            return loaded.contains(label) ? nil : CommandResult(status: 3, stderr: "Boot-out failed: 3: No such process\n")
+        case ("/bin/launchctl", "kickstart"):
+            guard loaded.contains(label) else { return CommandResult(status: 113, stderr: "Could not find service\n") }
+            stopped.remove(label); return nil
         default:
             return nil
         }
@@ -1253,46 +1274,120 @@ extension SelfTests {
             try CoreSandbox.with("helper") { sb in
                 let paths = sb.installPaths()
                 let system = FakeSystem()
+                let fallback = "gui/501/\(FakeSystem.fallbackLabel)"
                 let unbundled = InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
                                                preferences: FakePreferences(), uid: 501)
                 do { try unbundled.registerHelper(); throw TestFailure(description: "helper missing") } catch InstallError.helperMissing {}
                 try sb.writeExecutable("#!/bin/sh", to: paths.helperExecutable)
 
+                // The fallback has its own label: a plist with the login item's label would share its record.
                 try unbundled.registerHelper()
+                try expectEqual(paths.fallbackAgentPlist.lastPathComponent, "\(FakeSystem.fallbackLabel).plist")
                 let plist = try PropertyListSerialization.propertyList(from: Data(contentsOf: paths.fallbackAgentPlist), format: nil) as? [String: Any]
-                try expectEqual(plist?["Label"] as? String, LPPaths.helperLabel)
+                try expectEqual(plist?["Label"] as? String, FakeSystem.fallbackLabel)
                 try expectEqual(plist?["ProgramArguments"] as? [String], [paths.helperExecutable.path])
                 try expectEqual(plist?["LimitLoadToSessionType"] as? String, "Aqua")
                 try expectEqual(system.mutatingCommands, [
-                    ["/bin/launchctl", "bootout", "gui/501/\(LPPaths.helperLabel)"],
+                    ["/bin/launchctl", "bootout", fallback],
                     ["/bin/launchctl", "bootstrap", "gui/501", paths.fallbackAgentPlist.path]])
-                try expect(system.helperLoaded)
+                try expectEqual(system.loaded, [FakeSystem.fallbackLabel])
+                try expect(unbundled.status().helperRunning, "status() sees the fallback job")
 
                 try unbundled.unregisterHelper()
                 try expect(!exists(paths.fallbackAgentPlist) && !system.helperLoaded)
                 try unbundled.unregisterHelper()   // idempotent
                 try expectEqual(Array(unbundled.transcript.suffix(2)), [
-                    InstallStep(title: "Stop the helper (gui/501/\(LPPaths.helperLabel))", outcome: .skipped("not loaded")),
+                    InstallStep(title: "Stop the helper", outcome: .skipped("not loaded")),
                     InstallStep(title: "Remove the helper LaunchAgent plist", outcome: .skipped("not present"))])
 
-                // Bundled app: SMAppService, and a stale fallback agent is removed.
+                // Bundled app: SMAppService, and a fallback left by a development build is removed.
                 try unbundled.registerHelper()
                 let item = FakeLoginItem(available: true)
+                item.onRegister = { system.loaded.insert(LPPaths.helperLabel) }
                 let bundled = InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: item, preferences: FakePreferences(), uid: 501)
                 try expectEqual(unbundled.helperLoginItemStatus, .notRegistered)
                 try bundled.registerHelper()
                 try expectEqual(item.registerCalls, 1)
                 try expectEqual(bundled.helperLoginItemStatus, .enabled)
-                try expect(!exists(paths.fallbackAgentPlist) && !system.helperLoaded, "fallback agent unloaded and removed")
-                try expectEqual(system.mutatingCommands.last, ["/bin/launchctl", "bootout", "gui/501/\(LPPaths.helperLabel)"])
+                try expect(!exists(paths.fallbackAgentPlist), "fallback agent removed")
+                try expectEqual(system.loaded, [LPPaths.helperLabel])
                 try bundled.unregisterHelper()
                 try expectEqual(item.unregisterCalls, 1)
-                // SMAppService refusing → LaunchAgent fallback.
-                let refusing = FakeLoginItem(available: true)
-                refusing.registerError = NSError(domain: "SMAppServiceErrorDomain", code: 1)
-                try InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: refusing, preferences: FakePreferences(), uid: 501)
-                    .registerHelper()
-                try expect(exists(paths.fallbackAgentPlist) && system.helperLoaded)
+                try expect(!system.helperLoaded)
+                // An earlier version's fallback (with the login item's label) is migrated away.
+                try sb.write("<plist/>", to: paths.legacyAgentPlist)
+                system.loaded = [LPPaths.helperLabel]
+                try unbundled.registerHelper()
+                try expect(!exists(paths.legacyAgentPlist) && exists(paths.fallbackAgentPlist))
+                try expectEqual(system.loaded, [FakeSystem.fallbackLabel])
+                try unbundled.unregisterHelper()
+            }
+        },
+        TestCase(name: "core.install.helper-restart") {
+            // "Start Helper" after the helper was quit: the login item is still enabled and loaded, its
+            // job just isn't running (KeepAlive doesn't restart a clean exit).
+            try CoreSandbox.with("helper-restart") { sb in
+                let paths = sb.installPaths()
+                try sb.writeExecutable("#!/bin/sh", to: paths.helperExecutable)
+                let system = FakeSystem()
+                let service = "gui/501/\(LPPaths.helperLabel)"
+                let make = { (item: FakeLoginItem) in
+                    InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: item, preferences: FakePreferences(), uid: 501)
+                }
+                let item = FakeLoginItem(available: true)
+                item.current = .enabled
+                item.refusesWhenRegistered = true
+                system.loaded = [LPPaths.helperLabel]; system.stopped = [LPPaths.helperLabel]
+                try make(item).registerHelper()
+                try expect(system.stopped.isEmpty, "the helper runs again")
+                try expectEqual(system.mutatingCommands, [["/bin/launchctl", "kickstart", service]])
+                try expect(item.registerCalls == 0 && !exists(paths.fallbackAgentPlist), "no second registration, no fallback agent")
+                try make(item).registerHelper()   // already running: nothing to do
+                try expectEqual(system.mutatingCommands.count, 1)
+
+                // Enabled but not loaded (booted out): registered again, which loads it.
+                system.loaded = []
+                item.refusesWhenRegistered = false
+                item.onRegister = { system.loaded.insert(LPPaths.helperLabel) }
+                try make(item).registerHelper()
+                try expect(item.unregisterCalls == 1 && item.registerCalls == 1 && system.helperLoaded)
+
+                // SMAppService says "already registered" although the status didn't show it yet.
+                item.current = .notRegistered
+                item.registerError = FakeLoginItem.smError(12)
+                system.stopped = [LPPaths.helperLabel]
+                try make(item).registerHelper()
+                try expect(system.stopped.isEmpty && !exists(paths.fallbackAgentPlist), "kickstarted, no fallback")
+
+                // Switched off by the user in Login Items: say so; no fallback behind their back.
+                item.registerError = FakeLoginItem.smError(11)
+                do { try make(item).registerHelper(); throw TestFailure(description: "denied") } catch InstallError.helperDeniedByUser {}
+                try expect(!exists(paths.fallbackAgentPlist))
+                // Waiting for approval: nothing to register again.
+                item.current = .requiresApproval
+                let calls = item.registerCalls
+                let waiting = make(item)
+                try waiting.registerHelper()
+                try expectEqual(item.registerCalls, calls)
+                try expectEqual(waiting.transcript.last?.outcome, .skipped("waiting for approval in System Settings › General › Login Items"))
+
+                // SMAppService unusable: the fallback (own label), and that choice sticks — the next
+                // "Start Helper" restarts the fallback instead of registering a login item next to it.
+                item.current = .notRegistered
+                item.registerError = FakeLoginItem.smError(2)
+                system.loaded = []
+                try make(item).registerHelper()
+                try expect(exists(paths.fallbackAgentPlist) && exists(paths.helperLaunchChoice))
+                try expectEqual(system.loaded, [FakeSystem.fallbackLabel])
+                item.registerError = nil
+                let before = item.registerCalls
+                try make(item).registerHelper()
+                try expectEqual(item.registerCalls, before)
+                try expectEqual(system.loaded, [FakeSystem.fallbackLabel])
+                // Uninstall stops and removes both kinds.
+                system.loaded.insert(LPPaths.helperLabel)
+                try make(item).unregisterHelper()
+                try expect(system.loaded.isEmpty && !exists(paths.fallbackAgentPlist))
             }
         },
         TestCase(name: "core.install.settings-urls") {
@@ -1346,10 +1441,10 @@ extension SelfTests {
 
                 let plan = make(true).performUninstall(removeLibrary: false)
                 try expectEqual(plan.map(\.title), [
-                    "Stop the helper (gui/501/\(LPPaths.helperLabel))", "Remove the helper LaunchAgent plist",
+                    "Mark LivePaper as uninstalled (\(paths.uninstallMarker.path))", "Stop the helper", "Remove the helper LaunchAgent plist",
                     "Restore the previous screen saver choice", InstallService.restoreLockKeysTitle, "Restore changed system settings",
                     "Remove \(paths.installedSaver.path)", "Delete LivePaper's caches, workspaces and backups (keeping the scene library)"])
-                try expectEqual(plan.map(\.outcome), Array(repeating: .planned, count: 7))
+                try expectEqual(plan.map(\.outcome), Array(repeating: .planned, count: 8))
                 try expectEqual(snapshot(), before)
                 try expectEqual(system.mutatingCommands.count, commandsBefore)
                 try expectEqual(prefs.values["com.example.test|answer|false"] as? Int, 43)
@@ -1363,11 +1458,57 @@ extension SelfTests {
                 try expect(prefs.values["com.example.test|fresh|false"] == nil, "a key that didn't exist is removed again")
                 try expect(prefs.values["com.apple.loginwindow|immediateLockLaunchesScreenSaver|false"] == nil, "lock keys restored")
                 try expectEqual(children(sb.support), ["Library", "playlist-settings.json", "state.json"])
+                try expect(exists(paths.uninstallMarker), "marked as uninstalled (outside the support directory)")
 
                 let again = make(false).performUninstall(removeLibrary: false)
                 try expect(again.allSatisfy { if case .skipped = $0.outcome { return true }; return false }, "idempotent: \(again)")
                 try make(false).uninstall(removeLibrary: true)
                 try expect(!exists(sb.support), "support directory deleted")
+                try expect(exists(paths.uninstallMarker), "the marker survives deleting the support directory")
+            }
+        },
+        TestCase(name: "core.install.uninstall-marker") {
+            try CoreSandbox.with("uninstall-marker") { sb in
+                let paths = sb.installPaths()
+                try expectEqual(paths.uninstallMarker.path, LPPaths.uninstallMarker.path)   // LIVEPAPER_HOME is the sandbox's support dir
+                let system = FakeSystem()
+                let make = { (dryRun: Bool, item: FakeLoginItem) in
+                    InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: item, preferences: FakePreferences(),
+                                   dryRun: dryRun, uid: 501, wallpaperSystem: FakeWallpaperSystem(store: sb.store), wallpaperClock: FakeClock())
+                }
+                _ = make(true, FakeLoginItem(available: false)).performUninstall(removeLibrary: true)
+                try expect(!exists(paths.uninstallMarker), "a dry run writes nothing")
+                _ = make(false, FakeLoginItem(available: false)).performUninstall(removeLibrary: true)
+                try expect(exists(paths.uninstallMarker))
+                // Setting LivePaper up again lifts it: installing the saver or starting the helper.
+                let template = sb.resources.appendingPathComponent("LivePaper.saver/Contents/Info.plist")
+                try sb.write("<plist version=\"1.0\"><dict/></plist>", to: template)
+                try make(false, FakeLoginItem(available: false)).installSaver()
+                try expect(!exists(paths.uninstallMarker), "installSaver clears it")
+                _ = make(false, FakeLoginItem(available: false)).performUninstall(removeLibrary: true)
+                try sb.writeExecutable("#!/bin/sh", to: paths.helperExecutable)
+                try make(false, FakeLoginItem(available: false)).registerHelper()
+                try expect(!exists(paths.uninstallMarker), "registerHelper clears it")
+            }
+            // The CLI inside LivePaper.app can't unregister the app's login item (only the app's own
+            // executable can): it still boots the job out, and says how to remove the entry.
+            try CoreSandbox.with("uninstall-cli") { sb in
+                let app = sb.root.appendingPathComponent("LivePaper.app")
+                try sb.write("<plist/>", to: app.appendingPathComponent("Contents/Library/LaunchAgents/\(LPPaths.helperLabel).plist"))
+                var paths = sb.installPaths()
+                paths.helperExecutable = app.appendingPathComponent("Contents/Helpers/LivePaperHelper")
+                let system = FakeSystem()
+                system.loaded = [LPPaths.helperLabel]
+                let cli = InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
+                                         preferences: FakePreferences(), uid: 501)
+                let steps = cli.performUninstall(removeLibrary: false)
+                guard case .skipped(let why)? = steps.first(where: { $0.title == "Unregister the helper login item" })?.outcome else {
+                    throw TestFailure(description: "\(steps)")
+                }
+                try expect(why.contains("System Settings › General › Login Items") && why.contains("LivePaper.app"), why)
+                try expect(steps.contains(InstallStep(title: "Stop the helper", outcome: .done)), "\(steps)")
+                try expect(!system.helperLoaded && exists(paths.uninstallMarker))
+                try expect(steps.allSatisfy { !$0.isFailure }, "\(steps)")
             }
         },
         TestCase(name: "core.install.lock-keys") {

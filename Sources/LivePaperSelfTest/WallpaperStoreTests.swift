@@ -109,6 +109,9 @@ struct StoreSandbox {
     var saver: URL { root.appendingPathComponent("Screen Savers/LivePaper.saver") }
     /// The saver the generated store chooses before LivePaper (it exists, so restore puts it back).
     var otherSaver: URL { root.appendingPathComponent("Screen Savers/Example.saver") }
+    /// Stands in for macOS's own Message saver (WallpaperRestoreFallback.systemSaverURL).
+    var builtinSaver: URL { root.appendingPathComponent("System Screen Savers/FloatingMessage.saver") }
+    var snapshot: URL { backups.appendingPathComponent("wallpaper-store-before-last-change.plist") }
     var backups: URL { root.appendingPathComponent("support/backups") }
     var manifest: URL { backups.appendingPathComponent("wallpaper-selection.json") }
     var rawBackup: URL { backups.appendingPathComponent("wallpaper-store-Index.plist") }
@@ -117,7 +120,7 @@ struct StoreSandbox {
 
     init(_ name: String, store data: Data? = nil) throws {
         root = try tempDir("wallpaper-\(name)").resolvingSymlinksInPath()
-        for (bundle, id) in [(saver, LPPaths.saverBundleID), (otherSaver, "com.example.saver")] {
+        for (bundle, id) in [(saver, LPPaths.saverBundleID), (otherSaver, "com.example.saver"), (builtinSaver, "com.example.builtin")] {
             try FileManager.default.createDirectory(at: bundle.appendingPathComponent("Contents"), withIntermediateDirectories: true)
             try PropertyListSerialization.data(fromPropertyList: ["CFBundleIdentifier": id], format: .xml, options: 0)
                 .write(to: bundle.appendingPathComponent("Contents/Info.plist"))
@@ -175,6 +178,8 @@ final class FakeWallpaperSystem: WallpaperSystem, @unchecked Sendable {
     var restartError: Error?
     var onRestart: ((_ restart: Int) throws -> Void)?
     private(set) var restarts = 0
+    /// The session state at each restart (the agent must never be restarted while locked).
+    private(set) var sessionAtRestart: [WallpaperSessionState] = []
 
     init(store: URL) { self.store = store }
 
@@ -187,6 +192,7 @@ final class FakeWallpaperSystem: WallpaperSystem, @unchecked Sendable {
 
     func restartWallpaperAgent() throws {
         restarts += 1
+        sessionAtRestart.append(session)
         if let restartError { throw restartError }
         if let onRestart { try onRestart(restarts) } else { try agentRewrite() }
     }
@@ -222,9 +228,12 @@ private func expectStoreError(_ expected: WallpaperStoreError, file: String = #f
     throw TestFailure(description: "\(file):\(line) didn't throw \(expected)")
 }
 
-private func applier(_ sb: StoreSandbox, _ system: FakeWallpaperSystem, _ clock: FakeClock) -> WallpaperStoreApplier {
-    WallpaperStoreApplier(storeURL: sb.store, system: system, clock: clock, lockURL: sb.lock)
+private func applier(_ sb: StoreSandbox, _ system: FakeWallpaperSystem, _ clock: FakeClock, snapshot: Bool = false) -> WallpaperStoreApplier {
+    WallpaperStoreApplier(storeURL: sb.store, system: system, clock: clock, lockURL: sb.lock, snapshotURL: snapshot ? sb.snapshot : nil)
 }
+
+/// A store as WallpaperAgent writes it when it can't use the file: defaults, every Desktop choice gone.
+private func defaultStore() throws -> Data { try WallpaperStoreSchema.encode(.init(systemDefault: StoreFixture.record(.inherit))) }
 
 /// The Idle slots of every record, by path.
 private func idleSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValue] {
@@ -447,11 +456,19 @@ extension SelfTests {
             inheritRoot.systemDefault = StoreFixture.record(.inherit)
             let rootPlan = try WallpaperStoreDocument(data: WallpaperStoreSchema.encode(inheritRoot)).planSelect(module, at: date)
             try expect(rootPlan.paths.contains(.systemDefault) && rootPlan.paths.count == 6)
-            // LivePaper at an old location is rewritten but never recorded as an original.
+            // LivePaper at an old location (gone) is rewritten but never recorded as an original…
             var moved = StoreFixture.index()
-            moved.displays[StoreFixture.displays[0]] = StoreFixture.record(.saver("/Users/old/Library/Screen Savers/LivePaper.saver"))
-            let movedPlan = try WallpaperStoreDocument(data: WallpaperStoreSchema.encode(moved)).planSelect(module, at: date)
+            let oldCopy = "/Users/old/Library/Screen Savers/LivePaper.saver"
+            moved.displays[StoreFixture.displays[0]] = StoreFixture.record(.saver(oldCopy))
+            let movedDoc = try WallpaperStoreDocument(data: WallpaperStoreSchema.encode(moved))
+            let movedPlan = try movedDoc.planSelect(module, at: date)
             try expectEqual(movedPlan.changes.first { $0.path == .display(StoreFixture.displays[0]) }?.recordsOriginal, false)
+            // …but a copy at another location that exists (say /Library/Screen Savers) is the user's own
+            // choice: recorded, so uninstall can put that location back.
+            let otherCopyPlan = try movedDoc.planSelect(module, at: date, moduleExists: { $0.path == oldCopy })
+            try expectEqual(otherCopyPlan.changes.first { $0.path == .display(StoreFixture.displays[0]) }?.recordsOriginal, true)
+            try expect(module.isOtherExistingCopy(URL(fileURLWithPath: oldCopy), moduleExists: { _ in true }))
+            try expect(!module.isOtherExistingCopy(module.url, moduleExists: { _ in true }), "the module itself isn't another copy")
             // An explicit AllSpacesAndDisplays override is set too; a Desktop-only record is left alone.
             var override = StoreFixture.index()
             override.allSpacesAndDisplays = StoreFixture.record(.saver(StoreFixture.otherSaverPath))
@@ -546,11 +563,52 @@ extension SelfTests {
             try expectEqual(after.idleSlot(at: .spaceDefault("")), WallpaperChoicePayload.inheritSlot(at: t1))
             try expectEqual(after.idleSlot(at: .systemDefault), original.idleSlot(at: .systemDefault))
             try expect(after.selection(of: module).livePaper.isEmpty)
-            // Without a recorded original, SystemDefault is the user's own choice: left alone.
-            let unrecorded = try selected.planRestore(WallpaperSelectionManifest(module: module.moduleURLString, createdAt: t0), module: module,
-                                                      at: t1, moduleExists: { _ in true })
-            try expect(!unrecorded.paths.contains(.systemDefault) && unrecorded.paths.count == 5)
-            try expect(unrecorded.changes.allSatisfy { $0.after == WallpaperChoicePayload.inheritSlot(at: t1) })
+            // Without a recorded original (LivePaper picked by hand in System Settings) no slot may keep
+            // pointing at LivePaper: the placeholder below the root; SystemDefault, which can't inherit,
+            // gets the pre-LivePaper store's choice, else the built-in saver — or nothing can be done.
+            let empty = WallpaperSelectionManifest(module: module.moduleURLString, createdAt: t0)
+            try expectStoreError(.noPreviousChoice("SystemDefault")) {
+                _ = try selected.planRestore(empty, module: module, at: t1, moduleExists: { _ in true })
+            }
+            let builtin = WallpaperSaverModule(url: WallpaperRestoreFallback.systemSaverURL)
+            let unrecorded = try selected.planRestore(empty, module: module, at: t1, fallback: WallpaperRestoreFallback(builtinSaver: builtin),
+                                                      moduleExists: { _ in true })
+            try expectEqual(unrecorded.paths, StoreFixture.explicitPaths)
+            try expectEqual(unrecorded.builtinSaverPaths, [.systemDefault])
+            try expectEqual(unrecorded.changes.first?.after, try builtin.slot(at: t1))
+            try expect(unrecorded.changes.dropFirst().allSatisfy { $0.after == WallpaperChoicePayload.inheritSlot(at: t1) })
+            try check(try selected.applying(unrecorded).selection(of: module).livePaper.isEmpty)
+            try WallpaperStoreVerifier.verify(edited: selected.applying(unrecorded).data(), original: selected, plan: unrecorded)
+            try expectStoreError(.noPreviousChoice("SystemDefault")) {   // a built-in saver that isn't there doesn't count
+                _ = try selected.planRestore(empty, module: module, at: t1, fallback: WallpaperRestoreFallback(builtinSaver: builtin),
+                                             moduleExists: { $0 != builtin.url })
+            }
+            // The pre-LivePaper store's choice comes first…
+            let fromBackup = try selected.planRestore(empty, module: module, at: t1,
+                                                      fallback: WallpaperRestoreFallback(previousStore: original, builtinSaver: builtin),
+                                                      moduleExists: { _ in true })
+            try expectEqual(fromBackup.changes.first?.after, original.idleSlot(at: .systemDefault))
+            try expect(fromBackup.builtinSaverPaths.isEmpty)
+            // …unless it chose LivePaper too.
+            let previousLivePaper = try WallpaperStoreDocument(data: StoreFixture.data(saver: StoreFixture.livePaperPath))
+            let notFromBackup = try selected.planRestore(empty, module: module, at: t1,
+                                                         fallback: WallpaperRestoreFallback(previousStore: previousLivePaper, builtinSaver: builtin),
+                                                         moduleExists: { _ in true })
+            try expectEqual(notFromBackup.builtinSaverPaths, [.systemDefault])
+            // A recorded original that is LivePaper at another location goes back while that copy
+            // exists; when it's gone it counts as no original.
+            let elsewhere = try WallpaperSaverModule(url: URL(fileURLWithPath: "/Library/Screen Savers/LivePaper.saver")).slot(at: t0)
+            let elsewhereStore = try original.replacingIdleSlots([.systemDefault: elsewhere])
+            let elsewherePlan = try elsewhereStore.planSelect(module, at: t0, moduleExists: { _ in true })
+            let elsewhereManifest = try empty.recording(elsewherePlan, module: module, at: t0)
+            try expectEqual(try elsewhereManifest.entry(for: .systemDefault)?.originalSlot(), elsewhere)
+            let elsewhereSelected = try elsewhereStore.applying(elsewherePlan)
+            let back = try elsewhereSelected.planRestore(elsewhereManifest, module: module, at: t1, moduleExists: { _ in true })
+            try expectEqual(try elsewhereSelected.applying(back).idleSlot(at: .systemDefault), elsewhere)
+            let gone = try elsewhereSelected.planRestore(elsewhereManifest, module: module, at: t1,
+                                                         fallback: WallpaperRestoreFallback(builtinSaver: builtin),
+                                                         moduleExists: { $0.path != "/Library/Screen Savers/LivePaper.saver" })
+            try expectEqual(gone.builtinSaverPaths, [.systemDefault])
             // Selecting again after the user switched away records their newer choice; LivePaper
             // itself is never recorded as an original.
             let switched = try selected.replacingIdleSlots([.systemDefault: userChoice])
@@ -822,6 +880,141 @@ extension SelfTests {
                 try expectEqual(system.restarts, 2)
             }
         },
+        TestCase(name: "wallpaper.applier.recheck") {
+            // The Mac locks while LivePaper waits for a quiet store (click "Make LivePaper my screen
+            // saver", then ⌃⌘Q to see it): the agent's lock-time writes only stretch the wait, and
+            // LivePaper must not then replace the store and kill the agent that draws the lock screen.
+            for (name, event, expected) in [
+                ("locked", { (s: FakeWallpaperSystem) in s.session = .locked }, WallpaperStoreError.sessionLocked),
+                ("settings", { (s: FakeWallpaperSystem) in s.conflicts = ["System Settings"] }, .conflictingProcess("System Settings")),
+            ] {
+                try StoreSandbox.with("recheck-\(name)") { sb in
+                    let original = try sb.bytes()
+                    let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
+                    clock.schedule(after: 0.5) { event(system); try? original.write(to: sb.store, options: .atomic) }
+                    clock.schedule(after: 0.9) { try? original.write(to: sb.store, options: .atomic) }
+                    try expectStoreError(expected) {
+                        _ = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
+                    }
+                    try expect(system.restarts == 0 && system.sessionAtRestart.isEmpty, "\(name): restarted \(system.sessionAtRestart)")
+                    try expectEqual(try sb.bytes(), original)
+                    try expect(!sb.exists(sb.manifest) && !sb.exists(sb.rawBackup), "\(name): nothing written")
+                }
+            }
+            // Locked while waiting for a restarted agent's rewrite that never came: the retry doesn't
+            // restart it again.
+            try StoreSandbox.with("recheck-retry") { sb in
+                let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
+                system.onRestart = { _ in clock.schedule(after: 1) { system.session = .locked } }
+                try expectStoreError(.notConfirmed(WallpaperStoreError.sessionLocked.localizedDescription)) {
+                    _ = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
+                }
+                try expectEqual(system.sessionAtRestart, [.unlocked])
+            }
+        },
+        TestCase(name: "wallpaper.applier.retry-normalised") {
+            // The restarted agent spells LivePaper's slots its own way — the Desktop's option values
+            // (as System Settings writes saver slots), its own LastSet. What is chosen is what counts:
+            // confirmed at once, the agent restarted once.
+            try StoreSandbox.with("normalised") { sb in
+                let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
+                system.onRestart = { _ in
+                    var tree = try PlistValue.parse(Data(contentsOf: sb.store))
+                    for record in WallpaperStoreDocument(root: tree).records {
+                        guard let idle = record.idle, sb.module.isChosen(in: idle),
+                              let options = record.desktop?.value(at: ["Content", "EncodedOptionValues"]) else { continue }
+                        tree = try tree.setting(options, at: record.path.keyPath + ["Idle", "Content", "EncodedOptionValues"])
+                            .setting(.date(clock.now()), at: record.path.keyPath + ["Idle", "LastSet"])
+                    }
+                    try tree.binaryData().write(to: sb.store, options: .atomic)
+                }
+                let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
+                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.explicitPaths, attempts: 1, agentRestarts: 1))
+            }
+            // It lets one planned slot inherit instead (LivePaper is still what that display shows):
+            // the re-plan is empty, so the agent's own store is confirmed — no second restart.
+            try StoreSandbox.with("normalised-inherit") { sb in
+                let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
+                let display = WallpaperRecordPath.display(StoreFixture.displays[0])
+                system.onRestart = { n in
+                    guard n == 1 else { try system.agentRewrite(); return }
+                    let doc = try WallpaperStoreDocument(data: Data(contentsOf: sb.store))
+                    try doc.replacingIdleSlots([display: WallpaperChoicePayload.inheritSlot(at: clock.now())]).data().write(to: sb.store, options: .atomic)
+                }
+                let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
+                try expectEqual(report.outcome, .applied)
+                try expect(report.attempts == 2 && system.restarts == 1, "\(report), \(system.restarts) restarts")
+                try check(try sb.document().selection(of: sb.module).isSelectedEverywhere)
+            }
+        },
+        TestCase(name: "wallpaper.applier.rollback-verified") {
+            let reset = try defaultStore()
+            // The rollback races the old agent too (it writes its in-memory default store between the
+            // rename and the restart): retried until the previous store is confirmed back.
+            try StoreSandbox.with("rollback-race") { sb in
+                let original = try sb.bytes()
+                let system = FakeWallpaperSystem(store: sb.store)
+                system.onRestart = { n in
+                    switch n {
+                    case 1: try reset.write(to: sb.store, options: .atomic)   // the agent couldn't use LivePaper's edit
+                    case 2: try system.overwrite(with: reset)                  // …and wrote that model while dying
+                    default: try system.agentRewrite()
+                    }
+                }
+                var reason = ""
+                do { _ = try applier(sb, system, FakeClock()).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup) }
+                catch WallpaperStoreError.rolledBack(let why) { reason = why }
+                try expect(reason.hasPrefix("Desktop of "), reason)
+                try expectEqual(system.restarts, 3)
+                try expectEqual(try sb.bytes(), original)
+            }
+            // It never sticks, or the rollback's restart fails: not reported as "put back" — reported
+            // as failed, naming the saved copy of the previous store.
+            for name in ["lost", "restart-fails"] {
+                try StoreSandbox.with("rollback-\(name)") { sb in
+                    let original = try sb.bytes()
+                    let system = FakeWallpaperSystem(store: sb.store)
+                    system.onRestart = { n in
+                        if n == 1 {
+                            try reset.write(to: sb.store, options: .atomic)
+                            if name == "restart-fails" { system.restartError = WallpaperStoreError.agentRestartFailed("no such process") }
+                        } else { try system.overwrite(with: reset) }
+                    }
+                    var reason = ""
+                    do { _ = try applier(sb, system, FakeClock(), snapshot: true).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup) }
+                    catch WallpaperStoreError.rollbackFailed(let why) { reason = why }
+                    try expect(reason.contains(sb.snapshot.path), "\(name): \(reason)")
+                    try expectEqual(try Data(contentsOf: sb.snapshot), original)
+                    try expectEqual(system.restarts, 4)
+                    try expect(WallpaperStoreError.rollbackFailed("").wroteStore && !WallpaperStoreError.rollbackFailed("").isTransient)
+                }
+            }
+            // The Mac locks before the rollback: it waits for the unlock before restarting the agent…
+            try StoreSandbox.with("rollback-locked") { sb in
+                let original = try sb.bytes()
+                let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
+                system.onRestart = { n in
+                    guard n == 1 else { try system.agentRewrite(); return }
+                    try reset.write(to: sb.store, options: .atomic)
+                    system.session = .locked
+                    clock.schedule(after: 20) { system.session = .unlocked }
+                }
+                do { _ = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup) }
+                catch WallpaperStoreError.rolledBack {}
+                try expectEqual(system.sessionAtRestart, [.unlocked, .unlocked])
+                try expectEqual(try sb.bytes(), original)
+            }
+            // …but not forever.
+            try StoreSandbox.with("rollback-stays-locked") { sb in
+                let system = FakeWallpaperSystem(store: sb.store)
+                system.onRestart = { _ in try reset.write(to: sb.store, options: .atomic); system.session = .locked }
+                var reason = ""
+                do { _ = try applier(sb, system, FakeClock(), snapshot: true).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup) }
+                catch WallpaperStoreError.rollbackFailed(let why) { reason = why }
+                try expect(reason.contains("the Mac is locked") && reason.contains(sb.snapshot.path), reason)
+                try expectEqual(system.sessionAtRestart, [.unlocked])
+            }
+        },
         TestCase(name: "wallpaper.live-system-guard") {
             // The live killer refuses any store but the agent's own: tests can never restart it.
             try StoreSandbox.with("guard") { sb in
@@ -882,7 +1075,7 @@ private struct InstallFixture {
         InstallPaths(saverTemplate: sb.root.appendingPathComponent("app/LivePaper.saver"), screenSaversDir: sb.saver.deletingLastPathComponent(),
                      launchAgentsDir: sb.root.appendingPathComponent("agents"), wallpaperStore: sb.store,
                      supportRoot: sb.root.appendingPathComponent("support"), helperExecutable: sb.root.appendingPathComponent("app/Helper"),
-                     managedPreferences: [])
+                     managedPreferences: [], builtinScreenSaver: sb.builtinSaver)
     }
 
     func service(dryRun: Bool = false, system override: WallpaperSystem? = nil) -> InstallService {
@@ -924,8 +1117,8 @@ extension SelfTests {
             }
         },
         TestCase(name: "wallpaper.install.select-moved") {
-            // Picked by hand in System Settings: nothing to do. At an old location: rewritten, and
-            // LivePaper is never recorded as the choice to restore.
+            // Picked by hand in System Settings at an old location that is gone: rewritten, and that
+            // location is never recorded as the choice to restore.
             try StoreSandbox.with("install-moved", store: try StoreFixture.data(saver: StoreFixture.livePaperPath)) { sb in
                 let fx = InstallFixture(sb)
                 let service = fx.service()
@@ -938,13 +1131,81 @@ extension SelfTests {
                 try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots, [])
                 try check(try service.selectSaver())
                 try expectEqual(service.transcript.last, InstallStep(title: selectTitle, outcome: .skipped("already selected")))
-                // Uninstall has no original to put back for SystemDefault: the user's own choice stays;
-                // the sub-slots fall back to it.
+                // Uninstall has no original for SystemDefault, and the store from before LivePaper's
+                // first change chose LivePaper too: it gets macOS's own saver (the store must never
+                // point at the LivePaper.saver uninstall deletes); the other slots inherit it.
                 let steps = fx.service().performUninstall(removeLibrary: false)
                 try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .done)
+                try expect(steps.contains(InstallStep(title: InstallService.builtinSaverTitle, outcome: .done)), "\(steps)")
                 let after = try sb.document()
-                try expect(sb.module.isChosen(in: after.idleSlot(at: .systemDefault)!))
-                try expectEqual(after.selection(of: sb.module).livePaper, [.systemDefault])
+                try expect(after.selection(of: sb.module).livePaper.isEmpty, "\(after.selection(of: sb.module))")
+                try expect(WallpaperSaverModule(url: sb.builtinSaver).isCurrentChoice(in: after.idleSlot(at: .systemDefault)!))
+                try expect(StoreFixture.explicitPaths.dropFirst().allSatisfy { after.idleSlot(at: $0).map(WallpaperSlot.isInherit) == true })
+                try expect(!sb.exists(sb.saver) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
+            }
+        },
+        TestCase(name: "wallpaper.install.uninstall-unmanifested") {
+            // LivePaper picked by hand in System Settings (the guided step): LivePaper never wrote the
+            // store, so there are no recorded originals — uninstall must still switch every slot away
+            // from LivePaper.saver before deleting it.
+            try StoreSandbox.with("install-by-hand") { sb in
+                try StoreFixture.data(saver: sb.saver.path).write(to: sb.store)
+                let fx = InstallFixture(sb)
+                // "Make LivePaper my screen saver" finds it already selected: no restart, but the
+                // backups now say LivePaper owns those slots.
+                let select = fx.service()
+                try check(try select.selectSaver())
+                try expectEqual(select.transcript.last, InstallStep(title: selectTitle, outcome: .skipped("already selected")))
+                try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots, [])
+                try expectEqual(fx.system.restarts, 0)
+                let plan = fx.service(dryRun: true).performUninstall(removeLibrary: false)
+                try expectEqual(plan.first { $0.title == restoreTitle }?.outcome, .planned)
+
+                let steps = fx.service().performUninstall(removeLibrary: false)
+                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .done)
+                try expect(steps.contains(InstallStep(title: InstallService.builtinSaverTitle, outcome: .done)), "\(steps)")
+                let after = try sb.document()
+                try expect(after.selection(of: sb.module).livePaper.isEmpty)
+                try expect(WallpaperSaverModule(url: sb.builtinSaver).isCurrentChoice(in: after.idleSlot(at: .systemDefault)!))
+                try expect(!sb.exists(sb.saver) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
+                try expectEqual(fx.system.restarts, 1)
+            }
+            // With the store from before LivePaper's first change, SystemDefault gets that choice back.
+            try StoreSandbox.with("install-by-hand-backup") { sb in
+                let before = try sb.bytes()
+                try StoreFixture.data(saver: sb.saver.path).write(to: sb.store)
+                let fx = InstallFixture(sb)
+                try FileManager.default.createDirectory(at: fx.paths.backups, withIntermediateDirectories: true)
+                try before.write(to: fx.paths.wallpaperStoreBackup)
+                let steps = fx.service().performUninstall(removeLibrary: false)
+                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .done)
+                try expect(!steps.contains { $0.title == InstallService.builtinSaverTitle })
+                try expectEqual(try sb.document().idleSlot(at: .systemDefault), try WallpaperStoreDocument(data: before).idleSlot(at: .systemDefault))
+                try expect(!sb.exists(sb.saver))
+            }
+            // Nothing LivePaper may put there (no backup, no built-in saver): the step fails with what
+            // to do, and the saver and backups stay — the store still points at it.
+            try StoreSandbox.with("install-by-hand-stuck") { sb in
+                try StoreFixture.data(saver: sb.saver.path).write(to: sb.store)
+                try FileManager.default.removeItem(at: sb.builtinSaver)
+                let fx = InstallFixture(sb)
+                let original = try sb.bytes()
+                try check(try fx.service().selectSaver())   // leaves the manifest stub
+                for removeLibrary in [false, true] {
+                    let steps = fx.service().performUninstall(removeLibrary: removeLibrary)
+                    guard case .failed(let why)? = steps.first(where: { $0.title == restoreTitle })?.outcome else { throw TestFailure(description: "\(steps)") }
+                    try expect(why.contains("System Settings › Wallpaper › Screen Saver") && why.contains("run uninstall again"), why)
+                    try expectEqual(steps.first { $0.title == "Remove \(fx.paths.installedSaver.path)" }?.outcome,
+                                    .skipped("kept while it is still the selected screen saver; run uninstall again"))
+                    try expect(sb.exists(sb.saver) && sb.exists(fx.paths.wallpaperSelectionBackup), "saver and backups kept: \(steps)")
+                    try expectEqual(try sb.bytes(), original)
+                    try expectEqual(fx.system.restarts, 0)
+                }
+                // The user picks another saver themselves, then runs uninstall again: it finishes.
+                try StoreFixture.data(saver: sb.otherSaver.path).write(to: sb.store)
+                let steps = fx.service().performUninstall(removeLibrary: false)
+                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .skipped("the screen saver was changed since"))
+                try expect(!sb.exists(sb.saver) && !sb.exists(fx.paths.backups) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
             }
         },
         TestCase(name: "wallpaper.install.select-refused") {
@@ -1000,7 +1261,7 @@ extension SelfTests {
                 try expectEqual(try sb.bytes(), original)
                 try expectEqual(fx.system.restarts, 2)
                 steps = fx.service().performUninstall(removeLibrary: false)
-                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .skipped("LivePaper didn't change it"))
+                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .skipped("LivePaper isn't the selected screen saver"))
                 try expect(fx.mutatingCommands.isEmpty)
             }
         },
@@ -1014,17 +1275,50 @@ extension SelfTests {
                 try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .skipped("the screen saver was changed since"))
                 try expect(!sb.exists(sb.saver))
             }
-            // The store can't be read any more (say, a new macOS): reported, and the uninstall finishes.
+            // A store LivePaper can't edit any more (a new macOS: another format version, a shape it
+            // doesn't know) that still selects LivePaper: the restore can't run, so the step fails with
+            // what to do, and the saver and every backup stay — both for a full uninstall and when the
+            // scenes are kept. Once the user has picked another saver, running it again finishes.
+            let config = StoreFixture.moduleConfiguration(StoreFixture.livePaperPath)
+            let futureLivePaper = try PlistValue.dictionary(["Displays": .dictionary(["X": .dictionary(["Idle": .dictionary(["Choice": .data(config)])])])]).binaryData()
+            let futureOther = try PlistValue.dictionary(["Displays": .dictionary(["X": .dictionary(["Idle": .dictionary(["Choice": .data(StoreFixture.moduleConfiguration(StoreFixture.otherSaverPath))])])])]).binaryData()
+            for (name, breakStore) in [("version", { (sb: StoreSandbox, fx: InstallFixture) throws in fx.system.version = 11 }),
+                                       ("format", { (sb: StoreSandbox, fx: InstallFixture) throws in try futureLivePaper.write(to: sb.store) })] {
+                for removeLibrary in [false, true] {
+                    try StoreSandbox.with("install-\(name)") { sb in
+                        let fx = InstallFixture(sb)
+                        try check(try fx.service().selectSaver())
+                        try breakStore(sb, fx)
+                        let broken = try sb.bytes()
+                        let steps = fx.service().performUninstall(removeLibrary: removeLibrary)
+                        guard case .failed(let why)? = steps.first(where: { $0.title == restoreTitle })?.outcome else {
+                            throw TestFailure(description: "\(name): \(steps)")
+                        }
+                        try expect(why.hasPrefix("LivePaper is still your screen saver (LivePaper couldn't change it back automatically: "), why)
+                        try expect(why.contains(name == "version" ? "version 11" : "isn't in the expected format"), why)
+                        try expect(why.contains("Choose another screen saver in System Settings › Wallpaper › Screen Saver, then run uninstall again"), why)
+                        try expectEqual(steps.first { $0.title == "Remove \(fx.paths.installedSaver.path)" }?.outcome,
+                                        .skipped("kept while it is still the selected screen saver; run uninstall again"))
+                        try expect(sb.exists(sb.saver), "\(name): the store still points at the saver")
+                        try expect(sb.exists(fx.paths.wallpaperSelectionBackup) && sb.exists(fx.paths.wallpaperStoreBackup),
+                                   "\(name): the record of the previous saver is kept")
+                        try expectEqual(try sb.bytes(), broken)
+                        try expectEqual(fx.system.restarts, 1)
+                        // The user chose another saver in System Settings (the format is still the new one).
+                        if name == "version" { try StoreFixture.data().write(to: sb.store) } else { try futureOther.write(to: sb.store) }
+                        let again = fx.service().performUninstall(removeLibrary: removeLibrary)
+                        try expectEqual(again.first { $0.title == restoreTitle }?.outcome, .skipped("the screen saver was changed since"))
+                        try expect(!sb.exists(sb.saver) && again.allSatisfy { !$0.isFailure }, "\(name): \(again)")
+                    }
+                }
+            }
+            // Not even a property list: nothing in it can point at the saver, so the uninstall finishes.
             try StoreSandbox.with("install-unreadable") { sb in
                 let fx = InstallFixture(sb)
                 try check(try fx.service().selectSaver())
-                try Data("new format".utf8).write(to: sb.store)
+                try Data("garbage".utf8).write(to: sb.store)
                 let steps = fx.service().performUninstall(removeLibrary: false)
-                guard case .skipped(let why)? = steps.first(where: { $0.title == restoreTitle })?.outcome else {
-                    throw TestFailure(description: "\(steps)")
-                }
-                try expect(why.hasPrefix("couldn't be restored automatically (the wallpaper settings file isn't in the expected format"), why)
-                try expect(why.hasSuffix("choose a screen saver in System Settings › Wallpaper"), why)
+                try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .skipped("the screen saver was changed since"))
                 try expect(!sb.exists(sb.saver) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
             }
         },

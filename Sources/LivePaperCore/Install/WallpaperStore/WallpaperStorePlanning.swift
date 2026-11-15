@@ -7,8 +7,11 @@
 //   but the `default` placeholder, which falls through to SystemDefault). Desktop slots, record
 //   types, and placeholder Idle slots are never touched.
 // * Restore = only Idle slots that *still* point at LivePaper get their recorded original back;
-//   slots without a record (e.g. a display that appeared later, copied from SystemDefault) get the
-//   placeholder. Slots the user changed since are left alone. The whole old file is never restored.
+//   slots without a record (e.g. a display that appeared later, copied from SystemDefault, or a
+//   selection made by hand in System Settings) get the placeholder, and SystemDefault /
+//   AllSpacesAndDisplays — which have nothing to inherit — the pre-LivePaper store's choice or a
+//   built-in macOS saver (WallpaperRestoreFallback). Slots the user changed since are left alone.
+//   The whole old file is never restored.
 import Foundation
 
 // MARK: - Detection
@@ -54,7 +57,12 @@ public struct WallpaperSlotChange: Sendable, Equatable {
 /// A set of Idle-slot replacements, at most one per record.
 public struct WallpaperStorePlan: Sendable, Equatable {
     public var changes: [WallpaperSlotChange]
-    public init(changes: [WallpaperSlotChange] = []) { self.changes = changes }
+    /// Restore only: root slots that get WallpaperRestoreFallback's built-in saver (no earlier choice
+    /// was known), so the caller can tell the user.
+    public var builtinSaverPaths: [WallpaperRecordPath]
+    public init(changes: [WallpaperSlotChange] = [], builtinSaverPaths: [WallpaperRecordPath] = []) {
+        self.changes = changes; self.builtinSaverPaths = builtinSaverPaths
+    }
 
     public var isEmpty: Bool { changes.isEmpty }
     public var paths: [WallpaperRecordPath] { changes.map(\.path) }
@@ -89,7 +97,12 @@ extension WallpaperStoreDocument {
     }
 
     /// The edits that make `module` the screen saver everywhere. Empty when it already is.
-    public func planSelect(_ module: WallpaperSaverModule, at date: Date) throws -> WallpaperStorePlan {
+    ///
+    /// - Parameter moduleExists: whether a screen-saver bundle exists. A choice of LivePaper.saver at
+    ///   another location that exists (e.g. /Library/Screen Savers) is recorded as the original, so
+    ///   uninstall puts that location back; one at a location that no longer exists is not.
+    public func planSelect(_ module: WallpaperSaverModule, at date: Date,
+                           moduleExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) throws -> WallpaperStorePlan {
         try checkEditable()
         let slot = try module.slot(at: date)
         var changes: [WallpaperSlotChange] = []
@@ -97,36 +110,59 @@ extension WallpaperStoreDocument {
             guard let idle = record.idle else { continue }   // Desktop-only records inherit Idle
             let explicit = record.path == .systemDefault || !WallpaperSlot.isInherit(idle)
             guard explicit, !module.isCurrentChoice(in: idle) else { continue }
-            changes.append(WallpaperSlotChange(path: record.path, before: idle, after: slot, recordsOriginal: !module.isChosen(in: idle)))
+            let original = !module.isChosen(in: idle)
+                || WallpaperSlot.moduleURLs(idle).contains { module.isOtherExistingCopy($0, moduleExists: moduleExists) }
+            changes.append(WallpaperSlotChange(path: record.path, before: idle, after: slot, recordsOriginal: original))
         }
         return WallpaperStorePlan(changes: changes)
     }
 
-    /// The edits that undo LivePaper's selection using the recorded originals.
+    /// The edits that undo LivePaper's selection: every Idle slot that still names LivePaper.saver
+    /// gets its recorded original back, or else the placeholder — or, at SystemDefault /
+    /// AllSpacesAndDisplays (nothing to inherit from), `fallback`'s choice. Afterwards no slot names
+    /// LivePaper except a recorded original that is LivePaper at another location that exists.
     ///
-    /// - Parameter moduleExists: whether a screen-saver bundle still exists. A recorded original
-    ///   that points at a deleted module is replaced by the placeholder (except at SystemDefault /
-    ///   AllSpacesAndDisplays, which have nothing to fall back to: the original goes back as it was,
-    ///   exactly as if LivePaper had never been installed).
+    /// - Parameters:
+    ///   - manifest: the recorded originals (empty when LivePaper never changed the store itself, e.g.
+    ///     it was picked by hand in System Settings).
+    ///   - moduleExists: whether a screen-saver bundle still exists. A recorded original that points
+    ///     at a deleted module is replaced by the placeholder (except at the root records, where the
+    ///     original goes back as it was, exactly as if LivePaper had never been installed). A
+    ///     recorded LivePaper original only counts while that copy exists and isn't `module` itself.
+    /// - Throws: `.noPreviousChoice` when a root slot has nothing LivePaper may put there.
     public func planRestore(_ manifest: WallpaperSelectionManifest, module: WallpaperSaverModule, at date: Date,
+                            fallback: WallpaperRestoreFallback = WallpaperRestoreFallback(),
                             moduleExists: (URL) -> Bool) throws -> WallpaperStorePlan {
         try checkEditable()
-        var changes: [WallpaperSlotChange] = []
+        var plan = WallpaperStorePlan()
         for record in records {
             guard let idle = record.idle, module.isChosen(in: idle) else { continue }   // changed since: leave it
-            let replacement: PlistValue
+            var replacement: PlistValue?
             if let entry = manifest.entry(for: record.path) {
                 let original = try entry.originalSlot()
-                let missing = WallpaperSlot.moduleURLs(original).contains { !names(module, $0) && !moduleExists($0) }
-                replacement = missing && !record.path.isRoot ? WallpaperChoicePayload.inheritSlot(at: date) : original
-            } else if record.path.isRoot {
-                continue   // no record of a previous choice: the user picked LivePaper here themselves
-            } else {
-                replacement = WallpaperChoicePayload.inheritSlot(at: date)
+                let urls = WallpaperSlot.moduleURLs(original)
+                let livePaperOriginal = module.isChosen(in: original)
+                if livePaperOriginal && !urls.contains(where: { module.isOtherExistingCopy($0, moduleExists: moduleExists) }) {
+                    replacement = nil   // LivePaper at a location that is gone (or this one): no use putting it back
+                } else {
+                    let missing = urls.contains { !names(module, $0) && !moduleExists($0) }
+                    replacement = missing && !record.path.isRoot ? WallpaperChoicePayload.inheritSlot(at: date) : original
+                }
             }
-            changes.append(WallpaperSlotChange(path: record.path, before: idle, after: replacement, recordsOriginal: false))
+            if replacement == nil {
+                if record.path.isRoot {
+                    guard let (slot, builtin) = try fallback.rootSlot(for: record.path, module: module, at: date, moduleExists: moduleExists) else {
+                        throw WallpaperStoreError.noPreviousChoice(record.path.description)
+                    }
+                    replacement = slot
+                    if builtin { plan.builtinSaverPaths.append(record.path) }
+                } else {
+                    replacement = WallpaperChoicePayload.inheritSlot(at: date)
+                }
+            }
+            plan.changes.append(WallpaperSlotChange(path: record.path, before: idle, after: replacement!, recordsOriginal: false))
         }
-        return WallpaperStorePlan(changes: changes)
+        return plan
     }
 
     /// The document with the plan's Idle slots replaced.
@@ -135,6 +171,40 @@ extension WallpaperStoreDocument {
     }
 
     private func names(_ module: WallpaperSaverModule, _ url: URL) -> Bool { module.names(url) }
+}
+
+/// What uninstall puts in a root Idle slot (SystemDefault, AllSpacesAndDisplays) that still names
+/// LivePaper but has no usable recorded original — say LivePaper was picked by hand in System
+/// Settings, or was already chosen when LivePaper first changed the store. The slot can't inherit,
+/// and the store must never be left pointing at the LivePaper.saver uninstall is about to delete.
+public struct WallpaperRestoreFallback: Sendable, Equatable {
+    /// The store as it was before LivePaper's first selection (the raw backup), when readable.
+    public var previousStore: WallpaperStoreDocument?
+    /// A screen saver that ships with macOS, used when the previous store has nothing better.
+    public var builtinSaver: WallpaperSaverModule?
+
+    public init(previousStore: WallpaperStoreDocument? = nil, builtinSaver: WallpaperSaverModule? = nil) {
+        self.previousStore = previousStore; self.builtinSaver = builtinSaver
+    }
+
+    /// macOS's Message saver ("FloatingMessage.saver"), on the read-only system volume of every
+    /// macOS 26 Mac. Its choice is the same legacy `.saver` payload System Settings writes for any
+    /// other saver (docs/RESEARCH.md §5.3), so nothing about it is guessed.
+    public static let systemSaverURL = URL(fileURLWithPath: "/System/Library/Screen Savers/FloatingMessage.saver")
+
+    /// The slot for `path`, and whether it is the built-in saver; nil when there is none.
+    /// Prefers the previous store's own slot at `path`, then its SystemDefault, as long as it
+    /// doesn't name LivePaper; then the built-in saver if it exists.
+    func rootSlot(for path: WallpaperRecordPath, module: WallpaperSaverModule, at date: Date,
+                  moduleExists: (URL) -> Bool) throws -> (PlistValue, Bool)? {
+        for candidate in [path, .systemDefault] {
+            if let slot = previousStore?.idleSlot(at: candidate), WallpaperSlot.choices(slot)?.isEmpty == false, !module.isChosen(in: slot) {
+                return (slot, false)
+            }
+        }
+        if let builtinSaver, !module.names(builtinSaver.url), moduleExists(builtinSaver.url) { return (try builtinSaver.slot(at: date), true) }
+        return nil
+    }
 }
 
 // MARK: - Invariants
@@ -180,8 +250,11 @@ public enum WallpaperStoreVerifier {
         case desktopChanged([WallpaperRecordPath])
     }
 
-    /// Compares the restarted agent's store with the plan. `LastUse` is ignored throughout: the
-    /// agent bumps it whenever a slot is shown.
+    /// Compares the restarted agent's store with the plan. Desktop slots must be unchanged apart
+    /// from `LastUse` (the agent bumps it whenever a slot is shown). A planned Idle slot counts as
+    /// kept when it makes the planned choice (`WallpaperSlot.sameChoices`): the agent may normalise
+    /// option values or timestamps of a slot it loaded, which changes nothing that is shown. An
+    /// empty plan checks only the Desktop slots.
     public static func confirm(current: WallpaperStoreDocument, original: WallpaperStoreDocument, plan: WallpaperStorePlan) -> Confirmation {
         var desktop: [WallpaperRecordPath] = []
         for record in original.records {
@@ -191,7 +264,8 @@ public enum WallpaperStoreVerifier {
         }
         if !desktop.isEmpty { return .desktopChanged(desktop) }
         let lost = plan.changes.filter { change in
-            current.idleSlot(at: change.path).map(WallpaperSlot.identity) != WallpaperSlot.identity(change.after)
+            guard let slot = current.idleSlot(at: change.path) else { return true }
+            return !WallpaperSlot.sameChoices(slot, change.after)
         }.map(\.path)
         return lost.isEmpty ? .confirmed : .changeLost(lost)
     }

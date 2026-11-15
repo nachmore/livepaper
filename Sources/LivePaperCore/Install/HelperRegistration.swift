@@ -2,8 +2,10 @@
 //
 // Preferred: SMAppService.agent(plistName:), which needs the plist inside the running app bundle
 // (Contents/Library/LaunchAgents/<label>.plist) and shows up in System Settings › Login Items.
-// Fallback (unbundled builds, or SMAppService refusing): a plist in ~/Library/LaunchAgents loaded
-// with `launchctl bootstrap gui/<uid>`.
+// Fallback (unbundled builds, or SMAppService refusing for good): a plist in ~/Library/LaunchAgents
+// loaded with `launchctl bootstrap gui/<uid>`. It uses its own label (`LaunchAgentPlist.label`):
+// a login-item record is keyed by its label, so a plist sharing the login item's label would share
+// — and fight over — its record (docs/RESEARCH.md §6).
 import Foundation
 import ServiceManagement
 
@@ -57,8 +59,33 @@ public struct SMAppServiceAgent: LoginItemRegistering {
     }
 }
 
+/// How InstallService treats an error from `LoginItemRegistering.register()`.
+enum LoginItemRegistrationFailure: Equatable {
+    /// kSMErrorAlreadyRegistered: the login item exists; the job may only need starting.
+    case alreadyRegistered
+    /// kSMErrorLaunchDeniedByUser: the user switched it off in System Settings › General › Login Items.
+    case deniedByUser
+    /// Anything else: SMAppService can't be used here.
+    case other
+
+    init(_ error: Error) {
+        let error = error as NSError
+        guard ["SMAppServiceErrorDomain", "kSMErrorDomainFramework"].contains(error.domain) else { self = .other; return }
+        switch error.code {
+        case Int(kSMErrorAlreadyRegistered): self = .alreadyRegistered
+        case Int(kSMErrorLaunchDeniedByUser): self = .deniedByUser
+        default: self = .other
+        }
+    }
+}
+
 /// The ~/Library/LaunchAgents fallback.
 enum LaunchAgentPlist {
+    /// The fallback job's label — deliberately not the login item's (see the file comment).
+    static let label = "\(LPPaths.helperLabel).fallback"
+    /// Before the fallback had its own label it used the login item's; such a plist is migrated away.
+    static let legacyLabel = LPPaths.helperLabel
+
     /// Same job as the plist embedded for SMAppService: start at login, restart after a crash
     /// (but not after a clean exit, e.g. when the user quits it), only in the GUI session.
     static func contents(label: String, program: URL) throws -> Data {

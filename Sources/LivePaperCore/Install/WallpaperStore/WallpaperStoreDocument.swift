@@ -116,6 +116,23 @@ public enum WallpaperSlot {
         (choices(slot) ?? []).compactMap { $0.provider == screenSaverProvider ? moduleURL(fromConfiguration: $0.configuration) : nil }
     }
 
+    /// True when two Idle slots choose the same thing: the same providers in the same order, each
+    /// with the same configuration — or, for screen-saver choices, a configuration naming the same
+    /// module location (however it is spelled). Option values, shuffle and timestamps don't count:
+    /// a restarted agent may normalise those (System Settings itself copies the Desktop's option
+    /// values into saver slots), and they don't change what is shown.
+    public static func sameChoices(_ a: PlistValue, _ b: PlistValue) -> Bool {
+        if let ca = a.value(at: ["Content", "Choices"]), ca == b.value(at: ["Content", "Choices"]) { return true }
+        guard let ca = choices(a), let cb = choices(b), ca.count == cb.count else { return false }
+        return zip(ca, cb).allSatisfy { x, y in
+            guard x.provider == y.provider else { return false }
+            if x.configuration == y.configuration { return true }
+            guard x.provider == screenSaverProvider, let mx = moduleURL(fromConfiguration: x.configuration),
+                  let my = moduleURL(fromConfiguration: y.configuration) else { return false }
+            return WallpaperSaverModule(url: mx).isLocation(my)
+        }
+    }
+
     /// Slot content (`Content`) plus `LastSet` — the slot without its `LastUse`, which WallpaperAgent
     /// bumps whenever the slot is shown. Used to compare slots across an agent restart.
     public static func identity(_ slot: PlistValue) -> PlistValue {

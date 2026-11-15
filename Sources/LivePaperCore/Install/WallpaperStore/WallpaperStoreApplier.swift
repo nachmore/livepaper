@@ -8,15 +8,24 @@
 //  1. Preflight — refuse unless: the store is the one the agent reads; the session is unlocked;
 //     System Settings, its Wallpaper extension and ScreenSaverEngine aren't running; (select only)
 //     MDM doesn't force the module or forbid wallpaper changes; the store format version is 10.
-//  2. Hold an exclusive lock file; wait until the store has been unchanged for ~1 s.
+//  2. Hold an exclusive lock file; preflight again (another LivePaper process may have held the
+//     lock for a while); wait until the store has been unchanged for ~1 s.
 //  3. Read it; it must decode with WallpaperAgent's model (WallpaperStoreSchema). Plan the edit.
-//  4. Back up (select: the raw file once, plus the per-slot manifest) — before writing anything.
-//  5. Build the edited store and verify it (decodes; only the planned Idle slots differ; Desktop
-//     slots byte-identical). The file must not have changed since step 3.
+//  4. Build the edited store and verify it (decodes; only the planned Idle slots differ; Desktop
+//     slots byte-identical).
+//  5. Re-check that the session is still unlocked and nothing conflicting has opened (the waits
+//     above take seconds). Back up (the exact bytes about to be replaced; select: also the raw file
+//     once, plus the per-slot manifest) — before writing anything. The file must not have changed
+//     since step 3.
 //  6. Atomic rename into place, then immediately restart WallpaperAgent (killall; launchd relaunches it).
-//  7. Wait for the new agent's own rewrite, re-read and confirm: the planned Idle slots survived
-//     and the Desktop slots are unchanged. Lost change → retry (≤ 2, 2 s apart); Desktop changed or
-//     unreadable → put the bytes read in step 3 back, restart again, and report a rollback.
+//  7. Wait for the new agent's own rewrite, re-read and confirm: the planned Idle slots make the
+//     planned choice and the Desktop slots are unchanged. Lost change → re-plan and retry (≤ 2, 2 s
+//     apart; an empty re-plan means the agent's own store is already right: done, no restart);
+//     Desktop changed or unreadable → roll back: put the bytes read in step 3 back through the same
+//     protected sequence (re-check, rename, restart, confirm, retry) and report the rollback — or,
+//     if it can't be confirmed, that it failed and where the saved copy is.
+//  Every agent restart is preceded by the step-5 re-check: never while the Mac is locked (the agent
+//  draws the lock-screen saver) or System Settings is open.
 //
 // Every wait goes through WallpaperClock and every system interaction through WallpaperSystem, so
 // the whole sequence runs in tests against temp copies of a real store with a fake agent.
@@ -35,6 +44,9 @@ public struct WallpaperApplyOptions: Sendable, Equatable {
     public var rewriteTimeout: TimeInterval = 10
     public var retryDelay: TimeInterval = 2
     public var maxRetries = 2
+    /// How long a rollback waits for the Mac to be unlocked (and System Settings closed) before it
+    /// restarts WallpaperAgent to put the previous store back.
+    public var rollbackWaitTimeout: TimeInterval = 60
 
     /// The `StoreIndexMigrationVersion` whose format this code mirrors (macOS 26).
     public static let supportedStoreVersion = 10
@@ -56,9 +68,13 @@ public struct WallpaperApplyReport: Sendable, Equatable {
     /// Read-plan-write-confirm rounds (1 + retries).
     public var attempts: Int
     public var agentRestarts: Int
+    /// Restore only: root slots that got the built-in saver (WallpaperStorePlan.builtinSaverPaths).
+    public var builtinSaverPaths: [WallpaperRecordPath]
 
-    public init(outcome: Outcome, changed: [WallpaperRecordPath] = [], attempts: Int = 1, agentRestarts: Int = 0) {
+    public init(outcome: Outcome, changed: [WallpaperRecordPath] = [], attempts: Int = 1, agentRestarts: Int = 0,
+                builtinSaverPaths: [WallpaperRecordPath] = []) {
         self.outcome = outcome; self.changed = changed; self.attempts = attempts; self.agentRestarts = agentRestarts
+        self.builtinSaverPaths = builtinSaverPaths
     }
 }
 
@@ -68,11 +84,16 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
     private let system: WallpaperSystem
     private let clock: WallpaperClock
     private let lockURL: URL?
+    private let snapshotURL: URL?
 
-    /// - Parameter lockURL: exclusive lock file held for the whole sequence (nil: none).
+    /// - Parameters:
+    ///   - lockURL: exclusive lock file held for the whole sequence (nil: none).
+    ///   - snapshotURL: where the exact bytes about to be replaced are saved before every write
+    ///     (select and restore), so a failed rollback can point the user at them (nil: not saved).
     public init(storeURL: URL, system: WallpaperSystem, clock: WallpaperClock = SystemWallpaperClock(),
-                options: WallpaperApplyOptions = WallpaperApplyOptions(), lockURL: URL? = nil) {
+                options: WallpaperApplyOptions = WallpaperApplyOptions(), lockURL: URL? = nil, snapshotURL: URL? = nil) {
         self.storeURL = storeURL; self.system = system; self.clock = clock; self.options = options; self.lockURL = lockURL
+        self.snapshotURL = snapshotURL
     }
 
     // MARK: - Select / restore
@@ -93,14 +114,17 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
         })
     }
 
-    /// LIVE PATH. Puts back the recorded original of every Idle slot that still points at `module`
-    /// (see `WallpaperStoreDocument.planRestore`), then deletes the manifest. No manifest: nothing
-    /// to do. Call it before the `.saver` is removed.
-    public func restore(_ module: WallpaperSaverModule, manifestURL: URL,
+    /// LIVE PATH. Undoes the selection of `module` in every Idle slot that still names it (see
+    /// `WallpaperStoreDocument.planRestore`): the recorded original from the manifest at
+    /// `manifestURL` if there is one, else the placeholder or — at the root records — `fallback`'s
+    /// choice. Then deletes the manifest. Works without a manifest too (LivePaper picked by hand).
+    /// Call it before the `.saver` is removed.
+    public func restore(_ module: WallpaperSaverModule, manifestURL: URL, fallback: WallpaperRestoreFallback = WallpaperRestoreFallback(),
                         moduleExists: @escaping (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) throws -> WallpaperApplyReport {
-        guard let manifest = try WallpaperSelectionManifest.load(from: manifestURL) else { return WallpaperApplyReport(outcome: .unchanged) }
+        let manifest = try WallpaperSelectionManifest.load(from: manifestURL)
+            ?? WallpaperSelectionManifest(module: module.moduleURLString, createdAt: clock.now())
         let report = try apply(checkModulePolicy: false, plan: { [clock] document in
-            try document.planRestore(manifest, module: module, at: clock.now(), moduleExists: moduleExists)
+            try document.planRestore(manifest, module: module, at: clock.now(), fallback: fallback, moduleExists: moduleExists)
         })
         try FileOps.removeIfPresent(manifestURL)
         return report
@@ -119,6 +143,7 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
     ///     store is put in place (backups).
     public func apply(checkModulePolicy: Bool, plan makePlan: (WallpaperStoreDocument) throws -> WallpaperStorePlan,
                       beforeWrite: ((Data, WallpaperStorePlan) throws -> Void)? = nil) throws -> WallpaperApplyReport {
+        // Refuse at once rather than after waiting for another LivePaper process's lock.
         try preflight(checkModulePolicy: checkModulePolicy)
         guard let lockURL else { return try attempts(checkModulePolicy: checkModulePolicy, makePlan: makePlan, beforeWrite: beforeWrite) }
         return try FileLock.withLock(at: lockURL) {
@@ -138,23 +163,38 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
         var written: Written?
         var restarts = 0
         var lastProblem = "the store kept changing"
+        /// The last round read the restarted agent's own rewrite (and found the change lost), as
+        /// opposed to giving up waiting for that rewrite.
+        var agentRewrote = false
         for attempt in 1...(1 + max(0, options.maxRetries)) {
             do {
-                if attempt > 1 {
-                    clock.sleep(options.retryDelay)
-                    try preflight(checkModulePolicy: checkModulePolicy)
-                }
+                if attempt > 1 { clock.sleep(options.retryDelay) }
+                // Inside the lock, and on every retry: the Mac may have locked in the meantime.
+                try preflight(checkModulePolicy: checkModulePolicy)
                 try waitForQuiet()
                 let (bytes, signature) = try readStore()
                 let document = try WallpaperStoreDocument(data: bytes)
                 let plan = try makePlan(document)
                 if plan.isEmpty {
-                    // Nothing to change — unless an earlier round's write is on disk unconfirmed
-                    // (the agent didn't rewrite in time): then restart and confirm again below.
-                    guard written != nil else { return WallpaperApplyReport(outcome: .unchanged, attempts: attempt, agentRestarts: restarts) }
+                    guard let current = written else { return WallpaperApplyReport(outcome: .unchanged, attempts: attempt, agentRestarts: restarts) }
+                    if agentRewrote {
+                        // The restarted agent's own store already is in the requested state (it only
+                        // spelled a planned slot differently, or let it inherit the same choice):
+                        // confirmed without restarting it again — as long as the Desktop is intact.
+                        if case .desktopChanged(let paths) = WallpaperStoreVerifier.confirm(current: document, original: current.original, plan: WallpaperStorePlan()) {
+                            throw rollBack(current, because: Self.desktopChanged(paths), restarts: &restarts)
+                        }
+                        return report(.applied, current, attempts: attempt, restarts: restarts)
+                    }
+                    // An earlier round's write is on disk unconfirmed (the agent didn't rewrite in
+                    // time): restart and confirm again below.
+                    try recheck()
                 } else {
                     let edited = try document.applying(plan).data()
                     try WallpaperStoreVerifier.verify(edited: edited, original: document, plan: plan)
+                    // The waits above take seconds: check again right before writing and restarting.
+                    try recheck()
+                    if let snapshotURL { try FileOps.writeAtomically(bytes, to: snapshotURL) }
                     try beforeWrite?(bytes, plan)
                     guard fileSignature() == signature else { lastProblem = "the store changed while LivePaper was editing it"; continue }
                     try replaceStore(with: edited)
@@ -166,22 +206,22 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
                 restarts += 1
                 guard waitForRewrite(differentFrom: ours) else {
                     lastProblem = "WallpaperAgent didn't rewrite the store after restarting"
+                    agentRewrote = false
                     continue
                 }
                 try? waitForQuiet()
                 let (afterBytes, _) = try readStore()
                 guard let after = try? WallpaperStoreDocument(data: afterBytes) else {
-                    restarts += rollBack(to: current.originalBytes)
-                    throw WallpaperStoreError.rolledBack("the restarted WallpaperAgent wrote a store LivePaper can't read")
+                    throw rollBack(current, because: "the restarted WallpaperAgent wrote a store LivePaper can't read", restarts: &restarts)
                 }
                 switch WallpaperStoreVerifier.confirm(current: after, original: current.original, plan: current.plan) {
                 case .confirmed:
-                    return WallpaperApplyReport(outcome: .applied, changed: current.plan.paths, attempts: attempt, agentRestarts: restarts)
+                    return report(.applied, current, attempts: attempt, restarts: restarts)
                 case .changeLost(let paths):
                     lastProblem = "WallpaperAgent overwrote " + paths.map(\.description).joined(separator: ", ")
+                    agentRewrote = true
                 case .desktopChanged(let paths):
-                    restarts += rollBack(to: current.originalBytes)
-                    throw WallpaperStoreError.rolledBack("Desktop of " + paths.map(\.description).joined(separator: ", ") + " changed")
+                    throw rollBack(current, because: Self.desktopChanged(paths), restarts: &restarts)
                 }
             } catch let error as WallpaperStoreError where written != nil && !error.wroteStore {
                 // A refusal after LivePaper already wrote: the change is on disk but unconfirmed.
@@ -191,16 +231,20 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
         throw written == nil ? WallpaperStoreError.storeBusy : WallpaperStoreError.notConfirmed(lastProblem)
     }
 
+    private func report(_ outcome: WallpaperApplyReport.Outcome, _ written: Written, attempts: Int, restarts: Int) -> WallpaperApplyReport {
+        WallpaperApplyReport(outcome: outcome, changed: written.plan.paths, attempts: attempts, agentRestarts: restarts,
+                             builtinSaverPaths: written.plan.builtinSaverPaths)
+    }
+
+    private static func desktopChanged(_ paths: [WallpaperRecordPath]) -> String {
+        "Desktop of " + paths.map(\.description).joined(separator: ", ") + " changed"
+    }
+
     // MARK: - Steps
 
     private func preflight(checkModulePolicy: Bool) throws {
         if let why = system.unavailability(forStoreAt: storeURL) { throw WallpaperStoreError.unavailable(why) }
-        switch system.sessionState {
-        case .unlocked: break
-        case .locked: throw WallpaperStoreError.sessionLocked
-        case .unknown: throw WallpaperStoreError.sessionUnknown
-        }
-        if let process = system.conflictingProcesses().first { throw WallpaperStoreError.conflictingProcess(process) }
+        try recheck()
         if checkModulePolicy {
             if system.screenSaverModuleForced { throw WallpaperStoreError.moduleForcedByMDM }
             if system.wallpaperChangesDisabled { throw WallpaperStoreError.wallpaperChangesDisabledByMDM }
@@ -208,6 +252,18 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
         let version = system.storeMigrationVersion
         guard version == WallpaperApplyOptions.supportedStoreVersion else { throw WallpaperStoreError.unsupportedStoreVersion(version) }
         guard fileSignature() != nil else { throw WallpaperStoreError.storeMissing(storeURL.path) }
+    }
+
+    /// The facts that change from moment to moment, checked right before every write and agent
+    /// restart: the session is unlocked and nothing that keeps its own copy of the settings (or
+    /// shows a screen saver) is running.
+    private func recheck() throws {
+        switch system.sessionState {
+        case .unlocked: break
+        case .locked: throw WallpaperStoreError.sessionLocked
+        case .unknown: throw WallpaperStoreError.sessionUnknown
+        }
+        if let process = system.conflictingProcesses().first { throw WallpaperStoreError.conflictingProcess(process) }
     }
 
     /// Identity of the store file: a new inode after every atomic write, plus size and mtime.
@@ -280,11 +336,55 @@ public final class WallpaperStoreApplier: @unchecked Sendable {
         }
     }
 
-    /// Best effort: puts `bytes` back and restarts the agent so it uses them. Returns the number of
-    /// restarts performed (0 or 1).
-    private func rollBack(to bytes: Data) -> Int {
-        guard (try? replaceStore(with: bytes)) != nil, (try? system.restartWallpaperAgent()) != nil else { return 0 }
-        return 1
+    // MARK: - Rollback
+
+    /// Puts the bytes `written` replaced back and makes a restarted agent use them, through the same
+    /// protections as the forward path: it waits (bounded) until the Mac is unlocked and System
+    /// Settings closed, renames, restarts, waits for the agent's rewrite and confirms that the
+    /// Desktop slots and the replaced Idle slots are as they were — retrying like the forward path
+    /// (the old agent can write its in-memory model between the rename and the restart).
+    ///
+    /// - Returns: the error to throw: `.rolledBack(why)` once the previous store is confirmed back,
+    ///   otherwise `.rollbackFailed`, naming the saved copy of the previous store.
+    private func rollBack(_ written: Written, because why: String, restarts: inout Int) -> WallpaperStoreError {
+        let undo = WallpaperStorePlan(changes: written.plan.changes.map {
+            WallpaperSlotChange(path: $0.path, before: $0.after, after: $0.before, recordsOriginal: false)
+        })
+        var problem = "WallpaperAgent kept its own copy"
+        rounds: for round in 1...(1 + max(0, options.maxRetries)) {
+            if round > 1 { clock.sleep(options.retryDelay) }
+            if let refusal = waitUntilSafeToRestart() { problem = refusal.localizedDescription; break rounds }
+            try? waitForQuiet()
+            do { try replaceStore(with: written.originalBytes) } catch { problem = error.localizedDescription; continue }
+            let ours = fileSignature()
+            do { try system.restartWallpaperAgent() } catch { problem = error.localizedDescription; continue }
+            restarts += 1
+            // No rewrite in time: the file still holds the previous bytes, which the agent read at launch.
+            _ = waitForRewrite(differentFrom: ours)
+            try? waitForQuiet()
+            guard let (bytes, _) = try? readStore(), let after = try? WallpaperStoreDocument(data: bytes) else {
+                problem = "the restarted WallpaperAgent wrote a store LivePaper can't read"
+                continue
+            }
+            switch WallpaperStoreVerifier.confirm(current: after, original: written.original, plan: undo) {
+            case .confirmed: return .rolledBack(why)
+            case .changeLost(let paths): problem = "WallpaperAgent overwrote " + paths.map(\.description).joined(separator: ", ")
+            case .desktopChanged(let paths): problem = Self.desktopChanged(paths)
+            }
+        }
+        let copy = snapshotURL.map { "; the previous settings are saved in \($0.path)" } ?? ""
+        return .rollbackFailed("\(why); then \(problem)\(copy)")
+    }
+
+    /// Waits up to `rollbackWaitTimeout` for `recheck()` to pass; returns the last refusal if it never does.
+    private func waitUntilSafeToRestart() -> WallpaperStoreError? {
+        let deadline = clock.now().addingTimeInterval(options.rollbackWaitTimeout)
+        while true {
+            do { try recheck(); return nil } catch let error as WallpaperStoreError {
+                guard clock.now() < deadline else { return error }
+            } catch { return .unavailable(error.localizedDescription) }
+            clock.sleep(max(options.pollInterval, 0.5))
+        }
     }
 
     private static func posix(_ what: String) -> Error {

@@ -23,12 +23,15 @@ public struct InstallPaths: Sendable, Equatable {
     public var helperExecutable: URL
     /// Configuration-profile copies of com.apple.screensaver, in override order.
     public var managedPreferences: [URL]
+    /// A screen saver that ships with macOS: what uninstall selects where LivePaper is the screen
+    /// saver but no earlier choice is known (WallpaperRestoreFallback).
+    public var builtinScreenSaver: URL
 
     public init(saverTemplate: URL, screenSaversDir: URL, launchAgentsDir: URL, wallpaperStore: URL, supportRoot: URL,
-                helperExecutable: URL, managedPreferences: [URL]) {
+                helperExecutable: URL, managedPreferences: [URL], builtinScreenSaver: URL = WallpaperRestoreFallback.systemSaverURL) {
         self.saverTemplate = saverTemplate; self.screenSaversDir = screenSaversDir; self.launchAgentsDir = launchAgentsDir
         self.wallpaperStore = wallpaperStore; self.supportRoot = supportRoot; self.helperExecutable = helperExecutable
-        self.managedPreferences = managedPreferences
+        self.managedPreferences = managedPreferences; self.builtinScreenSaver = builtinScreenSaver
     }
 
     /// The real locations (honouring the LIVEPAPER_* overrides, plus LIVEPAPER_LAUNCH_AGENTS_DIR).
@@ -53,13 +56,27 @@ public struct InstallPaths: Sendable, Equatable {
     /// manual recovery; restore never puts the whole file back).
     public var wallpaperStoreBackup: URL { backups.appendingPathComponent("wallpaper-store-Index.plist") }
     /// The Idle slots LivePaper replaced, with their originals (WallpaperSelectionManifest, JSON):
-    /// what uninstall restores.
+    /// what uninstall restores. Also written (without slots) when LivePaper finds itself already
+    /// selected, e.g. picked by hand in System Settings.
     public var wallpaperSelectionBackup: URL { backups.appendingPathComponent("wallpaper-selection.json") }
+    /// The exact store bytes LivePaper replaced most recently (select or restore), saved right before
+    /// each write: what to recover from by hand if a rollback can't be confirmed.
+    public var wallpaperStoreSnapshot: URL { backups.appendingPathComponent("wallpaper-store-before-last-change.plist") }
     /// Held while LivePaper edits the wallpaper store, so two LivePaper processes never race.
     public var wallpaperStoreLock: URL { supportRoot.appendingPathComponent("wallpaper-store.lock") }
     /// Previous values of system preferences LivePaper changed.
     public var defaultsBackup: URL { backups.appendingPathComponent("changed-defaults.json") }
-    public var fallbackAgentPlist: URL { launchAgentsDir.appendingPathComponent("\(LPPaths.helperLabel).plist") }
+    /// The helper's LaunchAgent fallback (its own label, never the login item's).
+    public var fallbackAgentPlist: URL { launchAgentsDir.appendingPathComponent("\(LaunchAgentPlist.label).plist") }
+    /// Where versions before the separate label put the fallback (the login item's label).
+    public var legacyAgentPlist: URL { launchAgentsDir.appendingPathComponent("\(LaunchAgentPlist.legacyLabel).plist") }
+    /// Records that the app bundle fell back to the LaunchAgent because SMAppService refused, so
+    /// later registrations keep to that choice instead of registering a login item next to it.
+    public var helperLaunchChoice: URL { supportRoot.appendingPathComponent("helper-launch.json") }
+    /// Written by uninstall, outside the support directory (LPPaths.uninstallMarker for the real
+    /// locations): a helper that finds it exits at launch, so a login item this process couldn't
+    /// unregister can't bring LivePaper back. Installing again removes it.
+    public var uninstallMarker: URL { supportRoot.deletingLastPathComponent().appendingPathComponent("LivePaper.uninstalled") }
     /// Shared with PublishService so installing never copies a playlist that is being swapped.
     public var publishLock: URL { supportRoot.appendingPathComponent("publish.lock") }
 }
@@ -69,6 +86,11 @@ public enum InstallError: Error, LocalizedError, Sendable, Equatable {
     case helperMissing(String)
     case commandFailed(String, String)
     case uninstallIncomplete([String])
+    /// The user switched the helper off in System Settings › General › Login Items.
+    case helperDeniedByUser
+    /// Uninstall couldn't switch the screen saver away from LivePaper (the reason), so it keeps
+    /// LivePaper.saver: the store must never point at a deleted module.
+    case screenSaverStillSelected(String)
 
     public var errorDescription: String? {
         switch self {
@@ -76,6 +98,11 @@ public enum InstallError: Error, LocalizedError, Sendable, Equatable {
         case .helperMissing(let p): return "LivePaper's helper is missing from the app (\(p)). Reinstall LivePaper."
         case .commandFailed(let cmd, let detail): return "\(cmd) failed: \(detail)"
         case .uninstallIncomplete(let steps): return "Uninstall couldn't finish: " + steps.joined(separator: "; ")
+        case .helperDeniedByUser:
+            return "LivePaper's helper is switched off in System Settings › General › Login Items. Switch it on there."
+        case .screenSaverStillSelected(let why):
+            return "LivePaper is still your screen saver (\(why)). Choose another screen saver in System Settings › Wallpaper › " +
+                   "Screen Saver, then run uninstall again; until then LivePaper keeps its screen saver and backups."
         }
     }
 }
@@ -154,7 +181,10 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     public var transcript: [InstallStep] { lock.withLock { steps } }
 
     private var guiDomain: String { "gui/\(uid)" }
+    /// The login item's job.
     private var helperService: String { "\(guiDomain)/\(LPPaths.helperLabel)" }
+    /// The LaunchAgent fallback's job.
+    private var fallbackService: String { "\(guiDomain)/\(LaunchAgentPlist.label)" }
 
     // MARK: - Status
 
@@ -166,13 +196,15 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         let installed = FileOps.isRegularFile(paths.installedSaver.appendingPathComponent("Contents/Info.plist"))
         let managed = SystemProbes.managedSettings(paths.managedPreferences)
         let sysadminctl = try? runner.run("/usr/sbin/sysadminctl", ["-screenLock", "status"], timeout: 10)
-        let launchctl = try? runner.run("/bin/launchctl", ["print", helperService], timeout: 10)
+        let helperRunning = [helperService, fallbackService].contains { service in
+            (try? runner.run("/bin/launchctl", ["print", service], timeout: 10)).map(SystemProbes.helperRunning) ?? false
+        }
         return InstallStatus(
             saverInstalled: installed,
             // Without a template (development builds) there is nothing newer to install.
             saverUpToDate: installed && (templateVersion == nil || installedVersion == templateVersion),
             saverSelected: store.isSelected(),
-            helperRunning: launchctl.map(SystemProbes.helperRunning) ?? false,
+            helperRunning: helperRunning,
             helperLoginItem: loginItem.status,
             passwordImmediately: SystemProbes.passwordImmediately(sysadminctlOutput: sysadminctl?.combinedOutput, managed: managed),
             managedByMDM: SystemProbes.isManaged(managed),
@@ -191,6 +223,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             record("Install the screen saver", .failed("template missing"))
             throw InstallError.saverTemplateMissing(template.path)
         }
+        try clearUninstallMarker()
         try perform("Install the screen saver into \(paths.screenSaversDir.path)") {
             let fm = FileManager.default
             try fm.createDirectory(at: paths.screenSaversDir, withIntermediateDirectories: true)
@@ -237,6 +270,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         // Nothing to change (also when it was picked by hand in System Settings). A selection of
         // LivePaper.saver at another location still gets rewritten to the installed one.
         if let document = try? store.read(), (try? document.planSelect(store.module, at: Date()))?.isEmpty == true {
+            if !dryRun { recordSelectionOwnership() }
             record(title, .skipped("already selected"))
             return true
         }
@@ -248,6 +282,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 log.notice("selected LivePaper in \(report.changed.count, privacy: .public) Idle slot(s) after \(report.attempts, privacy: .public) attempt(s)")
                 record(title, .done)
             } else {
+                recordSelectionOwnership()
                 record(title, .skipped("already selected"))
             }
             return true
@@ -262,7 +297,20 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     /// Runs the live store sequence (WallpaperStoreApplier) with this installer's system and timings.
     private var wallpaperApplier: WallpaperStoreApplier {
-        store.applier(system: wallpaperSystem, clock: wallpaperClock, options: wallpaperOptions, lockURL: paths.wallpaperStoreLock)
+        store.applier(system: wallpaperSystem, clock: wallpaperClock, options: wallpaperOptions, lockURL: paths.wallpaperStoreLock,
+                      snapshotURL: paths.wallpaperStoreSnapshot)
+    }
+
+    /// LivePaper is the selected screen saver without having written the store (picked by hand in
+    /// System Settings): leave a manifest without originals, so the backups say that LivePaper owns
+    /// those slots (uninstall finds them in the store either way). Best effort.
+    private func recordSelectionOwnership() {
+        guard !FileOps.entryExists(paths.wallpaperSelectionBackup) else { return }
+        do {
+            try WallpaperSelectionManifest(module: store.module.moduleURLString, createdAt: Date()).write(to: paths.wallpaperSelectionBackup)
+        } catch {
+            log.error("couldn't record the screen-saver selection: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     // MARK: - Helper
@@ -271,57 +319,142 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// Settings › General › Login Items). `.notFound` when running outside the app bundle.
     public var helperLoginItemStatus: LoginItemStatus { loginItem.status }
 
-    /// Registers the helper as a login item (SMAppService), falling back to a LaunchAgent plist
-    /// when the process isn't the app bundle or SMAppService refuses. Idempotent.
+    /// Registers the helper as a login item (SMAppService) and makes sure it runs, falling back to a
+    /// LaunchAgent plist (its own label) when the process isn't the app bundle or SMAppService refuses
+    /// for good. Idempotent; "Start Helper" calls it to restart a helper that was quit:
+    /// * login item enabled: start its job (`launchctl kickstart`), or register it again when launchd
+    ///   doesn't have it loaded;
+    /// * waiting for approval / switched off by the user: nothing LivePaper can do — the user allows
+    ///   it in System Settings › General › Login Items (no fallback: that would bypass their choice);
+    /// * SMAppService fails otherwise: the LaunchAgent, and that choice is remembered
+    ///   (`helperLaunchChoice`) so later calls don't register a login item next to it.
     public func registerHelper() throws {
-        if loginItem.isAvailable {
-            // A LaunchAgent from an earlier unbundled install uses the same label; launchd can't
-            // load the login item while it is loaded.
-            if FileOps.entryExists(paths.fallbackAgentPlist) {
-                try stopHelperJob()
-                try removeFallbackAgent()
-            }
-            do {
-                var status = LoginItemStatus.notRegistered
-                try perform("Register the helper as a login item") {
-                    status = try loginItem.register()
-                    return nil
-                }
-                if status == .requiresApproval { log.notice("helper needs approval in System Settings › Login Items") }
+        try clearUninstallMarker()
+        // Earlier versions' fallback plist used the login item's own label.
+        if FileOps.entryExists(paths.legacyAgentPlist) {
+            try stopHelperJobs(only: [helperService])
+            try perform("Remove the old helper LaunchAgent plist") { try FileManager.default.removeItem(at: paths.legacyAgentPlist); return nil }
+        }
+        guard loginItem.isAvailable, !FileOps.entryExists(paths.helperLaunchChoice) else {
+            try installFallbackAgent()
+            return
+        }
+        // A fallback left by an unbundled (development) build: the app bundle uses its login item.
+        if FileOps.entryExists(paths.fallbackAgentPlist) {
+            try stopHelperJobs(only: [fallbackService])
+            try removeFallbackAgent()
+        }
+        switch loginItem.status {
+        case .enabled:
+            try startRegisteredHelper()
+            return
+        case .requiresApproval:
+            record("Register the helper as a login item", .skipped("waiting for approval in System Settings › General › Login Items"))
+            return
+        case .notRegistered, .notFound:
+            break
+        }
+        let title = "Register the helper as a login item"
+        if dryRun { record(title, .planned); return }
+        do {
+            let status = try loginItem.register()
+            record(title, .done)
+            if status == .requiresApproval { log.notice("helper needs approval in System Settings › General › Login Items") }
+            return
+        } catch {
+            switch LoginItemRegistrationFailure(error) {
+            case .alreadyRegistered:
+                record(title, .skipped("already registered"))
+                try startRegisteredHelper()
                 return
-            } catch {
+            case .deniedByUser:
+                record(title, .failed(InstallError.helperDeniedByUser.localizedDescription))
+                throw InstallError.helperDeniedByUser
+            case .other:
+                record(title, .skipped("SMAppService refused (\(error.localizedDescription)); using a LaunchAgent"))
                 log.error("SMAppService registration failed, using a LaunchAgent: \(error.localizedDescription, privacy: .public)")
             }
         }
         try installFallbackAgent()
+        try perform("Remember to use the helper LaunchAgent") {
+            let choice = ["launchAgent": true, "since": ISO8601DateFormatter().string(from: Date())] as [String: Any]
+            try FileOps.writeAtomically(try JSONSerialization.data(withJSONObject: choice, options: [.prettyPrinted, .sortedKeys]),
+                                        to: paths.helperLaunchChoice)
+            return nil
+        }
     }
 
-    /// Unregisters the login item, unloads the job and removes a fallback plist. Idempotent.
+    /// The login item is registered and enabled, but its job may have stopped: the helper exits
+    /// cleanly when quit, and KeepAlive {SuccessfulExit: false} then leaves it stopped.
+    private func startRegisteredHelper() throws {
+        guard helperLoaded(helperService) else {
+            // Registered but not loaded (e.g. booted out): registering again loads it.
+            try perform("Register the helper login item again") {
+                try? loginItem.unregister()
+                _ = try loginItem.register()
+                return nil
+            }
+            return
+        }
+        try perform("Start the helper (\(helperService))", skipIf: { helperIsRunning(helperService) ? "already running" : nil }) {
+            let result = try runner.run("/bin/launchctl", ["kickstart", helperService], timeout: 15)
+            guard result.succeeded else {
+                throw InstallError.commandFailed("launchctl kickstart", result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+            return nil
+        }
+    }
+
+    /// Title of the step that unregisters the helper's login item.
+    public static let unregisterLoginItemTitle = "Unregister the helper login item"
+
+    /// Unregisters the login item, unloads the jobs and removes the fallback plists. Idempotent.
     public func unregisterHelper() throws {
+        let title = Self.unregisterLoginItemTitle
         if loginItem.isAvailable {
-            try perform("Unregister the helper login item",
-                        skipIf: { [.enabled, .requiresApproval].contains(loginItem.status) ? nil : "not registered" }) {
+            try perform(title, skipIf: { [.enabled, .requiresApproval].contains(loginItem.status) ? nil : "not registered" }) {
                 try loginItem.unregister(); return nil
             }
+        } else if let app = loginItemApp {
+            // Only the app's own executable can talk to SMAppService about its login item (the CLI
+            // can't). The uninstall marker keeps that entry from starting the helper again.
+            record(title, .skipped("only \(app.lastPathComponent) itself can remove its entry from System Settings › General › Login " +
+                                   "Items. It can't start the helper any more; remove it there (or delete \(app.lastPathComponent))"))
         }
-        try stopHelperJob()
+        try stopHelperJobs(only: [helperService, fallbackService])
         try removeFallbackAgent()
     }
 
-    private func stopHelperJob() throws {
-        try perform("Stop the helper (\(helperService))", skipIf: { helperLoaded() ? nil : "not loaded" }) {
-            let result = try runner.run("/bin/launchctl", ["bootout", helperService], timeout: 15)
-            // Unregistering the login item may already have unloaded it.
-            guard result.succeeded || !helperLoaded() else {
-                throw InstallError.commandFailed("launchctl bootout", result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+    /// The app bundle whose embedded login item this process can't reach — the CLI inside
+    /// LivePaper.app (Contents/Helpers) — or nil.
+    private var loginItemApp: URL? {
+        let app = paths.helperExecutable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        guard app.pathExtension == "app",
+              FileOps.entryExists(app.appendingPathComponent("Contents/Library/LaunchAgents/\(LPPaths.helperLabel).plist")) else { return nil }
+        return app
+    }
+
+    /// Boots out whichever of `services` launchd has loaded (one step).
+    private func stopHelperJobs(only services: [String]) throws {
+        try perform("Stop the helper", skipIf: { services.contains(where: helperLoaded) ? nil : "not loaded" }) {
+            for service in services where helperLoaded(service) {
+                let result = try runner.run("/bin/launchctl", ["bootout", service], timeout: 15)
+                // Unregistering the login item may already have unloaded it.
+                guard result.succeeded || !helperLoaded(service) else {
+                    throw InstallError.commandFailed("launchctl bootout", result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+                }
             }
             return nil
         }
     }
 
     /// `launchctl print` (read-only) succeeds only for a loaded job.
-    private func helperLoaded() -> Bool {
-        (try? runner.run("/bin/launchctl", ["print", helperService], timeout: 10))?.succeeded ?? false
+    private func helperLoaded(_ service: String) -> Bool {
+        (try? runner.run("/bin/launchctl", ["print", service], timeout: 10))?.succeeded ?? false
+    }
+
+    private func helperIsRunning(_ service: String) -> Bool {
+        (try? runner.run("/bin/launchctl", ["print", service], timeout: 10)).map(SystemProbes.helperRunning) ?? false
     }
 
     private func installFallbackAgent() throws {
@@ -332,12 +465,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
         let plist = paths.fallbackAgentPlist
         try perform("Install the helper LaunchAgent at \(plist.path)") {
-            try FileOps.writeAtomically(try LaunchAgentPlist.contents(label: LPPaths.helperLabel, program: program), to: plist)
+            try FileOps.writeAtomically(try LaunchAgentPlist.contents(label: LaunchAgentPlist.label, program: program), to: plist)
             return nil
         }
-        try perform("Start the helper (\(helperService))") {
+        try perform("Start the helper (\(fallbackService))") {
             // Replace a running copy so a new app version's helper takes over.
-            _ = try runner.run("/bin/launchctl", ["bootout", helperService], timeout: 15)
+            _ = try runner.run("/bin/launchctl", ["bootout", fallbackService], timeout: 15)
             var result = try runner.run("/bin/launchctl", ["bootstrap", guiDomain, plist.path], timeout: 15)
             if !result.succeeded {
                 // bootout finishes asynchronously; bootstrap right after it can fail with EIO.
@@ -352,9 +485,18 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     }
 
     private func removeFallbackAgent() throws {
-        let plist = paths.fallbackAgentPlist
-        try perform("Remove the helper LaunchAgent plist", skipIf: { FileOps.entryExists(plist) ? nil : "not present" }) {
-            try FileManager.default.removeItem(at: plist)
+        let plists = [paths.fallbackAgentPlist, paths.legacyAgentPlist]
+        try perform("Remove the helper LaunchAgent plist", skipIf: { plists.contains(where: FileOps.entryExists) ? nil : "not present" }) {
+            for plist in plists where FileOps.entryExists(plist) { try FileManager.default.removeItem(at: plist) }
+            return nil
+        }
+    }
+
+    /// Installing LivePaper again lifts the uninstall marker (or the helper would exit at launch).
+    private func clearUninstallMarker() throws {
+        guard FileOps.entryExists(paths.uninstallMarker) else { return }
+        try perform("Clear the uninstall marker \(paths.uninstallMarker.path)") {
+            try FileOps.removeIfPresent(paths.uninstallMarker)
             return nil
         }
     }
@@ -497,6 +639,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// user's preferences, so reinstalling picks up where they left off.
     static let keptWithLibrary: Set<String> = ["Library", "state.json", PublishService.settingsFileName, AIService.settingsFileName]
 
+    /// Title of the uninstall step that undoes the screen-saver selection.
+    public static let restoreScreenSaverTitle = "Restore the previous screen saver choice"
+    /// Logged after it when SystemDefault had no known earlier choice and got macOS's Message saver.
+    public static let builtinSaverTitle = "Set the screen saver to macOS's Message saver (LivePaper had no record of an earlier one; " +
+                                          "pick another in System Settings › Wallpaper › Screen Saver)"
+
     /// Runs every uninstall step (continuing past failures; each step is idempotent, so running
     /// uninstall again retries what failed) and returns what happened. In a dry run nothing
     /// changes: steps with something to do are `.planned`, the rest `.skipped`. The lock keys are
@@ -504,26 +652,22 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     @discardableResult public func performUninstall(removeLibrary: Bool) -> [InstallStep] {
         let start = transcript.count
         let fm = FileManager.default
-        // 1. The helper first, so nothing restarts the saver or reacts to the changes below.
-        attempt { try unregisterHelper() }
-        // 2. The previous screen-saver choice (before the saver goes: the store must never point at a
-        //    missing module), 3. the lock keys, 4. any other preference LivePaper changed.
-        var saverStillChosen = false
+        // 0. The marker first: a login item this process can't unregister (the CLI can't) then can't
+        //    bring the helper back at the next login.
         attempt {
-            try perform("Restore the previous screen saver choice",
-                        skipIf: { FileOps.entryExists(paths.wallpaperSelectionBackup) ? nil : "LivePaper didn't change it" }) {
-                do {
-                    let report = try wallpaperApplier.restore(store.module, manifestURL: paths.wallpaperSelectionBackup)
-                    return report.outcome == .applied ? nil : "the screen saver was changed since"
-                } catch let error as WallpaperStoreError where !error.isTransient {
-                    // Retrying can't help (unknown store format, …): say so and finish the uninstall.
-                    return "couldn't be restored automatically (\(error.localizedDescription)); choose a screen saver in System Settings › Wallpaper"
-                } catch {
-                    saverStillChosen = true   // e.g. System Settings is open: retry the uninstall
-                    throw error
-                }
+            try perform("Mark LivePaper as uninstalled (\(paths.uninstallMarker.path))",
+                        skipIf: { FileOps.entryExists(paths.uninstallMarker) ? "already marked" : nil }) {
+                let note = "LivePaper was uninstalled on \(ISO8601DateFormatter().string(from: Date())). Its helper doesn't start " +
+                           "while this file exists; setting LivePaper up again removes it.\n"
+                try FileOps.writeAtomically(Data(note.utf8), to: paths.uninstallMarker)
+                return nil
             }
         }
+        // 1. The helper, so nothing restarts the saver or reacts to the changes below.
+        attempt { try unregisterHelper() }
+        // 2. The screen-saver choice (before the saver goes: the store must never point at a missing
+        //    module), 3. the lock keys, 4. any other preference LivePaper changed.
+        attempt { try restoreScreenSaverChoice() }
         attempt { try restoreSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, title: Self.restoreLockKeysTitle) }
         attempt {
             try perform("Restore changed system settings", skipIf: { loadDefaultsChanges().isEmpty ? "nothing changed" : nil }) {
@@ -531,27 +675,33 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 return nil
             }
         }
-        // 5. The saver bundle (renamed first so it leaves the screen-saver list atomically).
+        // 5. The saver bundle (renamed first so it leaves the screen-saver list atomically) — only
+        //    once the store no longer depends on it, re-read right before removing it.
+        let restoreFailed = transcript.dropFirst(start).contains { $0.title == Self.restoreScreenSaverTitle && $0.isFailure }
         attempt {
             try perform("Remove \(paths.installedSaver.path)", skipIf: {
                 if !FileOps.entryExists(paths.installedSaver) { return "not installed" }
-                return saverStillChosen ? "kept while it is still the selected screen saver; run uninstall again" : nil
+                return restoreFailed ? "kept while it is still the selected screen saver; run uninstall again" : nil
             }) {
+                guard !store.dependsOnSaver() else {
+                    throw InstallError.screenSaverStillSelected("the wallpaper settings still point at \(paths.installedSaver.path)")
+                }
                 let doomed = FileOps.stagingURL(in: paths.screenSaversDir, tag: "uninstall")
                 try fm.moveItem(at: paths.installedSaver, to: doomed)
                 try fm.removeItem(at: doomed)
                 return nil
             }
         }
-        // 6. LivePaper's data. Backups survive a failed restore so a second uninstall can retry it.
-        let restoreFailed = transcript.dropFirst(start).contains { if case .failed = $0.outcome { return true }; return false }
+        // 6. LivePaper's data. Backups survive any failure (a restore that couldn't run, a saver that
+        //    had to stay) so a second uninstall — or the user — can still use them.
+        let anyFailed = transcript.dropFirst(start).contains(where: \.isFailure)
         var kept = removeLibrary ? Set<String>() : Self.keptWithLibrary
-        if restoreFailed { kept.insert(paths.backups.lastPathComponent) }
+        if anyFailed { kept.insert(paths.backups.lastPathComponent) }
         let root = paths.supportRoot
         let doomed = { ((try? fm.contentsOfDirectory(atPath: root.path)) ?? []).filter { !kept.contains($0) } }
         let title = removeLibrary ? "Delete \(root.path), including the scene library"
                                   : "Delete LivePaper's caches, workspaces and backups (keeping the scene library)"
-        let deleteRoot = removeLibrary && !restoreFailed
+        let deleteRoot = removeLibrary && !anyFailed
         attempt {
             try perform(title, skipIf: {
                 if deleteRoot { return FileOps.entryExists(root) ? nil : "not present" }
@@ -563,6 +713,39 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             }
         }
         return Array(transcript.dropFirst(start))
+    }
+
+    /// Uninstall step 2: switches every Idle slot that still names LivePaper.saver to the user's
+    /// recorded original, the placeholder, or (SystemDefault without a known original) the
+    /// pre-LivePaper store's choice or macOS's own Message saver — whether or not LivePaper made the
+    /// selection itself. Fails, so the saver and backups stay, whenever that can't be done.
+    private func restoreScreenSaverChoice() throws {
+        let manifest = paths.wallpaperSelectionBackup
+        try perform(Self.restoreScreenSaverTitle, skipIf: {
+            // isSelected() also scans a store in an unknown format.
+            guard !store.isSelected() else { return nil }
+            return FileOps.entryExists(manifest) ? "the screen saver was changed since" : "LivePaper isn't the selected screen saver"
+        }) {
+            let report: WallpaperApplyReport
+            do {
+                report = try wallpaperApplier.restore(store.module, manifestURL: manifest, fallback: restoreFallback())
+            } catch let error as WallpaperStoreError where !error.isTransient && !error.wroteStore {
+                // Retrying alone can't help (unknown store format, a layout LivePaper doesn't edit, no
+                // earlier choice to put back, …): the user has to pick another screen saver.
+                throw InstallError.screenSaverStillSelected("LivePaper couldn't change it back automatically: \(error.localizedDescription)")
+            }
+            if !report.builtinSaverPaths.isEmpty {
+                record(Self.builtinSaverTitle, .done)
+            }
+            return report.outcome == .applied ? nil : "the screen saver was changed since"
+        }
+    }
+
+    /// The root-slot fallback for a restore: the raw store backup from before LivePaper's first
+    /// selection (if readable), then the built-in saver.
+    private func restoreFallback() -> WallpaperRestoreFallback {
+        let previous = FileManager.default.contents(atPath: paths.wallpaperStoreBackup.path).flatMap { try? WallpaperStoreDocument(data: $0) }
+        return WallpaperRestoreFallback(previousStore: previous, builtinSaver: WallpaperSaverModule(url: paths.builtinScreenSaver))
     }
 
     // MARK: - Step bookkeeping
