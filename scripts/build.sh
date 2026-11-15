@@ -15,6 +15,8 @@
 #                            timestamp are added (notarization is a separate step).
 #   LIVEPAPER_BUILD          CFBundleVersion (default: the number of commits on HEAD)
 #   LIVEPAPER_ARCHS          release architectures (default "arm64 x86_64")
+#   LIVEPAPER_PER_ARCH=1     build each architecture separately and lipo them (automatic when the
+#                            toolchain can't build several architectures at once)
 #
 # Version: CFBundleShortVersionString comes from the VERSION file at the repository root.
 # Nothing here launches a GUI process: SwiftPM, swiftc, lipo, strip, iconutil and codesign only.
@@ -27,7 +29,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --debug) DEBUG=1; shift ;;
     --out) OUT="$(mkdir -p "$2" && cd "$2" && pwd)"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -80,12 +82,14 @@ build_swift() {
     return
   fi
   # SwiftPM in Xcode 26+ builds all architectures in one go.
-  if QUIET_FAILURE=1 swiftpm -c release "${arch_flags[@]}"; then
+  if [ "${LIVEPAPER_PER_ARCH:-0}" != 1 ] && QUIET_FAILURE=1 swiftpm -c release "${arch_flags[@]}"; then
     swift build --package-path "$ROOT" -c release "${arch_flags[@]}" --show-bin-path
     return
   fi
   # Older SwiftPM (Command Line Tools only) can't: build each architecture separately and lipo.
-  echo "  universal build failed ($(grep -m1 -i error "$SWIFT_LOG" || echo "see $SWIFT_LOG")); building per architecture" >&2
+  if [ "${LIVEPAPER_PER_ARCH:-0}" != 1 ]; then
+    echo "  universal build failed ($(grep -m1 -i error "$SWIFT_LOG" || echo "see $SWIFT_LOG")); building per architecture" >&2
+  fi
   local fat="$WORK/universal" bins=()
   mkdir -p "$fat"
   for a in "${ARCHS[@]}"; do
