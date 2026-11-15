@@ -10,17 +10,25 @@
 //
 // Controls: Esc, a click, ⌘. (and Space, as in Quick Look) close it with a 0.25 s fade; ← → step
 // through the library or playlist order; C toggles the clock; L simulates the lock UI
-// (LivePaper.host.lockUI) so the clock hand-off can be seen. The hint bar fades out after 3 s and
-// returns when the pointer moves. A playlist preview also changes scene by itself on the playlist's
-// "Change scene" cadence, as the saver does.
+// (LivePaper.host.lockUI) so the clock hand-off can be seen. Every key acts once per press (a held
+// key's repeats do nothing), and the press that closed it is swallowed until it is released, so it
+// can't reopen the preview from the library card or the menu, or type into the app that gets focus
+// back (FullScreenKeys, FullScreenClosingKey). The hint bar fades out after 3 s and returns when the
+// pointer moves. A playlist preview also changes scene by itself on the playlist's "Change scene"
+// cadence, as the saver does.
 //
-// Power: the scene runs only while the window can be seen (LiveSceneHostView). Closing stops it at
-// once (frozen for the fade, released right after); hiding the app, switching to another app, the
-// displays sleeping, the session locking or switching, and a screen saver starting close it
-// immediately — the real saver takes over then. Nothing is left running once it is closed: no
-// timer, no observer, no web view.
+// Power: the scene runs only while the window can be seen (LiveSceneHostView), and a web scene
+// follows AC ⇄ battery and Low Power Mode changes as in the saver (LivePaper.host.power). Closing
+// stops it at once (frozen for the fade, released right after). It closes when it loses the
+// keyboard — switching to another app, or another LivePaper window becoming key (a click on one on
+// another display, the main window brought forward to explain a refused lock) — and at once when
+// the app hides, the displays sleep, the session locks or switches, or a screen saver starts: the
+// real saver takes over then. Nothing is left running once it is closed: no timer, no observer, no
+// web view (only the wait for the closing key's release, which ends with it).
 import AppKit
+import IOKit.ps
 import LivePaperCore
+import notify
 import SwiftUI
 
 @MainActor
@@ -63,6 +71,12 @@ private final class FullScreenPreviewSession {
 
     private enum Phase { case created, open, closing, closed }
 
+    /// What the preview runs on, as the saver resolves it (the profile's fps and render scale).
+    private static func currentPower() -> SaverPowerState {
+        let power = PowerSource.current()
+        return SaverPowerState(onBattery: power.onBattery, lowPowerMode: power.lowPower)
+    }
+
     static let hintTimeout: TimeInterval = 3
     static let pointerTimeout: TimeInterval = 2
     static let fadeIn: TimeInterval = 0.2
@@ -82,6 +96,11 @@ private final class FullScreenPreviewSession {
     private var lockPreview = false
     /// Per scene shown, like a new saver session.
     private var seed = FullScreenSceneConfig.randomSeed()
+    /// The power state the scene was configured for; changes reach the running scene.
+    private var power = FullScreenPreviewSession.currentPower()
+    private var powerToken: Int32 = NOTIFY_TOKEN_INVALID
+    /// The key press that closed the preview, until it is released.
+    private var closingKey: ClosingKeyWait?
     private let displayID: CGDirectDisplayID?
 
     private let state = FullScreenPreviewState()
@@ -154,7 +173,8 @@ private final class FullScreenPreviewSession {
         applyPointer(pointer.noteActivity(at: now))
     }
 
-    func close(_ reason: CloseReason) {
+    /// `key`: the key whose press closed it (its repeats are swallowed until it is released).
+    func close(_ reason: CloseReason, key: UInt16? = nil) {
         switch phase {
         case .created, .closed:
             return
@@ -165,6 +185,7 @@ private final class FullScreenPreviewSession {
             break
         }
         phase = .closing
+        if let key { closingKey = ClosingKeyWait(keyCode: key) }
         loadGeneration += 1
         hintTimer?.invalidate(); hintTimer = nil
         pointerTimer?.invalidate(); pointerTimer = nil
@@ -198,10 +219,17 @@ private final class FullScreenPreviewSession {
         window.orderOut(nil)
         window.onClose = nil
         window.contentView = nil
-        if let app, !app.isTerminated, NSApp.isActive {
-            NSApp.yieldActivation(to: app)
-            app.activate(from: .current, options: [])
+        if let app {
+            // Not while the closing key is still held: the other app would get its repeats.
+            let giveBack: @MainActor () -> Void = {
+                guard !app.isTerminated, NSApp.isActive else { return }
+                NSApp.yieldActivation(to: app)
+                app.activate(from: .current, options: [])
+            }
+            if let closingKey { closingKey.whenReleased(giveBack) } else { giveBack() }
         }
+        // A wait that is still on keeps itself until the key is up.
+        closingKey = nil
         onEnd?()
         onEnd = nil
     }
@@ -221,17 +249,31 @@ private final class FullScreenPreviewSession {
         NSApp.presentationOptions = saved
     }
 
+    /// Registered after open() made the window key (or, opened from the menu bar, asked for it to
+    /// become key as the app activates), so a resign only ever means the preview lost the keyboard.
     private func observe() {
         let nc = NotificationCenter.default
-        func add(_ center: NotificationCenter, _ name: Notification.Name, _ action: @escaping @MainActor (FullScreenPreviewSession) -> Void) {
-            observers.append((center, center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        func add(_ center: NotificationCenter, _ name: Notification.Name, object: AnyObject? = nil,
+                 _ action: @escaping @MainActor (FullScreenPreviewSession) -> Void) {
+            observers.append((center, center.addObserver(forName: name, object: object, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { if let self { action(self) } }
             }))
         }
         add(nc, NSApplication.didResignActiveNotification) { $0.close(.deactivated) }
+        // Another LivePaper window became key (clicked on another display, or the main window
+        // brought forward to explain a refused lock): the preview's keys would reach that window,
+        // and the preview would hide what it shows. (No focus to give back: the user is still here.)
+        add(nc, NSWindow.didResignKeyNotification, object: window) { $0.close(.deactivated) }
         add(nc, NSApplication.didHideNotification) { $0.close(.immediately) }
         add(nc, NSApplication.willTerminateNotification) { $0.close(.immediately) }
         add(nc, NSApplication.didChangeScreenParametersNotification) { $0.screensChanged() }
+        // AC ⇄ battery (kIOPSNotifyPowerSource fires on switches, not on every percent) and Low Power Mode.
+        add(nc, .NSProcessInfoPowerStateDidChange) { $0.powerChanged() }
+        var token: Int32 = NOTIFY_TOKEN_INVALID
+        let status = notify_register_dispatch(kIOPSNotifyPowerSource, &token, .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.powerChanged() }
+        }
+        if status == UInt32(NOTIFY_STATUS_OK) { powerToken = token }
         let ws = NSWorkspace.shared.notificationCenter
         add(ws, NSWorkspace.screensDidSleepNotification) { $0.close(.immediately) }
         add(ws, NSWorkspace.sessionDidResignActiveNotification) { $0.close(.immediately) }
@@ -244,6 +286,8 @@ private final class FullScreenPreviewSession {
     private func removeObservers() {
         for (center, token) in observers { center.removeObserver(token) }
         observers = []
+        if powerToken != NOTIFY_TOKEN_INVALID { notify_cancel(powerToken) }
+        powerToken = NOTIFY_TOKEN_INVALID
         distributedObserver?.invalidate()
         distributedObserver = nil
     }
@@ -281,18 +325,19 @@ private final class FullScreenPreviewSession {
         state.sceneName = manifest.name
         state.position = request.caption(for: sequence.current, in: sequence)
         state.message = nil
+        power = Self.currentPower()
         refreshHint()
         scheduleAutoAdvance()
         switch manifest.kind {
         case .video:
-            guard let file = manifest.video?.file else {
+            guard let url = FullScreenSceneConfig.videoFile(manifest.video?.file, in: item.packageURL) else {
                 removeHost()
-                state.message = "\u{201C}\(manifest.name)\u{201D} has no video file."
+                state.message = "\u{201C}\(manifest.name)\u{201D} has no video file the screen saver can play."
                 return
             }
             let clock = manifest.clock.position
             shown = (.video, clock)
-            install(.video(item.packageURL.appendingPathComponent(file), fit: manifest.video?.fit ?? .fill,
+            install(.video(url, fit: manifest.video?.fit ?? .fill,
                            clock: clock == .none ? nil : clock,
                            clockVisible: FullScreenSceneConfig.nativeClockVisible(showClock: clockOn, lockUI: lockPreview)))
         case .web:
@@ -332,10 +377,8 @@ private final class FullScreenPreviewSession {
 
     /// The saver's configuration for this scene, with the preview's clock and lock-UI state.
     private func webConfigScript(clock position: LPClockPosition) -> String {
-        let power = PowerSource.current()
-        return FullScreenSceneConfig.webConfigScript(showClock: clockOn, clockPosition: position, performance: performance,
-                                                     power: SaverPowerState(onBattery: power.onBattery, lowPowerMode: power.lowPower),
-                                                     seed: seed, lockUI: lockPreview)
+        FullScreenSceneConfig.webConfigScript(showClock: clockOn, clockPosition: position, performance: performance,
+                                              power: power, seed: seed, lockUI: lockPreview)
     }
 
     /// C and L: the running scene follows without reloading.
@@ -343,62 +386,92 @@ private final class FullScreenPreviewSession {
         guard let shown, let host else { return }
         switch shown.kind {
         case .web:
-            host.updateWeb(configScript: webConfigScript(clock: shown.clock),
-                           stateScript: FullScreenSceneConfig.stateScript(showClock: clockOn, lockUI: lockPreview))
+            updateWebScene()
         case .video:
             host.setVideoClockVisible(FullScreenSceneConfig.nativeClockVisible(showClock: clockOn, lockUI: lockPreview), animated: true)
         }
+    }
+
+    /// Brings a running web scene to the preview's state (and what a rebuilt page starts with).
+    private func updateWebScene() {
+        guard let shown, shown.kind == .web, let host else { return }
+        host.updateWeb(configScript: webConfigScript(clock: shown.clock),
+                       stateScript: FullScreenSceneConfig.stateScript(showClock: clockOn, lockUI: lockPreview,
+                                                                      performance: performance, power: power))
+    }
+
+    /// AC ⇄ battery or Low Power Mode: a web scene retargets its fps and render scale, as in the saver.
+    private func powerChanged() {
+        guard phase == .open else { return }
+        let now = Self.currentPower()
+        guard now != power else { return }
+        power = now
+        updateWebScene()
     }
 
     /// The next scene after the playlist's "Change scene" time (restarted by every change).
     private func scheduleAutoAdvance() {
         advanceTimer?.invalidate()
         advanceTimer = nil
-        guard let interval = autoAdvance, phase == .open else { return }
+        guard let interval = autoAdvance, phase == .open, sequence.canStep else { return }
         advanceTimer = Self.oneShot(at: Date().addingTimeInterval(interval)) { [weak self] in
             guard let self, self.phase == .open else { return }
             self.advanceTimer = nil
-            if self.sequence.retain(available: self.availableIDs), self.sequence.step(1) {
-                self.seed = FullScreenSceneConfig.randomSeed()
-                self.showCurrent()
-            }
+            self.move(1)
         }
     }
 
     private func step(_ delta: Int) {
-        guard sequence.retain(available: availableIDs), sequence.step(delta) else {
-            showHint()
+        move(delta)
+        showHint()
+    }
+
+    /// The next or previous scene, leaving out the ones deleted meanwhile (`advance`).
+    private func move(_ delta: Int) {
+        let before = sequence
+        guard sequence.advance(delta, available: availableIDs) else {
+            showCurrent()   // nothing left: says so
             return
         }
-        seed = FullScreenSceneConfig.randomSeed()
-        showCurrent()
-        showHint()
+        if sequence.current != before.current {
+            seed = FullScreenSceneConfig.randomSeed()
+            showCurrent()
+        } else if sequence != before {
+            // Only other scenes went: the same one stays, its caption ("2 of 5") and hint follow.
+            state.position = request.caption(for: sequence.current, in: sequence)
+            refreshHint()
+        }
     }
 
     // MARK: input
 
     private func handleKey(_ event: NSEvent) -> Bool {
         guard phase == .open else { return false }
-        switch event.keyCode {
-        case 53, 49:   // Esc; Space closes too, as in Quick Look
-            // A held Space (the press that opened the preview, repeating) must not close it again.
-            if !event.isARepeat { close(.byUser) }
-            return true
-        case 123, 124: // ← →
-            if !event.isARepeat { step(event.keyCode == 123 ? -1 : 1) }
-            return true
-        default:
-            break
-        }
-        let modifiers = event.modifierFlags.intersection([.command, .control, .option])
-        guard modifiers.isEmpty, let key = event.charactersIgnoringModifiers?.lowercased() else { return false }
-        switch key {
-        case "c":
-            clockOn.toggle()
-        case "l":
-            lockPreview.toggle()
-        default:
+        return perform(FullScreenKeys.keyDown(Self.press(event)), keyCode: event.keyCode)
+    }
+
+    private func handleKeyEquivalent(_ event: NSEvent) -> Bool {
+        guard phase == .open else { return false }
+        return perform(FullScreenKeys.keyEquivalent(Self.press(event)), keyCode: event.keyCode)
+    }
+
+    /// Whether the key was the preview's.
+    private func perform(_ action: FullScreenKeyAction, keyCode: UInt16) -> Bool {
+        switch action {
+        case .pass:
             return false
+        case .swallow:
+            return true
+        case .close:
+            close(.byUser, key: keyCode)
+            return true
+        case .step(let delta):
+            step(delta)
+            return true
+        case .toggleClock:
+            clockOn.toggle()
+        case .toggleLockUI:
+            lockPreview.toggle()
         }
         applySceneState()
         refreshHint()
@@ -406,22 +479,12 @@ private final class FullScreenPreviewSession {
         return true
     }
 
-    /// ⌘ shortcuts: ⌘. and ⌘W close (so does ⇧⌘F, which opened it); Quit and Hide go to the menu;
-    /// everything else is swallowed so nothing acts on the window behind the preview.
-    private func handleKeyEquivalent(_ event: NSEvent) -> Bool {
-        guard phase == .open else { return false }
-        let modifiers = event.modifierFlags.intersection([.command, .shift, .control, .option])
-        guard modifiers.contains(.command) else { return false }
-        let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
-        switch (modifiers, key) {
-        case ([.command], "."), ([.command], "w"), ([.command, .shift], "f"):
-            if !event.isARepeat { close(.byUser) }
-            return true
-        case ([.command], "q"), ([.command], "h"), ([.command, .option], "h"):
-            return false
-        default:
-            return true
-        }
+    private static func press(_ event: NSEvent) -> FullScreenKeyPress {
+        let flags = event.modifierFlags
+        return FullScreenKeyPress(keyCode: event.keyCode, key: event.charactersIgnoringModifiers?.lowercased() ?? "",
+                                  command: flags.contains(.command), shift: flags.contains(.shift),
+                                  control: flags.contains(.control), option: flags.contains(.option),
+                                  isRepeat: event.isARepeat)
     }
 
     private func pointerMoved() {
@@ -562,6 +625,54 @@ private final class FullScreenPreviewContentView: NSView {
 private final class PassThroughHostingView<Content: View>: NSHostingView<Content> {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override var acceptsFirstResponder: Bool { false }
+}
+
+/// Swallows the repeats of the key whose press closed the preview until it is released
+/// (FullScreenClosingKey), then runs what waited for that (giving focus back to the previous app).
+/// A local monitor sees key events before the window and the menu do. The monitor keeps the wait
+/// alive; it ends at the key-up, at the next key press, or when the app is deactivated (the key-up
+/// then goes elsewhere, and nobody is waiting for focus any more).
+@MainActor
+private final class ClosingKeyWait {
+    private let rule: FullScreenClosingKey
+    private var monitor: Any?
+    private var resignObserver: NSObjectProtocol?
+    private var onRelease: (@MainActor () -> Void)?
+
+    init(keyCode: UInt16) {
+        rule = FullScreenClosingKey(keyCode: keyCode)
+        // Strong on purpose: the monitor holds the wait until it ends (end() removes it).
+        monitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp]) { [self] event in
+            let keyUp = event.type == .keyUp, keyCode = event.keyCode, isRepeat = !keyUp && event.isARepeat
+            let verdict = MainActor.assumeIsolated { () -> FullScreenClosingKey.Verdict in
+                let verdict = self.rule.verdict(keyUp: keyUp, keyCode: keyCode, isRepeat: isRepeat)
+                if verdict == .released { self.end(released: true) }
+                return verdict
+            }
+            return verdict == .drop ? nil : event
+        }
+        resignObserver = NotificationCenter.default.addObserver(forName: NSApplication.didResignActiveNotification, object: nil,
+                                                                queue: .main) { [self] _ in
+            MainActor.assumeIsolated { self.end(released: false) }
+        }
+    }
+
+    /// Runs `action` once the key is released (now, when it already is).
+    func whenReleased(_ action: @escaping @MainActor () -> Void) {
+        if monitor == nil { action() } else { onRelease = action }
+    }
+
+    private func end(released: Bool) {
+        guard let monitor else { return }
+        NSEvent.removeMonitor(monitor)
+        self.monitor = nil
+        if let resignObserver { NotificationCenter.default.removeObserver(resignObserver) }
+        resignObserver = nil
+        let action = onRelease
+        onRelease = nil
+        // After the key-up has been delivered here, not from inside the monitor.
+        if released, let action { DispatchQueue.main.async { MainActor.assumeIsolated { action() } } }
+    }
 }
 
 /// Distributed notifications delivered even while the app is inactive (ARCHITECTURE §1).

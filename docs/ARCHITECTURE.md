@@ -543,11 +543,19 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
   and Saver/ClockOverlay.swift into the app for that. Entry points: the scene detail button and
   double-click, a card's hover button, context menu and Space, the Screen Saver screen's "Preview
   Playlist", the menu-bar extra, an AI session's result panel (before accepting — modifying shows
-  the new version first and ← → compare it with the current one), and ⇧⌘F (whatever the focused
-  view publishes as `FullScreenPreviewAction`). Keys: Esc / click / Space / ⌘. close, ← → step
-  (library order, playlist order, or new/current), C clock, L simulated lock UI. Playlist previews
-  also advance on the playlist's cadence. It runs only while visible; deactivation, hiding, display
-  sleep, a session switch, a lock or a saver start close it and nothing keeps running afterwards.
+  the new version first and ← → compare it with the current one; once accepted, the library scene,
+  as soon as the library has it), and ⇧⌘F (whatever the focused view publishes as
+  `FullScreenPreviewAction`). Keys: Esc / click / Space / ⌘. close, ← → step (library order,
+  playlist order, or new/current; a scene deleted meanwhile is skipped over, not stepped past), C
+  clock, L simulated lock UI. Each key acts once per press (a held key's repeats do nothing), and
+  the press that closed the preview is swallowed until its key is released, so a held Space or
+  ⇧⌘F can't reopen it and doesn't type into the app that gets focus back. Playlist previews also
+  advance on the playlist's cadence. Web scenes follow AC ⇄ battery and Low Power Mode changes like
+  the saver (`LivePaper.host.power`); video scenes play only a file publishing would accept (a
+  plain name inside the package, a regular file, a format the saver plays). It runs only while
+  visible and while it has the keyboard: deactivation, another LivePaper window becoming key,
+  hiding, display sleep, a session switch, a lock or a saver start close it and nothing keeps
+  running afterwards.
 * **Changes made elsewhere** (the CLI, Finder, an editor) show up without a relaunch:
   `LibraryWatcher` watches the support directory with one FSEvents stream (`Workspaces/`, `Logs/`
   and `backups/` excluded). Only `Library/<id>.lpscene` entries, their `scene.json`,

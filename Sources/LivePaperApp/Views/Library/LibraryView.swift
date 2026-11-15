@@ -150,7 +150,8 @@ struct SceneCard: View {
         .focusable()
         .focused(focus, equals: entry.id)
         .focusEffectDisabled()
-        .onKeyPress(.space) { previewFullScreen(); return .handled }
+        // Once per press: a held Space mustn't open the preview again the moment it closes.
+        .onKeyPress(.space, phases: .down) { _ in previewFullScreen(); return .handled }
         .onKeyPress(.return) { open(); return .handled }
         .onKeyPress(.leftArrow) { onMove(entry.id, -1); return .handled }
         .onKeyPress(.rightArrow) { onMove(entry.id, 1); return .handled }

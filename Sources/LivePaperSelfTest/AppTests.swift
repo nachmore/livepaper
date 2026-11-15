@@ -480,6 +480,95 @@ extension SelfTests {
             try expectEqual(seq.current, "a")
             try expect(!seq.retain(available: []), "nothing left")
         },
+        TestCase(name: "app.fullscreen.step-after-deletion") {
+            // The scene on screen was deleted: retain already moved to the next one, which is the step.
+            var seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c", "d"], start: "b", source: .library))
+            try expect(seq.advance(1, available: ["a", "c", "d"]))
+            try expectEqual(seq.current, "c")   // not d: c isn't skipped
+            try expectEqual(seq.ids, ["a", "c", "d"])
+            seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c", "d"], start: "b", source: .library))
+            try expect(seq.advance(-1, available: ["a", "c", "d"]))
+            try expectEqual(seq.current, "a")   // the one before the deleted scene
+            seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c", "d"], start: "d", source: .playlist))
+            try expect(seq.advance(1, available: ["a", "b", "c"]))
+            try expectEqual(seq.current, "a")   // wraps, like a step from d would
+            seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c", "d"], start: "d", source: .playlist))
+            try expect(seq.advance(-1, available: ["a", "b", "c"]))
+            try expectEqual(seq.current, "c")
+            // One scene left: either key shows it (the deleted one doesn't stay on screen).
+            for delta in [1, -1] {
+                var two = try unwrap(FullScreenPreviewSequence(ids: ["a", "b"], start: "b", source: .playlist))
+                try expect(two.advance(delta, available: ["a"]))
+                try expectEqual(two.current, "a")
+                try expect(!two.canStep)
+                try expectEqual(two.positionText, nil)
+            }
+            // The AI compare sequence keeps the candidate when the library scene goes.
+            var compare = try unwrap(FullScreenPreviewSequence(ids: ["ai-candidate:s1", "aurora"], start: "aurora", source: .candidate))
+            try expect(compare.advance(1, available: ["ai-candidate:s1"]))
+            try expectEqual(compare.current, "ai-candidate:s1")
+            // Nothing deleted: a plain step; other scenes deleted: the same scene stays, the count follows.
+            seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c"], start: "a", source: .library))
+            try expect(seq.advance(1, available: ["a", "b", "c"]))
+            try expectEqual(seq.current, "b")
+            seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c"], start: "a", source: .library))
+            try expect(seq.advance(1, available: ["a"]))
+            try expectEqual(seq.current, "a")
+            try expectEqual(seq.ids, ["a"])
+            try expect(!seq.advance(1, available: []), "nothing left")
+        },
+        TestCase(name: "app.fullscreen.keys") {
+            func down(_ keyCode: UInt16, _ key: String = "", command: Bool = false, shift: Bool = false, control: Bool = false,
+                      option: Bool = false, repeating: Bool = false) -> FullScreenKeyAction {
+                FullScreenKeys.keyDown(FullScreenKeyPress(keyCode: keyCode, key: key, command: command, shift: shift, control: control,
+                                                          option: option, isRepeat: repeating))
+            }
+            try expectEqual(down(FullScreenKeys.escape), .close)
+            try expectEqual(down(FullScreenKeys.space, " "), .close)
+            try expectEqual(down(FullScreenKeys.left), .step(-1))
+            try expectEqual(down(FullScreenKeys.right), .step(1))
+            try expectEqual(down(8, "c"), .toggleClock)
+            try expectEqual(down(8, "c", shift: true), .toggleClock)
+            try expectEqual(down(37, "l"), .toggleLockUI)
+            try expectEqual(down(8, "c", option: true), .pass)
+            try expectEqual(down(0, "a"), .pass)
+            // A held key acts once: its repeats are taken without doing anything.
+            for keyCode in [FullScreenKeys.escape, FullScreenKeys.space, FullScreenKeys.left, FullScreenKeys.right] {
+                try expectEqual(down(keyCode, repeating: true), .swallow)
+            }
+            try expectEqual(down(8, "c", repeating: true), .swallow)    // the clock doesn't flicker
+            try expectEqual(down(37, "l", repeating: true), .swallow)
+            func equivalent(_ key: String, shift: Bool = false, option: Bool = false, control: Bool = false,
+                            command: Bool = true, repeating: Bool = false) -> FullScreenKeyAction {
+                FullScreenKeys.keyEquivalent(FullScreenKeyPress(keyCode: 0, key: key, command: command, shift: shift, control: control,
+                                                                option: option, isRepeat: repeating))
+            }
+            try expectEqual(equivalent("."), .close)
+            try expectEqual(equivalent("w"), .close)
+            try expectEqual(equivalent("f", shift: true), .close)
+            try expectEqual(equivalent("f", shift: true, repeating: true), .swallow)
+            try expectEqual(equivalent("w", repeating: true), .swallow)
+            try expectEqual(equivalent("q"), .pass)
+            try expectEqual(equivalent("h"), .pass)
+            try expectEqual(equivalent("h", option: true), .pass)
+            try expectEqual(equivalent("f"), .swallow)              // nothing acts on the window behind
+            try expectEqual(equivalent("n"), .swallow)
+            try expectEqual(equivalent("c", command: false), .pass) // not a ⌘ shortcut: keyDown decides
+        },
+        TestCase(name: "app.fullscreen.closing-key-swallowed-until-released") {
+            let space = FullScreenClosingKey(keyCode: FullScreenKeys.space)
+            // Held past the fade: its repeats never reach the library card, the menu or the previous app.
+            try expectEqual(space.verdict(keyUp: false, keyCode: FullScreenKeys.space, isRepeat: true), .drop)
+            try expectEqual(space.verdict(keyUp: true, keyCode: FullScreenKeys.space, isRepeat: false), .released)
+            // Other keys are delivered; a new press (any key) means the repeating is over.
+            try expectEqual(space.verdict(keyUp: true, keyCode: 0, isRepeat: false), .deliver)
+            try expectEqual(space.verdict(keyUp: false, keyCode: 0, isRepeat: true), .deliver)
+            try expectEqual(space.verdict(keyUp: false, keyCode: 0, isRepeat: false), .released)
+            try expectEqual(space.verdict(keyUp: false, keyCode: FullScreenKeys.space, isRepeat: false), .released)
+            // ⇧⌘F: the F key, whatever the modifiers do meanwhile.
+            let f = FullScreenClosingKey(keyCode: 3)
+            try expectEqual(f.verdict(keyUp: false, keyCode: 3, isRepeat: true), .drop)
+        },
         TestCase(name: "app.fullscreen.library-order") {
             let all = ["mine-1", "mine-2", "builtin-1", "builtin-2"]
             try expectEqual(FullScreenPreviewSequence.libraryOrder(visible: ["mine-2", "builtin-1"], all: all, start: "builtin-1"),
@@ -612,6 +701,73 @@ extension SelfTests {
             try expect(sequence.retain(available: create.available(library: [])), "the candidate is still there")
             try expectEqual(sequence.current, key)
         },
+        TestCase(name: "app.fullscreen.ai-result-after-accept") {
+            let playlist = PlaylistSettings()
+            let result = SceneItem(manifest: SceneManifest(id: "new-scene", name: "New Scene", kind: .web),
+                                   packageURL: URL(fileURLWithPath: "/tmp/ws/new-scene.lpscene"), isBuiltin: false)
+            let library = ["neon-rain", "aurora"]
+            let key = FullScreenPreviewRequest.candidateKey(session: "s1")
+            // A scene that isn't in the library never opens the preview on another one.
+            try expect(FullScreenPreviewRequest.library(start: "new-scene", visible: library, all: library, playlist: playlist) == nil)
+            // Accepted, but the library hasn't reloaded yet (or the scene was deleted since): the result itself.
+            let reloading = try unwrap(FullScreenPreviewRequest.aiResult(result, session: "s1", accepted: "new-scene", replacing: nil,
+                                                                         visible: library, available: library, playlist: playlist))
+            try expectEqual(reloading.sequence.source, .candidate)
+            try expectEqual(reloading.sequence.current, key)
+            try expectEqual(reloading.candidate(for: key)?.item, result)
+            // Accepted and in the library: a library scene, stepping through the library.
+            let added = library + ["new-scene"]
+            let accepted = try unwrap(FullScreenPreviewRequest.aiResult(result, session: "s1", accepted: "new-scene", replacing: nil,
+                                                                        visible: added, available: added, playlist: playlist))
+            try expectEqual(accepted.sequence.source, .library)
+            try expectEqual(accepted.sequence.current, "new-scene")
+            try expectEqual(accepted.candidates, [])
+            // Not accepted: the candidate, compared with the current version when modifying.
+            let modify = try unwrap(FullScreenPreviewRequest.aiResult(result, session: "s1", accepted: nil, replacing: "aurora",
+                                                                      visible: library, available: library, playlist: playlist))
+            try expectEqual(modify.sequence.ids, [key, "aurora"])
+        },
+        TestCase(name: "app.fullscreen.follows-power-changes") {
+            // The running page gets the saver's power call with the profile resolved for the new state.
+            let battery = SaverPowerState(onBattery: true, lowPowerMode: false)
+            let ac = SaverPowerState(onBattery: false, lowPowerMode: false)
+            let onBattery = FullScreenSceneConfig.stateScript(showClock: true, lockUI: false, performance: .automatic, power: battery)
+            try expect(onBattery.contains(SaverJS.power(SaverPowerUpdate(power: battery,
+                                                                         profile: SaverPerformance.resolve(.automatic, power: battery, preview: false)))),
+                       onBattery)
+            try expect(onBattery.contains("\"fps\":30") && onBattery.contains("\"power\":\"battery\""), onBattery)
+            let onAC = FullScreenSceneConfig.stateScript(showClock: true, lockUI: false, performance: .automatic, power: ac)
+            try expect(onAC.contains("\"fps\":60") && onAC.contains("\"power\":\"ac\""), onAC)
+            let lowPower = FullScreenSceneConfig.stateScript(showClock: true, lockUI: false, performance: .automatic,
+                                                             power: SaverPowerState(onBattery: false, lowPowerMode: true))
+            try expect(lowPower.contains("\"fps\":30") && lowPower.contains("\"lowPower\":true"), lowPower)
+            // A fixed profile keeps its numbers; the page still learns the power state (lp.env.power).
+            let best = FullScreenSceneConfig.stateScript(showClock: true, lockUI: false, performance: .best, power: battery)
+            try expect(best.contains("\"fps\":60") && best.contains("\"power\":\"battery\""), best)
+        },
+        TestCase(name: "app.fullscreen.video-file-like-publish") {
+            let package = URL(fileURLWithPath: "/tmp/lib/clip.lpscene")
+            let exists: (URL) -> Bool = { _ in true }
+            try expectEqual(FullScreenSceneConfig.videoFile("clip.mov", in: package, isRegularFile: exists),
+                            package.appendingPathComponent("clip.mov"))
+            try expectEqual(FullScreenSceneConfig.videoFile("Clip.MP4", in: package, isRegularFile: exists)?.lastPathComponent, "Clip.MP4")
+            try expectEqual(FullScreenSceneConfig.videoFile("clip", in: package, isRegularFile: exists)?.lastPathComponent, "clip")
+            // Untrusted scene.json: nothing outside the package, nothing hidden, nothing the saver can't play.
+            for bad in [nil, "", "../../Movies/private.mov", "sub/clip.mov", "/Users/x/clip.mov", ".clip.mov", "..", "clip.avi"] {
+                try expect(FullScreenSceneConfig.videoFile(bad, in: package, isRegularFile: exists) == nil, bad ?? "nil")
+            }
+            try expect(FullScreenSceneConfig.videoFile("clip.mov", in: package, isRegularFile: { _ in false }) == nil, "missing")
+            // On disk: a regular file counts, a symlink to one doesn't.
+            let dir = try tempDir("fullscreen-video")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let file = dir.appendingPathComponent("clip.mov")
+            try Data("x".utf8).write(to: file)
+            let link = dir.appendingPathComponent("link.mov")
+            try FileManager.default.createSymbolicLink(at: link, withDestinationURL: file)
+            try expect(FullScreenSceneConfig.videoFile("clip.mov", in: dir) != nil)
+            try expect(FullScreenSceneConfig.videoFile("link.mov", in: dir) == nil, "a symlink")
+            try expect(FullScreenSceneConfig.videoFile("gone.mov", in: dir) == nil, "missing")
+        },
         TestCase(name: "app.fullscreen.screen-choice") {
             // Primary 1512×982 at the origin, a 2560×1440 display to its right, one above-left.
             let primary = CGRect(x: 0, y: 0, width: 1512, height: 982)
@@ -668,7 +824,7 @@ extension SelfTests {
             try expectEqual(balanced["fps"] as? Int, 60)
             try expectEqual(balanced["scale"] as? Double, 0.75)
             // C and L reach a running page through guarded host calls.
-            let state = FullScreenSceneConfig.stateScript(showClock: false, lockUI: true)
+            let state = FullScreenSceneConfig.stateScript(showClock: false, lockUI: true, performance: .automatic, power: ac)
             try expect(state.contains("h.config({\"clock\":false})"), state)
             try expect(state.contains(SaverJS.lockUI(true)), state)
             try expect(FullScreenSceneConfig.nativeClockVisible(showClock: true, lockUI: false))
