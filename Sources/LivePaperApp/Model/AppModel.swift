@@ -25,6 +25,8 @@ struct AppEnvironment {
     var appVersion: String
     /// The running .app bundle, or nil when not running from one (`swift run`, tests).
     var appBundlePath: String?
+    /// System Settings › Lock Screen (AppKit; Entry/SystemActions). A no-op in mock mode and tests.
+    var openLockScreenSettings: @MainActor () -> Void = {}
 
     static let onboardingCompletedKey = "onboardingCompleted"
 }
@@ -106,6 +108,8 @@ final class AppModel {
     var lastPublished: LPPlaylist? { lastPublishResult?.playlist }
     private(set) var sharedState: LPSharedState
     private(set) var installStatus = InstallStatus()
+    /// installStatus has been read at least once (until then nothing is known about the system).
+    private(set) var installStatusLoaded = false
     private(set) var isInstallBusy = false
     private(set) var isLocking = false
 
@@ -482,15 +486,32 @@ final class AppModel {
     /// Outcome of "Lock Now".
     enum LockRoute: Equatable {
         case helper, screenSaverEngine, failed
+        /// Starting the screen saver wouldn't lock the Mac (password not required immediately):
+        /// nothing was started and the user was told why.
+        case refused
         /// Mock mode: nothing happens on the system.
         case sample
         /// A Lock Now is already in progress.
         case busy
     }
 
+    /// Why "Lock Now" (and the helper's shortcut) won't lock right now, as far as the last status
+    /// read knows: the menu disables Lock Now and explains. nil until the status has been read.
+    var lockRefusal: LPLockRefusal? {
+        guard installStatusLoaded, !installStatus.passwordImmediately else { return nil }
+        return .passwordNotImmediate
+    }
+
+    /// Tells the user why LivePaper didn't lock (from Lock Now, or the helper's LPNotification.lockRefused).
+    func showLockRefusal(_ refusal: LPLockRefusal) {
+        banners.post(.warning, refusal.title, message: refusal.message,
+                     actions: [.init(title: "Open Lock Screen Settings") { [environment] in environment.openLockScreenSettings() }])
+    }
+
     /// Menu-bar "Lock Now": the helper runs its lock flow; without a helper LivePaper starts the
     /// screen saver itself. With "require password immediately" the saver locks, and loginwindow
-    /// draws its lock UI over the running scene (ARCHITECTURE §1, §7).
+    /// draws its lock UI over the running scene (ARCHITECTURE §1, §7). Without it, starting the
+    /// saver wouldn't lock the Mac, so nothing is started and the user is told why.
     @discardableResult
     func lockNow() async -> LockRoute {
         if environment.isMock {
@@ -500,6 +521,12 @@ final class AppModel {
         guard !isLocking else { return .busy }
         isLocking = true
         defer { isLocking = false }
+        // Fresh, not the last status shown: the user may just have changed it in System Settings.
+        await refreshInstallStatus()
+        guard installStatus.passwordImmediately else {
+            showLockRefusal(.passwordNotImmediate)
+            return .refused
+        }
         if !installStatus.saverSelected {
             banners.post(.warning, "LivePaper isn't your screen saver yet",
                          message: "Locking will show the regular lock screen.",
@@ -525,7 +552,10 @@ final class AppModel {
 
     func refreshInstallStatus() async {
         let install = services.install
-        if let s = try? await offMain({ install.status() }) { installStatus = s }
+        if let s = try? await offMain({ install.status() }) {
+            installStatus = s
+            installStatusLoaded = true
+        }
     }
 
     /// Installs (if needed) and selects the saver. Returns false when macOS needs the user to pick

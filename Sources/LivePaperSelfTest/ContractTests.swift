@@ -43,7 +43,7 @@ extension SelfTests {
         },
         TestCase(name: "contracts.notifications") {
             let names = [LPNotification.stateChanged, LPNotification.openApp, LPNotification.lockNow, LPNotification.lockNowAccepted,
-                         LPNotification.hotkeyRecording, LPNotification.published]
+                         LPNotification.lockRefused, LPNotification.hotkeyRecording, LPNotification.published]
             try expectEqual(Set(names).count, names.count)
             try expect(names.allSatisfy { $0.hasPrefix(LPPaths.bundleID + ".") })
             try expectEqual(LPNotification.requestIDKey, "requestID")

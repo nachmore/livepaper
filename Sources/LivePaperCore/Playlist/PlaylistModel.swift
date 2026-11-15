@@ -105,12 +105,16 @@ public enum LPNotification {
     /// userInfo[requestIDKey]: the request's id. The app falls back to starting ScreenSaverEngine
     /// itself when no answer arrives within a second (no helper running).
     public static let lockNowAccepted = "com.nachmore.livepaper.lockNowAccepted"
+    /// Helper → app: the LivePaper lock was refused because starting the screen saver wouldn't lock
+    /// the Mac (password not required immediately). userInfo[reasonKey]: an `LPLockRefusal` raw value.
+    public static let lockRefused = "com.nachmore.livepaper.lockRefused"
     /// App → helper: the hotkey recorder is active (userInfo[activeKey]: Bool); suspend the shortcut
     /// meanwhile so pressing the current shortcut while re-recording doesn't lock the Mac.
     public static let hotkeyRecording = "com.nachmore.livepaper.hotkeyRecording"
     /// userInfo keys of the notifications above.
     public static let requestIDKey = "requestID"
     public static let activeKey = "active"
+    public static let reasonKey = "reason"
     /// App → saver (preview instances): playlist was republished.
     public static let published = "com.nachmore.livepaper.published"
     /// System (distributed; object = the user's uid as a string; verified on macOS 26.7): loginwindow

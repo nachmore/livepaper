@@ -11,11 +11,14 @@
 //    RegisterEventHotKey, which needs no TCC permission. Re-read on LPNotification.stateChanged;
 //    suspended while the app's shortcut recorder is active (LPNotification.hotkeyRecording,
 //    userInfo["active"]) so pressing the current shortcut to re-record it doesn't lock the Mac.
-//  • The lock flow, on that shortcut or LPNotification.lockNow: unless a screen saver is already
+//  • The lock flow, on that shortcut or LPNotification.lockNow (answered at once with
+//    LPNotification.lockNowAccepted, echoing the request id): unless a screen saver is already
 //    running or the session is already locked, launch /System/Library/CoreServices/
 //    ScreenSaverEngine.app. With "Require password after screen saver begins: Immediately" the saver
-//    locks and loginwindow draws its lock UI over the running scene. When the password delay isn't
-//    immediate the helper logs a warning; it never falls back to private lock APIs.
+//    locks and loginwindow draws its lock UI over the running scene. When the password isn't required
+//    immediately (or the setting can't be read) starting the saver wouldn't lock, so the helper starts
+//    nothing and posts LPNotification.lockRefused, which the app shows (the helper opens the app when
+//    it isn't running). It never falls back to private lock APIs.
 //  • LPNotification.openApp, posted by the sandboxed saver's "Open LivePaper…" button (sandboxed
 //    code can't launch apps): opens the app that contains this helper.
 // ⌃⌘Q, Apple menu › Lock Screen and the Touch ID / lock key are not handled here: the app sets

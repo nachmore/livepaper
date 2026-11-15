@@ -71,6 +71,8 @@ final class WindowRouter {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Menu-bar app: no Dock icon until the main window appears (DockIconPolicy). Info.plist
         // sets LSUIElement too; this also covers `swift run`, where there is no Info.plist.
@@ -80,7 +82,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         let model = AppBootstrap.model
         if !model.environment.isMock { EmbeddedRenderServer.start() }
-        Task { await model.start() }
+        // The helper opens LivePaper with `--lock-refused <reason>` when it refused a lock while the
+        // app wasn't running.
+        let refusedAtLaunch = model.environment.isMock ? nil : LPLockRefusal.fromLaunchArguments(CommandLine.arguments)
+        Task {
+            await model.start()
+            if let refusedAtLaunch { Self.present(refusedAtLaunch, model: model) }
+        }
+        if !model.environment.isMock { observeLockState(model) }
+    }
+
+    /// The helper's refusals (shown at once: the user just asked to lock) and the moment the user
+    /// leaves System Settings (where the password setting may have changed: Lock Now's state).
+    private func observeLockState(_ model: AppModel) {
+        let distributed = DistributedNotificationCenter.default()
+        observers.append((distributed, distributed.addObserver(forName: .init(LPNotification.lockRefused), object: nil, queue: .main) { note in
+            guard let refusal = LPLockRefusal.fromUserInfo(note.userInfo) else { return }
+            MainActor.assumeIsolated { Self.present(refusal, model: model) }
+        }))
+        let workspace = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didDeactivateApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            observers.append((workspace, workspace.addObserver(forName: name, object: nil, queue: .main) { note in
+                let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                guard app?.bundleIdentifier == SystemActions.systemSettingsBundleID else { return }
+                MainActor.assumeIsolated { _ = Task { await model.refreshInstallStatus() } }
+            }))
+        }
+    }
+
+    private static func present(_ refusal: LPLockRefusal, model: AppModel) {
+        model.showLockRefusal(refusal)
+        Task { await model.refreshInstallStatus() }
+        WindowRouter.shared.openMainWindow?()
+        NSApp.activate()
     }
 
     /// Launching LivePaper again (Finder, Spotlight, the helper relaying the saver's "Open

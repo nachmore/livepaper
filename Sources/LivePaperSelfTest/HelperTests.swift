@@ -323,7 +323,8 @@ extension SelfTests {
 
     static var helperPolicy: [TestCase] { [
         TestCase(name: "helper.lock.decision") {
-            let idle = HelperLockSituation(engineExists: true, screenSaverRunning: false, sessionLocked: false, launchInFlight: false)
+            let idle = HelperLockSituation(engineExists: true, screenSaverRunning: false, sessionLocked: false, launchInFlight: false,
+                                           password: .immediate)
             try expectEqual(HelperLockPolicy.decide(idle), .startScreenSaver)
             var s = idle; s.sessionLocked = true
             guard case .skip = HelperLockPolicy.decide(s) else { throw TestFailure(description: "locked session must be left alone") }
@@ -336,6 +337,37 @@ extension SelfTests {
             // Already locked wins over a missing engine (nothing to do either way).
             s.sessionLocked = true
             guard case .skip = HelperLockPolicy.decide(s) else { throw TestFailure(description: "locked first") }
+        },
+        TestCase(name: "helper.lock.refuses-unless-password-immediate") {
+            // Starting the saver only locks with "Require password … Immediately"; otherwise the Mac
+            // would stay unlocked behind a saver that looks locked. Refuse (and say why) instead.
+            let idle = HelperLockSituation(engineExists: true, screenSaverRunning: false, sessionLocked: false, launchInFlight: false,
+                                           password: .delayed)
+            try expectEqual(HelperLockPolicy.decide(idle), .refuse(.passwordDelayed))
+            var s = idle; s.password = .off
+            try expectEqual(HelperLockPolicy.decide(s), .refuse(.passwordOff))
+            s.password = .unknown
+            try expectEqual(HelperLockPolicy.decide(s), .refuse(.passwordUnknown))
+            s.password = .immediate
+            try expectEqual(HelperLockPolicy.decide(s), .startScreenSaver)
+            // Nothing to refuse when nothing would be started.
+            s = idle; s.sessionLocked = true
+            guard case .skip = HelperLockPolicy.decide(s) else { throw TestFailure(description: "already locked: nothing to do") }
+            s = idle; s.screenSaverRunning = true
+            guard case .skip = HelperLockPolicy.decide(s) else { throw TestFailure(description: "running saver: nothing to do") }
+            // The policy the agent reads right before deciding, from sysadminctl.
+            let delayed = HelperPasswordPolicy.resolve(managed: [:], sysadminctlOutput: "screenLock delay is 300 seconds", user: [:])
+            try expectEqual(HelperLockPolicy.refusal(for: delayed.requirement), .passwordDelayed)
+            // The reason travels as a raw value and comes back as the same refusal (app side).
+            for refusal in LPLockRefusal.allCases {
+                try expectEqual(LPLockRefusal.fromUserInfo(refusal.userInfo), refusal)
+                try expectEqual(LPLockRefusal.fromLaunchArguments(["/Applications/LivePaper.app/Contents/MacOS/LivePaper"] + refusal.launchArguments),
+                                refusal)
+                try expect(refusal.message.contains("Immediately") && refusal.message.contains("\u{2303}\u{2318}Q"), refusal.message)
+            }
+            try expect(LPLockRefusal.fromLaunchArguments([LPLockRefusal.launchArgument]) == nil
+                       && LPLockRefusal.fromLaunchArguments([LPLockRefusal.launchArgument, "anything"]) == nil
+                       && LPLockRefusal.fromUserInfo([LPNotification.reasonKey: "anything"]) == nil)
         },
         TestCase(name: "helper.lock-now.accepts-with-request-id") {
             try expectEqual(HelperLockNowReply.requestID(from: [LPNotification.requestIDKey: "A1"]), "A1")

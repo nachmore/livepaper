@@ -3,8 +3,9 @@
 //
 // LivePaper's lock is "start the screen saver; the saver locks", which only locks when the password
 // is required immediately (askForPasswordDelay = 0). The helper never tries to lock any other way
-// (no private lock calls): when the delay isn't immediate it logs a warning and the saver simply
-// runs unlocked until the delay passes.
+// (no private lock calls): it reads this policy right before every lock, and when the password isn't
+// required immediately (or can't be read) it starts nothing and tells the user why
+// (HelperLockPolicy.decide → LPLockRefusal).
 //
 // Sources, strongest first:
 //  1. A configuration profile (/Library/Managed Preferences[/<user>]/com.apple.screensaver.plist):
@@ -43,8 +44,8 @@ struct HelperPasswordPolicy: Equatable, Sendable, Codable {
         self.requirement = requirement; self.delaySeconds = delaySeconds; self.source = source
     }
 
-    /// What to tell the user when the LivePaper lock won't actually lock; nil when it will (or when
-    /// nothing is known).
+    /// What to tell the user when the LivePaper lock won't lock; nil when it will (or when nothing
+    /// is known — the lock then refuses too, see HelperLockPolicy).
     var warning: String? {
         switch requirement {
         case .immediate, .unknown:
@@ -52,10 +53,11 @@ struct HelperPasswordPolicy: Equatable, Sendable, Codable {
         case .delayed:
             let delay = delaySeconds.map { "after \($0) s" } ?? "after a delay"
             return "\"Require password after screen saver begins\" is set to \(delay), not Immediately: the LivePaper lock "
-                + "starts the screen saver but the Mac isn't locked until then. Change it in System Settings › Lock Screen."
+                + "shortcut and Lock Now refuse to run, because starting the screen saver wouldn't lock the Mac. "
+                + "Change it in System Settings › Lock Screen."
         case .off:
-            return "\"Require password after screen saver begins\" is off: the LivePaper lock starts the screen saver "
-                + "but doesn't lock the Mac. Turn it on (Immediately) in System Settings › Lock Screen."
+            return "\"Require password after screen saver begins\" is off: the LivePaper lock shortcut and Lock Now refuse "
+                + "to run, because starting the screen saver wouldn't lock the Mac. Turn it on (Immediately) in System Settings › Lock Screen."
         }
     }
 

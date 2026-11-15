@@ -224,7 +224,8 @@ The app writes it and posts `com.nachmore.livepaper.stateChanged` (distributed);
 |---|---|---|
 | `stateChanged` | app → helper | — |
 | `lockNow` | app → helper ("Lock Now") | `requestID` |
-| `lockNowAccepted` | helper → app (the lock flow runs) | the request's `requestID` |
+| `lockNowAccepted` | helper → app (the request was handled; sent before the lock flow runs) | the request's `requestID` |
+| `lockRefused` | helper → app (the lock was refused: the password isn't required immediately) | `reason`: an `LPLockRefusal` raw value |
 | `hotkeyRecording` | app → helper (suspend the shortcut while re-recording it) | `active`: Bool |
 | `openApp` | saver → helper (open the app; the sandboxed saver can't) | none (sandboxed posters may not attach any) |
 | `published` | app/CLI → saver previews (reload) | — |
@@ -314,12 +315,21 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   (Accessibility) is NOT needed and not planned.
 * **Optional extra shortcut:** Carbon `RegisterEventHotKey` (no TCC) for `state.lock.hotkey`
   (default ⌃⌘L). Suspended while `hotkeyRecording` says `active: true`.
-* **Lock flow** (shortcut or `lockNow`): if a saver is already running → nothing; else launch
-  `/System/Library/CoreServices/ScreenSaverEngine.app` (the saver locks immediately).
-  If "Require password … Immediately" is off, fall back to `SACLockScreenImmediate` after start.
-* **Lock Now:** the app posts `lockNow` with a `requestID`; the helper answers `lockNowAccepted`
-  with the same `requestID` (deliverImmediately) and runs the lock flow. Without an answer within
-  1 s the app launches ScreenSaverEngine itself (explicit user action only).
+* **Lock flow** (shortcut or `lockNow`): if the session is locked or a saver is already running →
+  nothing; else read the password policy (`sysadminctl -screenLock status`, right before every
+  lock) and launch `/System/Library/CoreServices/ScreenSaverEngine.app` (the saver locks
+  immediately). **If "Require password … Immediately" is off, set to a delay, or can't be read,
+  starting the saver wouldn't lock the Mac, so nothing is started:** the helper posts `lockRefused`
+  (the app shows why, with a button to System Settings › Lock Screen) and, when the app isn't
+  running, opens it with `--lock-refused <reason>`. No private lock API is ever used
+  (`LPLockRefusal`, `HelperLockPolicy.decide`).
+* **Lock Now:** the app re-reads the install status; if the password isn't required immediately it
+  refuses itself (banner, no request). Otherwise it posts `lockNow` with a `requestID`; the helper
+  answers `lockNowAccepted` with the same `requestID` (deliverImmediately) as soon as the request
+  arrives — also when its lock flow then skips or refuses — and runs the lock flow. Without an
+  answer within 1 s the app launches ScreenSaverEngine itself (explicit user action only).
+* **Uninstall:** if `LPPaths.uninstallMarker` exists at launch, the agent exits 0 before it creates
+  anything (launchd's KeepAlive restarts it only after a crash).
 * Watches `state.json` / `stateChanged`; relays `openApp` from the saver.
 * Idle footprint: zero timers; wakes only on events.
 
@@ -420,7 +430,9 @@ Budgets (`CheckBudgets`):
 ## 11. App UX (`Sources/LivePaperApp`)
 * **Menu-bar extra:** Lock Now (shows the extra shortcut) · what the screen saver plays · Next
   Scene · AI jobs (open / stop all) · Open LivePaper · Settings… · Quit.
-  Lock Now posts `lockNow` and falls back to ScreenSaverEngine after 1 s (§7).
+  Lock Now posts `lockNow` and falls back to ScreenSaverEngine after 1 s (§7). While the password
+  isn't required immediately, Lock Now is disabled with a one-line explanation and an "Open Lock
+  Screen Settings…" item (the status is re-read when the user leaves System Settings).
 * **Main window (NavigationSplitView):**
   * *Library* — grid of live thumbnails (hover = live preview), badges (video/web/AI, energy class).
   * *Scene detail* — full live preview (16:10 and 32:9), Use as Screen Saver / Add to Playlist,

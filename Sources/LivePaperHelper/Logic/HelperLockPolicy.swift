@@ -26,6 +26,8 @@ struct HelperLockSituation: Equatable, Sendable {
     var sessionLocked: Bool
     /// The helper already asked Launch Services to start the engine and hasn't heard back.
     var launchInFlight: Bool
+    /// "Require password after screen saver begins", read just before deciding.
+    var password: HelperPasswordPolicy.Requirement
 }
 
 enum HelperLockDecision: Equatable, Sendable {
@@ -33,6 +35,8 @@ enum HelperLockDecision: Equatable, Sendable {
     case startScreenSaver
     /// Do nothing (the reason is logged).
     case skip(String)
+    /// Starting the saver wouldn't lock the Mac: start nothing and tell the user why.
+    case refuse(LPLockRefusal)
     /// Can't lock (the reason is logged as an error).
     case fail(String)
 }
@@ -40,12 +44,26 @@ enum HelperLockDecision: Equatable, Sendable {
 enum HelperLockPolicy {
     /// LivePaper's lock is "saver first, the saver locks". Never start a saver once the session is
     /// locked: loginwindow only shows a saver that was running when the lock began (see main.swift).
+    /// And never start one as a "lock" unless the password is required immediately: otherwise the
+    /// Mac would stay unlocked behind a saver that looks locked. No private lock API is used instead.
     static func decide(_ situation: HelperLockSituation) -> HelperLockDecision {
         if situation.sessionLocked { return .skip("the session is already locked") }
         if situation.screenSaverRunning { return .skip("a screen saver is already running") }
         if situation.launchInFlight { return .skip("the screen saver is already being started") }
+        if let refusal = refusal(for: situation.password) { return .refuse(refusal) }
         if !situation.engineExists { return .fail("ScreenSaverEngine.app is missing") }
         return .startScreenSaver
+    }
+
+    /// nil when the saver locks the Mac as it starts. An unreadable setting also refuses: the lock
+    /// must fail safe (⌃⌘Q always works).
+    static func refusal(for requirement: HelperPasswordPolicy.Requirement) -> LPLockRefusal? {
+        switch requirement {
+        case .immediate: return nil
+        case .delayed: return .passwordDelayed
+        case .off: return .passwordOff
+        case .unknown: return .passwordUnknown
+        }
     }
 }
 

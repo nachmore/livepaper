@@ -50,6 +50,8 @@ enum SystemActions {
         _ = try await NSWorkspace.shared.openApplication(at: engine, configuration: config)
     }
 
+    nonisolated static let systemSettingsBundleID = "com.apple.systempreferences"
+
     /// System Settings › Lock Screen (for "Require password after screen saver begins").
     static func openLockScreenSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.Lock-Screen-Settings.extension") {

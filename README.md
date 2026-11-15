@@ -40,7 +40,9 @@ desktop picture. LivePaper builds on exactly that:
   can't run, the Mac still locks). LivePaper remembers the previous value and uninstall restores
   it. Closing the lid or letting the display sleep still locks to the wallpaper.
 * **The helper.** A small login item (`LivePaperHelper`) provides an optional extra lock shortcut
-  of your choice and the menu bar's *Lock now*.
+  of your choice and the menu bar's *Lock now*. Both start the screen saver and let it lock, which
+  only locks with *Require password after screen saver begins: Immediately*. Otherwise they refuse
+  and say why rather than start a screen saver that merely looks locked (⌃⌘Q always locks).
 * **No wasted energy.** After every unlock macOS quietly pre-starts a hidden copy of the screen
   saver. LivePaper's saver renders nothing until the session is actually locked, pauses when the
   displays sleep, and exits when the saver stops.
