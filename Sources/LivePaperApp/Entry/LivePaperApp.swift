@@ -136,8 +136,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Closing the main window keeps LivePaper running in the menu bar.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
+    /// Agents run in their own process groups and don't die with LivePaper: quitting (the menu,
+    /// ⌘Q, logout, the end of an uninstall) waits until they are gone, for at most a few seconds.
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let model = AppBootstrap.model
+        guard !model.sessions.isEmpty else { return .terminateNow }
+        Task { @MainActor in
+            await model.stopAllAgents()
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
-        // Agents run as child process groups; never leave them running after LivePaper quits.
+        // Fallback for a quit that skipped applicationShouldTerminate (normally a no-op by now).
         for session in AppBootstrap.model.runningSessions { session.cancel() }
     }
 }

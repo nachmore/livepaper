@@ -235,7 +235,7 @@ private struct SessionResultPanel: View {
         let state = session.state
         VStack(alignment: .leading, spacing: 18) {
             hero(state)
-            if !state.stills.isEmpty { filmstrip(state.stills) }
+            if !state.stills.isEmpty { filmstrip(state) }
             if let report = state.report {
                 SectionBox(title: "LivePaper Check", symbol: "checklist") {
                     CheckReportSummary(report: report)
@@ -254,7 +254,8 @@ private struct SessionResultPanel: View {
                 if let candidate, selectedStill == nil {
                     ScenePreview(item: candidate, quality: .full, cornerRadius: 12)
                 } else if let still = selectedStill ?? state.stills.last {
-                    ThumbnailImage(url: still, maxPixel: 1024)
+                    // Each `livepaper check` run rewrites the same files: the revision makes a rewrite reload.
+                    ThumbnailImage(url: still, revision: state.stillRevision(still), maxPixel: 1024)
                 } else {
                     VStack(spacing: 10) {
                         if state.phase.isTerminal {
@@ -277,8 +278,9 @@ private struct SessionResultPanel: View {
             .accessibilityLabel(candidate != nil ? "Live preview of the result" : "Latest render")
     }
 
-    private func filmstrip(_ stills: [URL]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+    private func filmstrip(_ state: AISessionState) -> some View {
+        let stills = state.stills
+        return VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Text("Renders").font(.headline)
                 Text("\(stills.count)").foregroundStyle(.secondary)
@@ -293,7 +295,7 @@ private struct SessionResultPanel: View {
                         Button {
                             selectedStill = url
                         } label: {
-                            ThumbnailImage(url: url, maxPixel: 240)
+                            ThumbnailImage(url: url, revision: state.stillRevision(url), maxPixel: 240)
                                 .frame(width: 96, height: 60)
                                 .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                                 .overlay {

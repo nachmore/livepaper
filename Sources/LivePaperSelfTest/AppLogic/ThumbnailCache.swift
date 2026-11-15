@@ -1,0 +1,1 @@
+../../LivePaperApp/Views/Preview/ThumbnailCache.swift
