@@ -2,8 +2,8 @@
 import LivePaperCore
 import SwiftUI
 
-/// Pass a new `revision` whenever the file at `url` was rewritten under the same name; the same
-/// path + revision + size is never decoded twice.
+/// Pass a new `revision` whenever the file at `url` was rewritten under the same name: images are
+/// cached by path + revision + size, so without one a rewritten file keeps showing its old picture.
 struct ThumbnailImage: View {
     let url: URL?
     var revision: Int = 0
