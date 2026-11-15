@@ -600,11 +600,27 @@ extension SelfTests {
                 try expectEqual(children(ws.sdk.appendingPathComponent("examples")), ["aurora", "orbit", "waves"])   // web only, first 3
                 try expect(exists(ws.sdk.appendingPathComponent("templates/web/scene.js")))
 
-                let shim = try SystemCommandRunner().run(ws.bin.appendingPathComponent("livepaper").path, ["list", "a b"])
-                try expectEqual(shim.stdout, "fake-cli list a b\n")
+                // The shim runs the scene commands, with the session's variables, and refuses everything else.
+                let shimPath = ws.bin.appendingPathComponent("livepaper").path
+                let shim = try SystemCommandRunner().run(shimPath, ["still", "a b"])
+                try expectEqual(shim.stdout, "fake-cli still a b\n")
+                let envCLI = sb.root.appendingPathComponent("tools/env-cli")
+                try sb.writeExecutable("#!/bin/sh\nenv", to: envCLI)
+                let envWS = try WorkspaceBuilder(library: lib, runtimeDirectory: sb.runtime, builtinScenesDirectory: sb.builtins,
+                                                 workspacesDirectory: sb.workspaces, cliPath: envCLI).build(.create(prompt: "x"), sessionID: "s1-env")
+                let env = try SystemCommandRunner().run(envWS.bin.appendingPathComponent("livepaper").path, ["bench", "x"])
+                try expect(env.stdout.contains("\(AISessionPolicy.sessionVariable)=s1-env\n"), env.stdout)
+                try expect(env.stdout.contains("\(AISessionPolicy.workspaceVariable)=\(envWS.root.path)\n"), env.stdout)
+                try expect(env.stdout.contains("\(AISessionPolicy.renderSpoolVariable)=\(envWS.renderSpool.path)\n"), env.stdout)
+                for refused in [["uninstall", "--yes"], ["ai", "create", "x"], ["publish"], ["import", "x"], ["new", "x"], ["server", "stop"],
+                                ["list"], ["doctor"], ["-x"], []] {
+                    let r = try SystemCommandRunner().run(shimPath, refused)
+                    try expectEqual(r.status, 2)
+                    try expect(r.stdout.isEmpty && r.stderr.contains("not available in an AI session"), "\(refused): \(r.stdout) \(r.stderr)")
+                }
                 let missing = WorkspaceBuilder(library: lib, runtimeDirectory: sb.runtime, builtinScenesDirectory: sb.builtins,
                                                workspacesDirectory: sb.workspaces, cliPath: sb.root.appendingPathComponent("nope"))
-                let broken = try SystemCommandRunner().run(try missing.build(.create(prompt: "x"), sessionID: "s2").bin.appendingPathComponent("livepaper").path, [])
+                let broken = try SystemCommandRunner().run(try missing.build(.create(prompt: "x"), sessionID: "s2").bin.appendingPathComponent("livepaper").path, ["check"])
                 try expectEqual(broken.status, 127)
                 try expect(broken.stderr.contains("not found"))
 
@@ -673,8 +689,18 @@ extension SelfTests {
             let ws = AIWorkspace(root: URL(fileURLWithPath: "/tmp/lp-ws"))
             let ctx = HarnessContext(workspace: ws, model: " haiku ", searchPath: [], extraArguments: ["--x", "1"])
             let claude = try ClaudeAdapter().invocation(for: AIHarness(kind: .claude, name: "Claude Code", executable: "/bin/claude"), context: ctx)
-            try expectEqual(claude.arguments, ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "acceptEdits",
-                                               "--allowedTools", "Read,Write,Edit,Glob,Grep,Bash(livepaper:*)", "--model", "haiku", "--x", "1"])
+            // No general shell, no file writes outside ./scene, no other livepaper commands: dontAsk
+            // denies everything the rules don't allow (acceptEdits would also auto-approve edits and
+            // mv/cp anywhere in the workspace, e.g. of bin/livepaper; a bare Write/Edit allow rule
+            // approves writes anywhere on disk).
+            try expectEqual(claude.arguments, ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "dontAsk",
+                                               "--allowedTools", "Read(./**),Edit(./scene/**),Bash(livepaper check *),Bash(livepaper still *)," +
+                                                   "Bash(livepaper bench *),Bash(livepaper live *),Bash(livepaper thumbnail *),Bash(livepaper compile *)," +
+                                                   "Bash(livepaper help *)",
+                                               "--disallowedTools", "WebFetch,WebSearch,Edit(./bin/**),Edit(./sdk/**),Edit(./.livepaper/**)," +
+                                                   "Edit(./.kiro/**),Edit(./AGENTS.md),Edit(./CLAUDE.md),Edit(./TASK.md)",
+                                               "--model", "haiku", "--x", "1"])
+            try expect(!claude.arguments.joined(separator: " ").contains("livepaper:*") && !claude.arguments.contains("acceptEdits"))
             try expectEqual(claude.stdinFile, ws.taskFile)
             try expectEqual(claude.currentDirectory, ws.root)
             try expectEqual(claude.executable, "/bin/claude")
@@ -826,6 +852,11 @@ extension SelfTests {
                 try expect(read(ws.root.appendingPathComponent(".livepaper/received-task.md")).contains("A dark blue lake"), "prompt on stdin")
                 let env = read(ws.root.appendingPathComponent(".livepaper/env.txt"))
                 try expect(!env.contains("CLAUDECODE=") && !env.contains("CLAUDE_CODE_SESSION_ID="), "parent agent variables scrubbed")
+                // Marked as an AI session (the CLI then refuses everything but the scene commands);
+                // where the real CLI lives isn't advertised.
+                try expect(env.contains("\(AISessionPolicy.sessionVariable)=\(handle.id)\n"), env)
+                try expect(env.contains("\(AISessionPolicy.workspaceVariable)=\(ws.root.path)\n"), env)
+                try expect(!env.contains("LIVEPAPER_CLI=") && !env.contains("LIVEPAPER_RENDERD="), env)
                 try expect(env.contains("PATH=\(ws.bin.path):") && env.contains("NO_COLOR=1") && env.contains("LOGIN_ONLY=1"))
                 try expect(read(ws.stdoutLog).contains("Reading the task"), "stdout teed to the log")
                 // The candidate is normalised and carries its provenance; the agent's scratch files are gone.

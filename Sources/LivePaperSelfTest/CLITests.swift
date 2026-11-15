@@ -224,6 +224,53 @@ extension SelfTests {
             try expectEqual(r.status, 0)
             try expectEqual(try sb.run(["uninstall", "extra"]).status, 2)
         },
+        cliTest("cli.ai-session.guard") { sb in
+            // Inside an AI session (the variables the session runner and the workspace shim set) the
+            // CLI runs only the scene commands, and only on files inside the session's workspace —
+            // whatever the agent's tool rules let through, and however it reached the binary.
+            let fm = FileManager.default
+            _ = try sb.run(["new", "aurora-lake"])
+            try sb.installFakeSaver()
+            let ws = sb.root.appendingPathComponent("ws")
+            let pkg = ws.appendingPathComponent("scene")
+            try CLITestSupport.writeWebScene(at: pkg, id: "untitled", name: "Untitled")
+            let outside = sb.root.appendingPathComponent("outside/glow.lpscene")
+            try CLITestSupport.writeWebScene(at: outside, id: "glow", name: "Glow")
+            let session = [AISessionPolicy.sessionVariable: "s1", AISessionPolicy.workspaceVariable: ws.path]
+            let marker = sb.root.appendingPathComponent("pwned")
+            for args in [["uninstall", "--yes"], ["publish"], ["import", outside.path], ["new", "X"], ["list"], ["doctor"],
+                         ["ai", "create", "x", "--command", "/usr/bin/touch \(marker.path)", "--yes"], ["server", "stop"]] {
+                let r = try sb.run(args, extraEnv: session)
+                try expectEqual(r.status, 2)
+                try expect(r.err.contains("not available in an AI session"), "\(args): \(r.err)")
+            }
+            try expect(fm.fileExists(atPath: sb.saver.path), "saver kept")
+            try expect(fm.fileExists(atPath: sb.library.appendingPathComponent("aurora-lake.lpscene/scene.json").path), "library kept")
+            try expect(!fm.fileExists(atPath: marker.path), "no nested agent ran")
+            // The scene commands work on the workspace…
+            var r = try sb.run(["compile", pkg.path], extraEnv: session)
+            try expectEqual(r.status, 0)
+            try expect(fm.fileExists(atPath: pkg.appendingPathComponent(".check/scene.html").path), r.err)
+            r = try sb.run(["compile", pkg.path, "--out", ws.appendingPathComponent("scene/out.html").path], extraEnv: session)
+            try expectEqual(r.status, 0)
+            // …but not outside it, directly or through a symlink.
+            let elsewhere = sb.root.appendingPathComponent("elsewhere.html")
+            for args in [["compile", outside.path], ["compile", pkg.path, "--out", elsewhere.path],
+                         ["still", pkg.path, "--out", sb.root.appendingPathComponent("x.png").path],
+                         ["thumbnail", pkg.path, "--out", sb.root.appendingPathComponent("x.jpg").path]] {
+                r = try sb.run(args, extraEnv: session)
+                try expectEqual(r.status, 2)
+                try expect(r.err.contains("outside this AI session's workspace"), "\(args): \(r.err)")
+            }
+            try fm.createSymbolicLink(at: ws.appendingPathComponent("link"), withDestinationURL: outside.deletingLastPathComponent())
+            r = try sb.run(["compile", ws.appendingPathComponent("link/glow.lpscene").path], extraEnv: session)
+            try expectEqual(r.status, 2)
+            try expect(!fm.fileExists(atPath: elsewhere.path) && !fm.fileExists(atPath: outside.appendingPathComponent(".check").path))
+            // Help stays available.
+            try expectEqual(try sb.run(["help", "check"], extraEnv: session).status, 0)
+            // A session marker without a workspace refuses the scene commands too.
+            try expectEqual(try sb.run(["compile", pkg.path], extraEnv: [AISessionPolicy.sessionVariable: "s1"]).status, 2)
+        },
         cliTest("cli.ai") { sb in
             // A stand-in agent: writes a scene, prints two lines, exits 0.
             let agent = sb.root.appendingPathComponent("tools/fake-agent")
@@ -452,8 +499,9 @@ final class CLISandbox {
 
     /// Runs `livepaper <arguments>` (or, `viaPATH`, `/usr/bin/env <arguments>` with the binary's
     /// directory first on PATH) in the sandbox's working directory.
-    func run(_ arguments: [String], stdin: String? = nil, viaPATH: Bool = false, unset: [String] = []) throws -> CLITestSupport.Result {
-        var env = environment
+    func run(_ arguments: [String], stdin: String? = nil, viaPATH: Bool = false, unset: [String] = [],
+             extraEnv: [String: String] = [:]) throws -> CLITestSupport.Result {
+        var env = environment.merging(extraEnv) { _, new in new }
         for key in unset { env.removeValue(forKey: key) }
         if viaPATH {
             env["PATH"] = binary.deletingLastPathComponent().path + ":/usr/bin:/bin"

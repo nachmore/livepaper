@@ -97,7 +97,7 @@ enum SceneCommands {
         let t = try args.double("t") ?? 8
         let frame = CheckFrame(Int(size.width), Int(size.height), dpr: dpr, t: t)
         let checkDir = pkg.appendingPathComponent(SceneChecker.checkDirectory)
-        let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL } ?? checkDir.appendingPathComponent(frame.fileName)
+        let out = try outURL(args) ?? checkDir.appendingPathComponent(frame.fileName)
         let target = RenderTarget(out, package: pkg, inside: [checkDir], ext: "png")
         let req = RenderRequest(op: .still, html: html.path, width: size.width, height: size.height, dpr: dpr, t: t,
                                 out: target.serverOut.path, clock: !args.flag("no-clock"))
@@ -158,7 +158,7 @@ enum SceneCommands {
             FileHandle.standardOutput.write(Data(compiled.html.utf8))
             return ExitCode.ok
         }
-        let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL }
+        let out = try outURL(args)
             ?? pkg.appendingPathComponent(SceneChecker.checkDirectory).appendingPathComponent(SceneChecker.compiledFile)
         try SceneCompiler().compile(package: pkg, to: out)
         print("wrote \(displayPath(out))")
@@ -173,7 +173,7 @@ enum SceneCommands {
     static func thumbnail(_ argv: [String]) async throws -> Int32 {
         let args = try Arguments(argv, flags: ["json"], options: ["t", "out"])
         let pkg = try sceneDirectory(args)
-        let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL } ?? pkg.appendingPathComponent("thumbnail.jpg")
+        let out = try outURL(args) ?? pkg.appendingPathComponent("thumbnail.jpg")
         let target = RenderTarget(out, package: pkg, inside: [pkg, pkg.appendingPathComponent(SceneChecker.checkDirectory)], ext: "jpg")
         let req = RenderRequest(op: .thumbnail, scene: pkg.path, t: try args.double("t"), out: target.serverOut.path)
         var r = try await RenderClient().send(req, timeout: RenderClient.defaultTimeout(for: req))
@@ -187,10 +187,19 @@ enum SceneCommands {
     static func sceneDirectory(_ args: Arguments) throws -> URL {
         let path = try args.single("scene directory")
         let url = URL(fileURLWithPath: path).standardizedFileURL
+        try AISessionPolicy.confine(url, what: "the scene")
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir), isDir.boolValue else {
             throw UsageError("\(path) is not a directory (expected a scene package containing scene.json)")
         }
+        return url
+    }
+
+    /// `--out`, which inside an AI session must stay in the session's workspace.
+    static func outURL(_ args: Arguments) throws -> URL? {
+        guard let path = args.string("out") else { return nil }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        try AISessionPolicy.confine(url, what: "--out")
         return url
     }
 

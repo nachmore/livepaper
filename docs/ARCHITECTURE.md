@@ -401,8 +401,12 @@ Budgets (`CheckBudgets`):
   each probed with `--version`). Every harness runs in the workspace (cwd), in its own process
   group, with `bin/` first on PATH; the prompt only ever travels in TASK.md. `[--model M]` comes from
   the session or `AISettings.models[kind]`; `<extra>` from `AISettings.extraArguments[kind]`.
-  * Claude Code: `claude -p --output-format stream-json --verbose --permission-mode acceptEdits
-    --allowedTools "Read,Write,Edit,Glob,Grep,Bash(livepaper:*)" [--model M] <extra>`, TASK.md on stdin.
+  * Claude Code: `claude -p --output-format stream-json --verbose --permission-mode dontAsk
+    --allowedTools "Read(./**),Edit(./scene/**),Bash(livepaper check *),…" --disallowedTools
+    "WebFetch,WebSearch,Edit(./bin/**),…" [--model M] <extra>`, TASK.md on stdin. `dontAsk` denies
+    whatever the rules don't allow: reading the workspace, editing ./scene, and `livepaper
+    check|still|bench|live|thumbnail|compile|help` (Claude Code checks each part of a compound
+    command). `acceptEdits` is not used: it auto-approves edits and mv/cp anywhere in the workspace.
   * Codex: `codex exec -C <ws> -s workspace-write --skip-git-repo-check --json -o
     <ws>/.livepaper/last-message.txt -c sandbox_workspace_write.network_access=true [-m M] <extra> -`,
     TASK.md on stdin (`network_access` because workspace-write blocks the Unix socket `livepaper check` needs).
@@ -417,8 +421,17 @@ Budgets (`CheckBudgets`):
     describes, following AGENTS.md."
 * **Workspace** per session (§4.1): `AGENTS.md` + `CLAUDE.md` (identical: scene rules, API, budgets,
   validation loop, "only edit ./scene"), `TASK.md`, `sdk/` (livepaper.d.ts, SCENE_API.md, templates,
-  3 example scenes), `scene/` (template for *create*, a copy of the scene for *modify*), `bin/livepaper`
-  (shim to the bundled CLI), `.livepaper/` (logs).
+  3 example scenes), `scene/` (template for *create*, a copy of the scene for *modify* without hidden
+  entries, agent instruction files or links), `bin/livepaper` (shim to the bundled CLI),
+  `.livepaper/` (logs). A modified scene is named by its id; its manifest name only appears as one
+  quoted, length-limited line marked as data.
+* **What an agent may run** (`AISessionPolicy`): every harness process carries
+  `LIVEPAPER_AI_SESSION`, `LIVEPAPER_AI_WORKSPACE` and `LIVEPAPER_RENDER_SPOOL` (and not
+  `LIVEPAPER_CLI`/`LIVEPAPER_RENDERD`). The shim sets them again and passes on only `check`,
+  `still`, `bench`, `live`, `thumbnail`, `compile` (and help/version); the CLI itself, with the
+  variables set, refuses every other command (exit 2) and any scene path or `--out` outside the
+  workspace (symlinks resolved). So `uninstall`, `publish`, `import`, `new`, nested `ai` sessions
+  and `server` control are out of reach whatever the harness's own rules let through.
 * **Flow:** create/modify → workspace → harness → stdout parsed into events (text, tool calls) and
   `scene/.check/*.png` reported as stills while the agent iterates → on exit LivePaper runs the
   check itself (never trusts the agent's word) → preview → "Add to library" / "Replace" (modify keeps

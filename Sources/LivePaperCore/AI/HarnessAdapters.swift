@@ -57,14 +57,24 @@ public enum HarnessAdapters {
 }
 
 /// Claude Code: `claude -p` reads the prompt from stdin; stream-json needs --verbose in print mode.
+///
+/// Permissions (rule syntax: code.claude.com/docs/en/permissions): `dontAsk` denies every tool call
+/// the rules don't allow, with nobody to ask in print mode anyway. The rules allow reading the
+/// workspace, editing files in ./scene and running the CLI's scene commands; the deny rules
+/// remove web access and protect LivePaper's own files even if the user's settings allow more.
+/// (`acceptEdits` would also auto-approve edits and mv/cp anywhere in the workspace — bin/livepaper
+/// included — and a bare `Write`/`Edit` allow rule approves writes anywhere on disk.) Claude Code
+/// checks each part of a compound command, so `livepaper check scene && rm …` is refused.
 public struct ClaudeAdapter: HarnessAdapter {
-    /// File tools plus the livepaper CLI only (no general shell access).
-    public static let allowedTools = "Read,Write,Edit,Glob,Grep,Bash(livepaper:*)"
+    public static let allowedTools = (["Read(./**)", "Edit(./scene/**)"]
+        + (AISessionPolicy.commands + ["help"]).map { "Bash(livepaper \($0) *)" }).joined(separator: ",")
+    public static let disallowedTools = ["WebFetch", "WebSearch", "Edit(./bin/**)", "Edit(./sdk/**)", "Edit(./.livepaper/**)",
+                                         "Edit(./.kiro/**)", "Edit(./AGENTS.md)", "Edit(./CLAUDE.md)", "Edit(./TASK.md)"].joined(separator: ",")
     public init() {}
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         var args = ["-p", "--output-format", "stream-json", "--verbose",
-                    "--permission-mode", "acceptEdits", "--allowedTools", Self.allowedTools]
+                    "--permission-mode", "dontAsk", "--allowedTools", Self.allowedTools, "--disallowedTools", Self.disallowedTools]
         if let model = context.model { args += ["--model", model] }
         args += context.extraArguments
         return HarnessInvocation(executable: harness.executable, arguments: args,

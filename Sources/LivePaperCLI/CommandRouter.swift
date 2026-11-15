@@ -106,6 +106,11 @@ enum CLI {
             return ExitCode.ok
         }
         args.removeFirst()
+        // Run by an AI agent (AISessionPolicy): the scene commands only.
+        if let refusal = AISessionPolicy.refusal(command: name) {
+            stderr(refusal)
+            return ExitCode.usage
+        }
         guard let cmd = commands.first(where: { $0.name == name }) else {
             stderr("livepaper: unknown command '\(name)'. Run `livepaper help` for the list.")
             return ExitCode.usage
@@ -113,6 +118,9 @@ enum CLI {
         if args.contains("--help") || args.contains("-h") { printUsage(of: cmd); return ExitCode.ok }
         do {
             return try await cmd.run(args)
+        } catch let e as AISessionPolicyError {
+            stderr("livepaper \(cmd.name): \(e.message)")
+            return ExitCode.usage
         } catch let e as UsageError {
             stderr("livepaper \(cmd.name): \(e.description)\nusage: livepaper \(cmd.name) \(cmd.synopsis)")
             return ExitCode.usage

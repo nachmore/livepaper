@@ -89,8 +89,12 @@ public final class AIService: AIServicing, @unchecked Sendable {
                 HarnessAdapters.adapter(for: harness, kiroStreamJSON: harness.kind == .kiro ? kiroSupportsStreamJSON(harness.executable) : true)
             },
             environment: {
-                HarnessEnvironment.compose(process: ProcessInfo.processInfo.environment, login: detector.shell.snapshot(),
-                                           searchPath: detector.searchPath(), workspaceBin: workspace.bin)
+                // Marks every process of the harness as this session (the CLI then runs only the scene
+                // commands, on this workspace) and keeps the real CLI's location out of its view.
+                HarnessEnvironment.compose(process: ProcessInfo.processInfo.environment.filter { !AISessionPolicy.withheldVariables.contains($0.key) },
+                                           login: detector.shell.snapshot().withoutVariables(AISessionPolicy.withheldVariables),
+                                           searchPath: detector.searchPath(), workspaceBin: workspace.bin,
+                                           extra: AISessionPolicy.environment(sessionID: id, workspace: workspace))
             },
             searchPath: { detector.searchPath() },
             extraArguments: settings.extraArguments[harness.kind.rawValue] ?? [],
