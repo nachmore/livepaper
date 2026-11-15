@@ -21,6 +21,11 @@ extension SelfTests {
             try expectEqual(c("Library/harbor.lpscene/thumbnail.jpg"), .library)
             try expectEqual(c("Library/harbor.lpscene/history.jsonl"), .library)
             try expectEqual(c("Library/harbor.lpscene/.check/report.json"), .library)
+            // What the live previews compile: scene.js and everything in assets/.
+            try expectEqual(c("Library/harbor.lpscene/scene.js"), .library)
+            try expectEqual(c("Library/harbor.lpscene/assets"), .library)
+            try expectEqual(c("Library/harbor.lpscene/assets/water.png"), .library)
+            try expectEqual(c("Library/harbor.lpscene/assets/tiles/a.png"), .library)
             try expectEqual(c("playlist-settings.json"), .playlist)
             // Noise: staging/deleted directories, atomic-write temporaries, check frames, contents
             // the UI doesn't show, other support files, AI workspaces.
@@ -30,7 +35,9 @@ extension SelfTests {
             try expectEqual(c("Library/notes.txt"), [])
             try expectEqual(c("Library/harbor.lpscene/scene.json.sb-0c75a21f-F6iG7W"), [])
             try expectEqual(c("Library/harbor.lpscene/.check/still-8.png"), [])
-            try expectEqual(c("Library/harbor.lpscene/scene.js"), [])
+            try expectEqual(c("Library/harbor.lpscene/scene.js.sb-0c75a21f-F6iG7W"), [])
+            try expectEqual(c("Library/harbor.lpscene/.scene.js.swp"), [])
+            try expectEqual(c("Library/harbor.lpscene/assets/.DS_Store"), [])
             try expectEqual(c("Library/harbor.lpscene/history/2026-11-15T10:00:00Z/scene.json"), [])
             try expectEqual(c("playlist-settings.json.sb-0c75a21f-HD9soJ"), [])
             try expectEqual(c("state.json"), [])
@@ -102,7 +109,7 @@ extension SelfTests {
                 try expectEqual(deliveries.collect(), [.library])
 
                 // What the UI doesn't show reports nothing: AI workspaces, logs, state.json, staging
-                // directories, check frames and scene.js (only scene.json and friends are read).
+                // directories and check frames.
                 let fm = FileManager.default
                 let support = LPPaths.supportRoot
                 let kept = try library.importPackage(at: try makeScenePackage(in: root, id: "tide-pool"))
@@ -116,8 +123,10 @@ extension SelfTests {
                 try Data("{}".utf8).write(to: support.appendingPathComponent("state.json"), options: .atomic)
                 try Data("{}".utf8).write(to: LPPaths.library.appendingPathComponent(".staging-test/scene.json"))
                 try Data("png".utf8).write(to: kept.packageURL.appendingPathComponent(".check/still-8.png"))
-                try Data("// edited".utf8).write(to: kept.packageURL.appendingPathComponent("scene.js"))
                 try expectEqual(deliveries.collect(first: 1.2), [])
+                // scene.js saved in an editor: the live previews compile it.
+                try Data("// edited".utf8).write(to: kept.packageURL.appendingPathComponent("scene.js"))
+                try expectEqual(deliveries.collect(), [.library])
 
                 // `livepaper publish --scenes …` rewrites the playlist settings.
                 try Data("{}".utf8).write(to: support.appendingPathComponent(PublishService.settingsFileName), options: .atomic)
@@ -278,6 +287,50 @@ extension SelfTests {
                 }
             }
         },
+        TestCase(name: "app.model.failed-publish-stays-unpublished") {
+            // A publish that fails leaves the saver on the previous playlist. The disk watcher sees
+            // the settings file being written: it must not make the failed draft look current —
+            // neither while the publish runs nor after it failed (Save & Publish would then have
+            // nothing left to publish, and the menu bar would name a playlist that isn't playing).
+            try withScratchPaths("failed-publish") { root in
+                let mockRoot = root.appendingPathComponent("Mock")
+                let mocks = try MockServices.make(root: mockRoot, pace: 0)
+                let publish = try unwrap(mocks.publish as? MockPublishService)
+                let services = LivePaperServices(library: mocks.library, publish: SlowPublish(base: publish, delay: 1.0), ai: mocks.ai,
+                                                 install: mocks.install, render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                try mocks.install.installSaver()
+                try MainActor.assumeIsolated {
+                    var env = testEnvironment(root: root, saved: SavedStates())
+                    env.diskWatchRoot = mockRoot
+                    let model = AppModel(services: services, environment: env)
+                    try awaitMain { await model.start() }
+                    defer { model.stopWatchingDisk() }
+                    pumpMain(0.8)
+                    let before = model.playlist
+                    let draft = PlaylistSettings(mode: .single, sceneIDs: ["neon-rain"])
+                    try expect(draft != before)
+                    publish.failNextPublish = true
+                    let done = WatchLog<Bool>()
+                    Task { @MainActor in done.append(await model.savePlaylist(draft)) }
+                    var sawDraft = false
+                    try awaitMain(timeout: 10, until: {
+                        sawDraft = sawDraft || model.playlist == draft
+                        return !done.values.isEmpty
+                    })
+                    try expectEqual(done.values, [false])
+                    pumpMain(1.2)   // the watcher has seen both writes
+                    try expect(!sawDraft, "the failed draft looked current while it was being published")
+                    try expectEqual(model.playlist, before)
+                    try expectEqual(publish.loadSettings(), before)
+                    // Published the second time: now it is current, on disk too.
+                    try awaitMain { done.append(await model.savePlaylist(draft)) }
+                    pumpMain(1.2)
+                    try expectEqual(model.playlist, draft)
+                    try expectEqual(publish.loadSettings(), draft)
+                    try expect(model.lastPublishResult != nil)
+                }
+            }
+        },
         TestCase(name: "app.model.refresh-coalesces") {
             try withModel("coalesce") { model, _ in
                 try awaitMain {
@@ -373,6 +426,19 @@ extension SelfTests {
 
         /// `collect()` merged into one value.
         func collectUnion() -> DiskChanges { collect().reduce(into: DiskChanges()) { $0.formUnion($1) } }
+    }
+
+    /// Forwards to another publisher; publishing takes `delay` seconds longer.
+    final class SlowPublish: PublishServicing, @unchecked Sendable {
+        let base: PublishServicing
+        let delay: TimeInterval
+        init(base: PublishServicing, delay: TimeInterval) { self.base = base; self.delay = delay }
+        func loadSettings() -> PlaylistSettings { base.loadSettings() }
+        func saveSettings(_ s: PlaylistSettings) throws { try base.saveSettings(s) }
+        func publishReport() throws -> PublishResult {
+            Thread.sleep(forTimeInterval: delay)
+            return try base.publishReport()
+        }
     }
 
     /// Forwards to another library, but can hold one read after it has taken its snapshot.

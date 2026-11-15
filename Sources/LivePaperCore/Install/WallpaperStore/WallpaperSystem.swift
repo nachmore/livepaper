@@ -91,8 +91,11 @@ public struct LiveWallpaperSystem: WallpaperSystem {
         return nil
     }
 
-    /// `CGSSessionScreenIsLocked` is present (true) in the session dictionary only while locked.
-    public var sessionState: WallpaperSessionState {
+    public var sessionState: WallpaperSessionState { Self.currentSessionState }
+
+    /// The login session right now (any thread). `CGSSessionScreenIsLocked` is present (true) in
+    /// the session dictionary only while locked.
+    public static var currentSessionState: WallpaperSessionState {
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return .unknown }
         if let onConsole = session[kCGSessionOnConsoleKey as String] as? NSNumber, !onConsole.boolValue { return .unknown }
         return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue == true ? .locked : .unlocked

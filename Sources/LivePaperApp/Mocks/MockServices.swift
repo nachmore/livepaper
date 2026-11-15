@@ -302,7 +302,26 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
 
     func status() -> InstallStatus { lock.lock(); defer { lock.unlock() }; return current }
 
-    func installSaver() throws { mutate { $0.saverInstalled = true; $0.saverUpToDate = true } }
+    /// Test hook: how often a saver was put in place (installSaver, updateSaver).
+    private(set) var installCount = 0
+
+    @discardableResult func installSaver() throws -> PublishResult? {
+        mutate { $0.saverInstalled = true; $0.saverUpToDate = true; $0.saverNewerInstalled = false; installCount += 1 }
+        return nil
+    }
+
+    /// InstallService's rules, minus the files: only an older installed build is replaced.
+    func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome {
+        lock.lock(); defer { lock.unlock() }
+        guard current.saverUpdateAvailable else {
+            return .skipped(current.saverInstalled ? (current.saverNewerInstalled ? "a newer build is installed" : "already this build")
+                                                   : "not installed")
+        }
+        guard !isSessionLocked() else { return .skipped("the Mac is locked") }
+        current.saverUpToDate = true
+        installCount += 1
+        return .updated(nil)
+    }
 
     /// The first attempt "fails" so the guided step can be exercised; opening Screen Saver
     /// settings then simulates the user picking LivePaper there.

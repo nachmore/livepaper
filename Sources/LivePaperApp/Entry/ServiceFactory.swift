@@ -59,6 +59,12 @@ enum ServiceFactory {
         }
     }
 
+    /// The real login session's lock state (CGSSessionScreenIsLocked).
+    nonisolated static func liveSessionLocked() -> Bool {
+        if case .locked = LiveWallpaperSystem.currentSessionState { return true }
+        return false
+    }
+
     @MainActor
     static func environment(mock: Bool, defaults: PreferenceStore, cache: URL, diskWatchRoot: URL? = nil) -> AppEnvironment {
         let bundle = Bundle.main
@@ -70,11 +76,14 @@ enum ServiceFactory {
         // shows a notice instead); these are only placeholders.
         let helperLock: HelperLockChannel = mock ? FixedHelperLockChannel(answers: false) : DistributedHelperLockChannel()
         let startScreenSaver: @MainActor () async throws -> Void = mock ? {} : { try await SystemActions.startScreenSaverEngine() }
+        let isSessionLocked: @Sendable () -> Bool
+        if mock { isSessionLocked = { false } } else { isSessionLocked = { liveSessionLocked() } }
         return AppEnvironment(isMock: mock, defaults: defaults, stateURL: stateURL, saveState: { try $0.save(to: stateURL) },
                               helperLock: helperLock, startScreenSaver: startScreenSaver, previewCacheDirectory: cache,
                               appVersion: version, appBundlePath: appPath,
                               openLockScreenSettings: mock ? {} : { SystemActions.openLockScreenSettings() },
-                              diskWatchRoot: diskWatchRoot)
+                              diskWatchRoot: diskWatchRoot,
+                              isSessionLocked: isSessionLocked)
     }
 }
 

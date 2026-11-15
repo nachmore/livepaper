@@ -71,7 +71,11 @@ struct ScenePreview: View {
         }
     }
 
-    private var compileKey: String { "\(item.id)#\(item.manifest.updated?.timeIntervalSince1970 ?? 0)#\(livePreviewsEnabled)" }
+    /// Changes with the scene's version, and with edits on disk that don't touch it (an editor,
+    /// `livepaper check`: AppModel.previewRevision), so an open preview recompiles.
+    private var compileKey: String {
+        "\(item.id)#\(item.manifest.updated?.timeIntervalSince1970 ?? 0)#\(model.previewRevision[item.id] ?? 0)#\(livePreviewsEnabled)"
+    }
 
     private var videoURL: URL? {
         guard let file = item.manifest.video?.file else { return nil }

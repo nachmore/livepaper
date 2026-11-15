@@ -270,7 +270,11 @@ public enum LoginItemStatus: String, Sendable, Equatable {
 
 public struct InstallStatus: Sendable, Equatable {
     public var saverInstalled: Bool
+    /// The installed saver is the build this LivePaper ships (CFBundleVersion).
     public var saverUpToDate: Bool
+    /// The installed saver is a newer build than this LivePaper's copy (installed by another copy
+    /// of LivePaper): launching this one never replaces it; only an explicit install does.
+    public var saverNewerInstalled: Bool
     /// The LivePaper saver is the selected screen saver (any display).
     public var saverSelected: Bool
     public var helperRunning: Bool
@@ -289,14 +293,29 @@ public struct InstallStatus: Sendable, Equatable {
     /// LivePaper changed that preference and keeps its previous value; uninstall puts it back.
     public var lockKeysChangedByLivePaper: Bool
 
-    public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverSelected: Bool = false, helperRunning: Bool = false,
-                helperLoginItem: LoginItemStatus = .notRegistered, passwordImmediately: Bool = false, managedByMDM: Bool = false,
-                passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false, lockKeysChangedByLivePaper: Bool = false) {
-        self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverSelected = saverSelected
+    public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverNewerInstalled: Bool = false, saverSelected: Bool = false,
+                helperRunning: Bool = false, helperLoginItem: LoginItemStatus = .notRegistered, passwordImmediately: Bool = false,
+                managedByMDM: Bool = false, passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false,
+                lockKeysChangedByLivePaper: Bool = false) {
+        self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverNewerInstalled = saverNewerInstalled
+        self.saverSelected = saverSelected
         self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.passwordImmediately = passwordImmediately
         self.managedByMDM = managedByMDM; self.passwordManagedByMDM = passwordManagedByMDM; self.lockKeysShowScene = lockKeysShowScene
         self.lockKeysChangedByLivePaper = lockKeysChangedByLivePaper
     }
+
+    /// The installed saver is an older build than this LivePaper's: what the launch-time update
+    /// (InstallServicing.updateSaver) replaces.
+    public var saverUpdateAvailable: Bool { saverInstalled && !saverUpToDate && !saverNewerInstalled }
+}
+
+/// What the launch-time saver update did (InstallServicing.updateSaver).
+public enum SaverUpdateOutcome: Sendable, Equatable {
+    /// The newer build replaced the installed saver and the playlist was republished from the
+    /// current settings and library (the report; nil: nothing was published).
+    case updated(PublishResult?)
+    /// Nothing changed, and why.
+    case skipped(String)
 }
 
 /// One logged installer step (what the uninstall sheet and `livepaper doctor` show).
@@ -319,8 +338,13 @@ public struct InstallStep: Sendable, Equatable {
 public protocol InstallServicing: AnyObject, Sendable {
     /// Blocking (runs read-only system probes): call it off the main thread.
     func status() -> InstallStatus
-    /// Copies the saver template into ~/Library/Screen Savers (idempotent) and publishes content.
-    func installSaver() throws
+    /// Copies the saver template into ~/Library/Screen Savers (idempotent; whatever build is
+    /// installed) and publishes content. Returns the publish's report (nil: nothing was published).
+    @discardableResult func installSaver() throws -> PublishResult?
+    /// The automatic update at app launch: replaces the installed saver only with a newer build,
+    /// never installs one that isn't there or was uninstalled, and never swaps it while
+    /// `isSessionLocked()` (checked again right before the swap); then republishes.
+    func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome
     /// Makes LivePaper the selected screen saver. Returns false if it could not be done automatically
     /// (the UI then shows the one-click guided step via openScreenSaverSettings()).
     func selectSaver() throws -> Bool

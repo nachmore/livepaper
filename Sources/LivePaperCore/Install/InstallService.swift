@@ -213,10 +213,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             (try? runner.run("/bin/launchctl", ["print", service], timeout: 10)).map(SystemProbes.helperRunning) ?? false
         }
         let immediate = SystemProbes.passwordImmediately(sysadminctlOutput: sysadminctl?.combinedOutput, managed: managed)
+        // Without a template (development builds) there is nothing newer to install.
+        let upToDate = installed && (templateVersion == nil || installedVersion == templateVersion)
         return InstallStatus(
             saverInstalled: installed,
-            // Without a template (development builds) there is nothing newer to install.
-            saverUpToDate: installed && (templateVersion == nil || installedVersion == templateVersion),
+            saverUpToDate: upToDate,
+            saverNewerInstalled: installed && !upToDate && Self.isNewerBuild(installedVersion, than: templateVersion),
             saverSelected: store.isSelected(),
             helperRunning: helperRunning,
             helperLoginItem: loginItem.status,
@@ -232,24 +234,82 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     // MARK: - Saver
 
+    /// `build` is a later build than `other`. CFBundleVersion is the commit count
+    /// (scripts/build.sh), so the higher number is the newer build; values that aren't whole
+    /// numbers don't compare (neither is newer).
+    public static func isNewerBuild(_ build: String?, than other: String?) -> Bool {
+        func number(_ v: String?) -> Int? { v.flatMap { Int($0.trimmingCharacters(in: .whitespaces)) } }
+        guard let a = number(build), let b = number(other) else { return false }
+        return a > b
+    }
+
     /// Copies the template saver into ~/Library/Screen Savers, keeping the published Playlist of an
     /// existing install, swaps it in atomically, then publishes. The screen-saver host keeps any
-    /// already-loaded copy until it next starts; LivePaper never kills system processes.
-    public func installSaver() throws {
+    /// already-loaded copy until it next starts; LivePaper never kills system processes. An
+    /// explicit install: whatever build is installed is replaced, and the uninstall marker goes.
+    @discardableResult public func installSaver() throws -> PublishResult? {
+        try requireTemplate("Install the screen saver")
+        try clearUninstallMarker()
+        _ = try replaceSaver("Install the screen saver into \(paths.screenSaversDir.path)", unless: { nil })
+        return try publishIntoSaver()
+    }
+
+    /// The launch-time update (AppModel, after the app itself was updated): the saver's code lives
+    /// in ~/Library/Screen Savers, not in the app, so the installed copy is replaced with the
+    /// bundled one — but only by a newer build (an older LivePaper launched next to a newer one
+    /// leaves the newer saver alone), only while one is installed, never after an uninstall (the
+    /// marker stays; only setting LivePaper up again removes it) and never while
+    /// `isSessionLocked()`. Everything is checked again while holding publish.lock right before
+    /// the swap, so a lock, a publish or an uninstall (which removes the bundle under the same lock)
+    /// in the meantime can't be overrun. The playlist is then republished from the current
+    /// settings and library, and the report says which scenes that left out.
+    public func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome {
+        let title = "Update the screen saver in \(paths.screenSaversDir.path)"
+        func blocker() -> String? { saverUpdateBlocker() ?? (isSessionLocked() ? "the Mac is locked" : nil) }
+        if let why = blocker() {
+            record(title, .skipped(why))
+            return .skipped(why)
+        }
+        try requireTemplate(title)
+        if let why = try replaceSaver(title, unless: blocker) { return .skipped(why) }
+        return .updated(try publishIntoSaver())
+    }
+
+    /// Why the launch-time update must leave the installed saver alone (nil: it may replace it).
+    private func saverUpdateBlocker() -> String? {
+        if FileOps.entryExists(paths.uninstallMarker) { return "LivePaper was uninstalled; setting it up again installs the screen saver" }
+        guard FileOps.isRegularFile(paths.installedSaver.appendingPathComponent("Contents/Info.plist")) else { return "not installed" }
+        let installed = FileOps.bundleInfo(paths.installedSaver, "CFBundleVersion")
+        let bundled = FileOps.bundleInfo(paths.saverTemplate, "CFBundleVersion")
+        if bundled == nil || installed == bundled { return "already this build" }
+        if Self.isNewerBuild(installed, than: bundled) {
+            return "a newer build is installed (build \(installed ?? "?"); this LivePaper has \(bundled ?? "?"))"
+        }
+        return nil
+    }
+
+    private func requireTemplate(_ title: String) throws {
         let template = paths.saverTemplate
         guard FileOps.isRegularFile(template.appendingPathComponent("Contents/Info.plist")) else {
-            record("Install the screen saver", .failed("template missing"))
+            record(title, .failed("template missing"))
             throw InstallError.saverTemplateMissing(template.path)
         }
-        try clearUninstallMarker()
-        try perform("Install the screen saver into \(paths.screenSaversDir.path)") {
+    }
+
+    /// Stages a copy of the template (with the installed Playlist) and swaps it in, under
+    /// publish.lock. `blocker` is asked after taking the lock and again right before the swap;
+    /// a reason stops it with nothing changed (recorded as skipped and returned).
+    private func replaceSaver(_ title: String, unless blocker: () -> String?) throws -> String? {
+        var stopped: String?
+        try perform(title) {
             let fm = FileManager.default
             try fm.createDirectory(at: paths.screenSaversDir, withIntermediateDirectories: true)
-            try FileLock.withLock(at: paths.publishLock) {
+            return try FileLock.withLock(at: paths.publishLock) { () -> String? in
+                if let why = blocker() { stopped = why; return why }
                 // Hidden and without the .saver extension: never listed as a screen saver.
                 let staging = FileOps.stagingURL(in: paths.screenSaversDir, tag: "install")
                 do {
-                    try fm.copyItem(at: template, to: staging)
+                    try fm.copyItem(at: paths.saverTemplate, to: staging)
                     // A downloaded app's resources carry the quarantine flag; the saver host refuses those.
                     FileOps.stripQuarantine(staging)
                     let playlist = staging.appendingPathComponent("Contents/Resources").appendingPathComponent(LPPlaylist.directoryName)
@@ -259,19 +319,31 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                         // APFS clones the files, so even large videos cost no time or space.
                         try fm.copyItem(at: paths.installedPlaylist, to: playlist)
                     }
+                    if let why = blocker() {
+                        try? FileOps.removeIfPresent(staging)
+                        stopped = why
+                        return why
+                    }
                     try FileOps.installReplacing(paths.installedSaver, with: staging)
                 } catch {
                     try? FileOps.removeIfPresent(staging)
                     throw error
                 }
+                return nil
             }
-            return nil
         }
-        guard let publisher else { return }
+        return stopped
+    }
+
+    /// Publishes into the freshly installed saver; an empty library isn't a failure.
+    private func publishIntoSaver() throws -> PublishResult? {
+        guard let publisher else { return nil }
+        var result: PublishResult?
         try perform("Publish scenes into the screen saver") {
-            do { try publisher.publish() } catch PublishError.noScenes { return "no scenes yet" }
+            do { result = try publisher.publishReport() } catch PublishError.noScenes { return "no scenes yet" }
             return nil
         }
+        return result
     }
 
     /// Makes LivePaper the screen saver for every display and Space by editing the wallpaper store
@@ -704,9 +776,14 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 guard !store.dependsOnSaver() else {
                     throw InstallError.screenSaverStillSelected("the wallpaper settings still point at \(paths.installedSaver.path)")
                 }
-                let doomed = FileOps.stagingURL(in: paths.screenSaversDir, tag: "uninstall")
-                try fm.moveItem(at: paths.installedSaver, to: doomed)
-                try fm.removeItem(at: doomed)
+                // Under publish.lock: a publish or saver update in another LivePaper process can't
+                // swap anything into the bundle while it goes, and finds it gone (and the uninstall
+                // marker in place) afterwards.
+                try withPublishLockIfPresent {
+                    let doomed = FileOps.stagingURL(in: paths.screenSaversDir, tag: "uninstall")
+                    try fm.moveItem(at: paths.installedSaver, to: doomed)
+                    try fm.removeItem(at: doomed)
+                }
                 return nil
             }
         }
@@ -731,6 +808,13 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             }
         }
         return Array(transcript.dropFirst(start))
+    }
+
+    /// publish.lock around `body`, when there is a support directory to hold it: nothing can be
+    /// publishing without one, and uninstall shouldn't create it.
+    private func withPublishLockIfPresent(_ body: () throws -> Void) throws {
+        guard FileOps.isDirectory(paths.supportRoot) else { return try body() }
+        try FileLock.withLock(at: paths.publishLock, body)
     }
 
     /// Uninstall step 2: switches every Idle slot that still names LivePaper.saver to the user's

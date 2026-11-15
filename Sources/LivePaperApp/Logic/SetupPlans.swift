@@ -74,9 +74,10 @@ enum SetupChecklist {
         case .screenSaver:
             return [
                 SetupCheck(id: .saverInstalled, title: "LivePaper screen saver installed",
-                           detail: s.saverInstalled
-                               ? (s.saverUpToDate ? "Installed in your Screen Savers folder." : "Installed, but an update is available.")
-                               : "Copies LivePaper.saver into ~/Library/Screen Savers.",
+                           detail: !s.saverInstalled ? "Copies LivePaper.saver into ~/Library/Screen Savers."
+                               : s.saverUpToDate ? "Installed in your Screen Savers folder."
+                               : s.saverNewerInstalled ? "A newer build from another copy of LivePaper is installed. Installing replaces it with this copy\u{2019}s."
+                               : "Installed, but an update is available.",
                            state: s.saverInstalled && s.saverUpToDate ? .done : .needed),
                 SetupCheck(id: .saverSelected, title: "Selected as your screen saver",
                            detail: s.saverSelected ? "LivePaper plays when your Mac idles or locks."
@@ -125,6 +126,7 @@ enum SetupChecklist {
     static func saverSummary(_ s: InstallStatus) -> String {
         if !s.saverInstalled { return "Not installed" }
         if !s.saverSelected { return "Installed, not selected" }
+        if s.saverNewerInstalled { return "Selected \u{2014} a newer build is installed" }
         if !s.saverUpToDate { return "Selected \u{2014} update available" }
         return "Active"
     }

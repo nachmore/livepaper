@@ -5,7 +5,8 @@
 //
 // Why FSEvents rather than kqueue (DispatchSource.makeFileSystemObjectSource):
 //   * The UI shows files *inside* packages (scene.json, thumbnail.jpg, history.jsonl,
-//     .check/report.json). One FSEvents stream covers the whole tree. kqueue needs an open
+//     .check/report.json, and scene.js + assets/ compiled into the live previews). One FSEvents
+//     stream covers the whole tree. kqueue needs an open
 //     descriptor per watched vnode (a directory's vnode doesn't see in-place rewrites of its files,
 //     so it would be one per file): hundreds of descriptors for a big library, in a GUI process
 //     whose soft limit starts at 256.
@@ -29,7 +30,8 @@ struct DiskChanges: OptionSet, Sendable, Hashable {
     let rawValue: Int
     init(rawValue: Int) { self.rawValue = rawValue }
 
-    /// The scene library: a package added, removed or renamed, or a file the UI reads changed.
+    /// The scene library: a package added, removed or renamed, or a file the UI reads (or compiles
+    /// into a preview) changed.
     static let library = DiskChanges(rawValue: 1 << 0)
     /// playlist-settings.json (e.g. `livepaper publish --scenes …`).
     static let playlist = DiskChanges(rawValue: 1 << 1)
@@ -94,8 +96,11 @@ final class LibraryWatcher: @unchecked Sendable {
     static let playlistSettingsName = PublishService.settingsFileName
     /// Never delivered at all (busy while agents work, irrelevant to the UI).
     static let excludedNames = [LPPaths.workspaces, LPPaths.logs, LPPaths.backups].map(\.lastPathComponent)
-    /// Files inside a package that the library grid, the playlist and the detail view read.
-    static let packageFiles: Set<String> = [SceneManifest.fileName, "thumbnail.jpg", ProvenanceLog.fileName, CheckReportFile.relativePath]
+    /// Files inside a package that the library grid, the playlist and the detail view read, and
+    /// the scene code the live previews compile (with everything under `assets/`).
+    static let packageFiles: Set<String> = [SceneManifest.fileName, "thumbnail.jpg", ProvenanceLog.fileName, CheckReportFile.relativePath,
+                                            SceneCompiler.sceneFile]
+    static let assetsDirectoryName = SceneCompiler.assetsDirectory
 
     let root: URL
     private let latency: CFTimeInterval
@@ -177,7 +182,10 @@ final class LibraryWatcher: @unchecked Sendable {
         // contents only become a scene through a rename, which is reported under the final name.
         guard !package.hasPrefix("."), package.hasSuffix("." + SceneManifest.packageExtension) else { return [] }
         guard components.count > 2 else { return .library }       // a package added, removed or renamed
-        return packageFiles.contains(components.dropFirst(2).joined(separator: "/")) ? .library : []
+        let inside = Array(components.dropFirst(2))
+        // assets/ itself (an asset removed or renamed) and anything in it, except hidden litter.
+        if inside[0] == assetsDirectoryName { return inside.contains { $0.hasPrefix(".") } ? [] : .library }
+        return packageFiles.contains(inside.joined(separator: "/")) ? .library : []
     }
 
     /// realpath() of the deepest existing ancestor plus the components that don't exist yet.
