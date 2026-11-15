@@ -73,7 +73,10 @@ enum ProvenanceLog {
 }
 
 enum CheckReportFile {
-    static func url(package: URL) -> URL { package.appendingPathComponent(".check/report.json") }
+    /// Inside the package (`livepaper check` writes it; the app watches it, LibraryWatcher).
+    static let relativePath = ".check/report.json"
+
+    static func url(package: URL) -> URL { package.appendingPathComponent(relativePath) }
 
     /// Decodes .check/report.json, accepting ISO-8601 (with or without fractions) or numeric dates.
     static func load(package: URL) -> CheckReport? {

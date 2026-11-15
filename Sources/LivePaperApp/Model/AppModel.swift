@@ -27,8 +27,28 @@ struct AppEnvironment {
     var appBundlePath: String?
     /// System Settings › Lock Screen (AppKit; Entry/SystemActions). A no-op in mock mode and tests.
     var openLockScreenSettings: @MainActor () -> Void = {}
+    /// The support directory whose `Library/` and `playlist-settings.json` are watched for changes
+    /// made by other processes (LibraryWatcher). nil: not watched (tests, snapshots).
+    var diskWatchRoot: URL? = nil
 
     static let onboardingCompletedKey = "onboardingCompleted"
+}
+
+/// Modification dates of the per-scene files the UI shows beyond what LibraryEntry compares, so a
+/// file rewritten under the same name (`livepaper thumbnail`, `livepaper check`) is noticed.
+struct SceneFileStamps: Equatable, Sendable {
+    var thumbnail: Date?
+    var history: Date?
+    var report: Date?
+
+    init(package: URL) {
+        func modified(_ relative: String) -> Date? {
+            (try? package.appendingPathComponent(relative).resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }
+        thumbnail = modified("thumbnail.jpg")
+        history = modified(ProvenanceLog.fileName)
+        report = modified(CheckReportFile.relativePath)
+    }
 }
 
 /// Runs blocking service work on a background thread.
@@ -99,6 +119,23 @@ final class AppModel {
     private(set) var checkingSceneIDs: Set<String> = []
     /// Bumped when per-scene files (history, check report) change, so detail views reload them.
     private(set) var detailsRevision = 0
+    /// Modification dates of the per-scene files the UI shows beyond what LibraryEntry compares.
+    @ObservationIgnored private var fileStamps: [String: SceneFileStamps] = [:]
+    @ObservationIgnored private var activeLibraryLoads = 0
+    // Reads run off the main actor and can finish out of order: a read only applies if no read that
+    // started after it has applied already (so callers of reloadLibrary/loadPlaylist always see data
+    // read after their call, never an older read finishing late).
+    @ObservationIgnored private var libraryReadSeq = 0
+    @ObservationIgnored private var libraryAppliedSeq = 0
+    @ObservationIgnored private var playlistReadSeq = 0
+    @ObservationIgnored private var playlistAppliedSeq = 0
+
+    // Changes made by other processes (CLI, Finder, editors)
+    @ObservationIgnored private var diskWatcher: LibraryWatcher?
+    @ObservationIgnored private var pendingDiskChanges: DiskChanges = []
+    @ObservationIgnored private var diskRefresh: Task<Void, Never>?
+    /// Passes refreshFromDisk has made (diagnostics, tests).
+    @ObservationIgnored private(set) var diskRefreshCount = 0
 
     // Screen saver, lock, system
     private(set) var playlist = PlaylistSettings()
@@ -135,6 +172,8 @@ final class AppModel {
 
     /// Initial load. Safe to call again (e.g. from "Reload").
     func start() async {
+        // Before the first read, so nothing changed during the initial load goes unnoticed.
+        startWatchingDisk()
         await clearPreviewCache()
         async let lib: Void = reloadLibrary()
         async let pl: Void = loadPlaylist()
@@ -154,21 +193,55 @@ final class AppModel {
 
     func entry(id: String) -> LibraryEntry? { entries.first { $0.id == id } }
 
-    func reloadLibrary() async {
-        isLoadingLibrary = true
-        defer { isLoadingLibrary = false }
+    func reloadLibrary() async { await reloadLibrary(quiet: false) }
+
+    /// `quiet`: a refresh nobody asked for (disk changes, activation). It shows no loading state
+    /// and doesn't announce a failure that is already shown.
+    func reloadLibrary(quiet: Bool) async {
+        libraryReadSeq += 1
+        let seq = libraryReadSeq
+        if !quiet { activeLibraryLoads += 1; isLoadingLibrary = true }
+        defer { if !quiet { activeLibraryLoads -= 1; isLoadingLibrary = activeLibraryLoads > 0 } }
         let library = services.library
         do {
-            entries = try await offMain {
-                try library.scenes().map { LibraryEntry(item: $0, hasAIHistory: ProvenanceLog.hasAIHistory(package: $0.packageURL)) }
+            let (fresh, stamps) = try await offMain { () -> ([LibraryEntry], [String: SceneFileStamps]) in
+                let items = try library.scenes()
+                let entries = items.map { LibraryEntry(item: $0, hasAIHistory: ProvenanceLog.hasAIHistory(package: $0.packageURL)) }
+                let stamps = Dictionary(items.map { ($0.id, SceneFileStamps(package: $0.packageURL)) }, uniquingKeysWith: { a, _ in a })
+                return (entries, stamps)
             }
-            libraryLoadError = nil
-            // Drop navigation to scenes that no longer exist.
-            libraryPath.removeAll { id in !entries.contains { $0.id == id } }
+            guard seq > libraryAppliedSeq else { return }
+            libraryAppliedSeq = seq
+            applyLibrary(fresh, stamps: stamps)
+            if libraryLoadError != nil { libraryLoadError = nil }
         } catch {
-            libraryLoadError = error.localizedDescription
-            banners.error("Couldn't load your scenes", error) { [weak self] in Task { await self?.reloadLibrary() } }
+            guard seq > libraryAppliedSeq else { return }
+            libraryAppliedSeq = seq
+            let message = error.localizedDescription
+            let alreadyShown = libraryLoadError == message
+            libraryLoadError = message
+            if !(quiet && alreadyShown) {
+                banners.error("Couldn't load your scenes", error) { [weak self] in Task { await self?.reloadLibrary() } }
+            }
         }
+    }
+
+    /// Applies a library read without disturbing the UI: unchanged entries aren't reassigned (the
+    /// grid, the playlist and open details keep their state and scroll position), and only files
+    /// rewritten under the same name bump the revisions their views reload on.
+    private func applyLibrary(_ fresh: [LibraryEntry], stamps: [String: SceneFileStamps]) {
+        var detailsChanged = false
+        for (id, new) in stamps {
+            guard let old = fileStamps[id] else { continue }
+            if old.thumbnail != nil && old.thumbnail != new.thumbnail { thumbnailRevision[id, default: 0] += 1 }
+            if old.history != new.history || old.report != new.report { detailsChanged = true }
+        }
+        fileStamps = stamps
+        if detailsChanged { detailsRevision += 1 }
+        if fresh != entries { entries = fresh }
+        // Drop navigation to scenes that no longer exist.
+        let ids = Set(entries.map(\.id))
+        if libraryPath.contains(where: { !ids.contains($0) }) { libraryPath.removeAll { !ids.contains($0) } }
     }
 
     func showScene(_ id: String) {
@@ -351,6 +424,52 @@ final class AppModel {
         }
     }
 
+    // MARK: - Changes made by other processes
+
+    /// Starts picking up changes other processes make to the library and the playlist settings
+    /// (the `livepaper` CLI, Finder, an editor). Idempotent; nothing runs while nothing changes.
+    func startWatchingDisk() {
+        guard diskWatcher == nil, let root = environment.diskWatchRoot else { return }
+        let watcher = LibraryWatcher(root: root) { [weak self] changes in
+            Task { @MainActor in await self?.refreshFromDisk(changes) }
+        }
+        watcher.start()
+        diskWatcher = watcher
+    }
+
+    func stopWatchingDisk() {
+        diskWatcher?.stop()
+        diskWatcher = nil
+    }
+
+    var isWatchingDisk: Bool { diskWatcher != nil }
+
+    /// Re-reads what other processes may have changed: on the disk watcher's word, and as a cheap
+    /// safety net when LivePaper becomes active or the main window opens. Quiet (see
+    /// reloadLibrary(quiet:)) and coalesced: requests arriving while a pass runs share one more pass.
+    func refreshFromDisk(_ changes: DiskChanges = .all) async {
+        pendingDiskChanges.formUnion(changes)
+        if let running = diskRefresh { await running.value; return }
+        let pass = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !self.pendingDiskChanges.isEmpty {
+                let next = self.pendingDiskChanges
+                self.pendingDiskChanges = []
+                self.diskRefreshCount += 1
+                if next.contains(.playlist) { await self.loadPlaylist() }
+                if next.contains(.library) {
+                    await self.reloadLibrary(quiet: true)
+                    // A scene added by the CLI has no thumbnail yet; rendering one mustn't hold up
+                    // the next refresh.
+                    Task { await self.generateMissingThumbnails() }
+                }
+            }
+            self.diskRefresh = nil
+        }
+        diskRefresh = pass
+        await pass.value
+    }
+
     // MARK: - Playlist / publishing
 
     var playlistSummary: String {
@@ -363,8 +482,17 @@ final class AppModel {
     }
 
     func loadPlaylist() async {
+        playlistReadSeq += 1
+        let seq = playlistReadSeq
         let publish = services.publish
-        playlist = (try? await offMain { publish.loadSettings() }) ?? PlaylistSettings()
+        let settings = (try? await offMain { publish.loadSettings() }) ?? PlaylistSettings()
+        guard seq > playlistAppliedSeq else { return }
+        playlistAppliedSeq = seq
+        guard settings != playlist else { return }
+        // Changed elsewhere (e.g. `livepaper publish --scenes …`): this app's last publish no longer
+        // describes what the saver plays.
+        lastPublishResult = nil
+        playlist = settings
     }
 
     /// Saves the settings and publishes them into the installed screen saver. With
@@ -380,6 +508,9 @@ final class AppModel {
                 try publish.saveSettings(settings)
                 return publishNow ? try publish.publishReport() : nil
             }
+            // Newer than any read still in flight.
+            playlistReadSeq += 1
+            playlistAppliedSeq = playlistReadSeq
             playlist = settings
             guard let result else { return true }
             lastPublishResult = result
