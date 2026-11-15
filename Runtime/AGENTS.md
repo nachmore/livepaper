@@ -84,11 +84,14 @@ demands attention. `livepaper check` measures this and **fails** scenes that are
   in and out, derived from `lp.t`.
 * **Seamless loops:** wrap with `(lp.t * speed) % width` and draw scrolling layers twice; use
   sin/cos and long, unrelated periods (47 s, 73 s, 131 s) so nothing visibly repeats or jumps.
+  Whatever starts over must be off-screen or faded out at that moment; wrap by a constant length
+  (`util.fract(a / m) * m` for negative speeds: `%` keeps the sign).
 * **Cheaply:** paint layers once in `resize()` (oversized for a camera drift, two screens wide for a
   scrolling band) and `drawImage` them at an offset per frame; one `util.glow` sprite per particle;
-  in WebGL, a few octaves of noise moved by `lp.t`. Motion everywhere must still fit the frame-time
-  and energy budgets below. A complete example (0.3 ms per frame, motion in all nine regions) is in
-  SCENE_API.md §7.
+  in WebGL, a few octaves of noise moved by bounded offsets computed from `lp.t` in JavaScript
+  (uniforms are 32-bit floats: never pass raw `lp.t`, SCENE_API.md §12). Motion everywhere must
+  still fit the frame-time and energy budgets below. A complete example (0.3 ms per frame, motion in
+  all nine regions) is in SCENE_API.md §7.
 
 How it is measured: the scene is laid out at 1280×720 and 1024×820, rendered at t = 3, 17, 41 and
 120 s, and each frame is compared with the frames a few frames, 0.5 s, 2 s and 5 s later on a grid

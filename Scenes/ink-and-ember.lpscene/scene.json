@@ -9,9 +9,9 @@
   "kind" : "web",
   "name" : "Ink and Ember",
   "performance" : {
-    "benchMs" : 0.81699999999999995,
-    "checkedAt" : "2026-11-15T17:25:57Z",
-    "energyMw" : 69
+    "benchMs" : 0.80800000000000005,
+    "checkedAt" : "2026-11-15T23:10:46Z",
+    "energyMw" : 125
   },
   "runtime" : 1,
   "schema" : 1,
@@ -22,5 +22,5 @@
     "dusk",
     "calm"
   ],
-  "updated" : "2026-11-15T17:23:31Z"
+  "updated" : "2026-11-15T23:09:54Z"
 }

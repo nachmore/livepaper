@@ -168,7 +168,8 @@ The screen saver runs for hours. Things that are fine in a 30-second demo break 
 * **No slow decay.** Fades, zooms and camera moves must loop or settle, not run off to black, to
   white, or out of the frame. `livepaper check` compares t = 600 with earlier stills.
 * **Precision.** `Math.sin(lp.t * 0.01)` is fine for days; feeding a huge `lp.t * 1000` into noise or
-  `sin` loses smoothness after hours. Keep arguments moderate or wrap them.
+  `sin` loses smoothness after hours. Keep arguments moderate or wrap them. That is for JavaScript's
+  doubles: shader floats are 32-bit, so never hand raw `lp.t` to WebGL (§12).
 * **No per-frame allocation** in hot paths (new arrays/objects/Path2D for thousands of items every
   frame). Garbage collection pauses show up as stutter. Reuse buffers.
 * **Calm by default.** Lock screens are seen in the dark and at a glance: no strobing, no flashes,
@@ -209,7 +210,11 @@ and fails scenes that are too static, too busy or that flicker.
    (`const k = Math.floor(lp.t / 37), p = (lp.t % 37) / 37;` plus `util.hash2(k, 1)` to vary them).
 8. **Seamless loops.** Scroll layers with `(lp.t * speed) % width` and draw them twice (tiled);
    sway and camera moves with sin/cos; mix long, unrelated periods (47 s, 73 s, 131 s) so the
-   combination never visibly repeats. Nothing may jump when a period wraps.
+   combination never visibly repeats. Nothing may jump when a period wraps: whatever starts over (a
+   sun crossing the sky, a passing boat, a particle) must be off-screen or faded out at that moment,
+   and the length you wrap by must stay the same (wrapping by a sprite's growing width bends its
+   drift more the longer the scene runs, until it goes backwards). JavaScript's `%` keeps the sign
+   of the dividend, so with negative speeds wrap with `util.fract(a / m) * m` instead.
 
 **Doing it cheaply** (the frame budget and battery still apply, §9):
 
@@ -217,12 +222,15 @@ and fails scenes that are too static, too busy or that flicker.
   camera drift, or two screens wide for a scrolling band — and per frame just `drawImage` them at
   an offset or scale. A handful of full-screen `drawImage` calls costs almost nothing.
 * Particles: one cached `util.glow` sprite per particle (a few hundred are fine), positions as pure
-  functions of `lp.t` (`x = (x0 + lp.t * vx) % lp.w`), fewer when `lp.quality < 1`.
+  functions of `lp.t`, fewer when `lp.quality < 1`. Wrap over the screen plus the sprite, so it has
+  left completely before it reappears on the other side, for either sign of `vx`:
+  `const W = lp.w + 2 * r; x = util.fract((x0 + lp.t * vx) / W) * W - r;`.
 * Sway: rotate or skew a few pre-rendered strips or sprites with `ctx.setTransform`, not every blade.
 * Water: draw the reflection layer in 20–40 horizontal strips, each offset by
   `util.noise1(y * k + lp.t * s)`.
 * WebGL: two or three octaves of value noise / fbm for fog, water and light, animated by moving
-  (and slowly warping) the noise coordinates with `lp.t`; render at reduced resolution if heavy.
+  (and slowly warping) the noise coordinates with bounded offsets computed from `lp.t` in JavaScript
+  (§12); render at reduced resolution if heavy.
 * Avoid per-pixel JavaScript loops, `getImageData`, `shadowBlur`/`ctx.filter` and re-painting
   static layers every frame.
 
@@ -272,8 +280,9 @@ LivePaper.scene({
     const n = Math.floor(MOTES.length * lp.quality);
     for (let i = 0; i < n; i++) {
       const [x0, y0, s, ph] = MOTES[i];
-      const x = (x0 * lp.w + t * 6 * s) % lp.w, y = y0 * lp.h + Math.sin(t * 0.4 + ph) * 10;
-      U.glow(c, x, y, 3 + 2 * s, '#cfe0ff', 0.35 + 0.25 * Math.sin(t * 0.7 + ph));
+      const r = 3 + 2 * s, W = lp.w + 2 * r;               // wrap off-screen: no pop at the edges
+      const x = U.fract(x0 + t * 6 * s / W) * W - r, y = y0 * lp.h + Math.sin(t * 0.4 + ph) * 10;
+      U.glow(c, x, y, r, '#cfe0ff', 0.35 + 0.25 * Math.sin(t * 0.7 + ph));
     }
   }
 });
@@ -414,12 +423,18 @@ LivePaper.scene({
   setup(lp) { /* compile shaders, create buffers */ },
   draw(lp) {
     const gl = lp.gl;              // viewport already set to (0, 0, lp.pw, lp.ph)
-    // … uniforms: resolution = [lp.pw, lp.ph], time = lp.t
+    // … uniforms: resolution = [lp.pw, lp.ph]; motion as bounded values (below), never raw lp.t
   }
 });
 ```
 
 * Use `lp.pw`/`lp.ph` for the drawing-buffer size; the runtime resizes the canvas.
+* **Uniforms are 32-bit floats.** A raw `lp.t` uniform, or noise coordinates like `p + u_time * k`,
+  lose precision the longer the screen saver runs: after hours, drifts start to step and hash-based
+  noise can break up. Compute what moves in JavaScript (doubles) and pass bounded values: offsets as
+  sines (`A * Math.sin(lp.t * w)`), and phases wrapped to [0, 2π) (`(lp.t / P % 1) * util.TAU`) that
+  the shader uses only inside sin/cos with whole-number multiples, so the wrap is seamless. The
+  built-in Liquid Glass works this way.
 * A full-screen fragment shader runs for every pixel: 6 million per frame at 1512×982 @2x. Keep
   shaders short (few noise octaves), or render to a smaller framebuffer and upscale.
 * Don't set `preserveDrawingBuffer: true`, and don't mix WebGL with a per-frame 2D canvas copy.
