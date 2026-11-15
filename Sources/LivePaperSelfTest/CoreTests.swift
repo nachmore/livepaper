@@ -771,6 +771,9 @@ extension SelfTests {
                 echo "Using tool: fs_write scene/scene.js"
                 command -v livepaper
                 printf 'LivePaper.scene({ draw(lp) { lp.ctx.fillStyle = "#102040"; } });\\n' > scene/scene.js
+                printf 'scratch' > scene/.part_sky.js
+                printf 'notes' > scene/notes.md
+                mkdir -p scene/assets && printf 'x' > scene/assets/palette.json
                 printf '{"id":"untitled","name":"Midnight Lake","kind":"video"}' > scene/scene.json
                 livepaper check scene
                 sleep 2
@@ -793,7 +796,8 @@ extension SelfTests {
                 try expect(!env.contains("CLAUDECODE=") && !env.contains("CLAUDE_CODE_SESSION_ID="), "parent agent variables scrubbed")
                 try expect(env.contains("PATH=\(ws.bin.path):") && env.contains("NO_COLOR=1") && env.contains("LOGIN_ONLY=1"))
                 try expect(read(ws.stdoutLog).contains("Reading the task"), "stdout teed to the log")
-                // The candidate is normalised and carries its provenance.
+                // The candidate is normalised and carries its provenance; the agent's scratch files are gone.
+                try expectEqual(children(ws.scene).filter { $0 != ".check" }, ["assets", "history.jsonl", "scene.js", "scene.json"])
                 let m = try SceneManifest.load(package: ws.scene)
                 try expectEqual(m.id, "midnight-lake"); try expectEqual(m.kind, .web); try expectEqual(m.runtime, 1)
                 let history = SceneHistory.entries(in: ws.scene)

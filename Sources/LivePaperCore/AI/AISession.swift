@@ -231,7 +231,17 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
 
     /// Normalises the candidate's manifest (the agent may have edited fields it was told to keep)
     /// and records the session in its history.jsonl, which the library merges on accept.
+    /// What a web scene candidate may contain at its top level (ARCHITECTURE §4.2). Anything else is
+    /// an agent's scratch work (`.part_ridge.js`, `notes.md`, a backup copy) that would otherwise
+    /// be imported into the library with the scene.
+    static let candidateEntries: Set<String> = [SceneManifest.fileName, SceneCompiler.sceneFile, SceneCompiler.assetsDirectory,
+                                                SceneChecker.checkDirectory]
+
     private func finalizePackage() throws {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: ws.scene.path)) ?? [] where !Self.candidateEntries.contains(name) {
+            try? fm.removeItem(at: ws.scene.appendingPathComponent(name))
+        }
         var m = try SceneManifest.load(package: ws.scene)
         let now = Date()
         m.schema = SceneManifest.currentSchema
