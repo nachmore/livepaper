@@ -1,0 +1,26 @@
+{
+  "author" : "LivePaper",
+  "clock" : {
+    "position" : "top"
+  },
+  "created" : "2026-11-15T02:35:14Z",
+  "description" : "A sumi-e dusk mountain range in handmade charcoal paper, with drifting mist and a low vermilion sun.",
+  "id" : "ink-and-ember",
+  "kind" : "web",
+  "name" : "Ink and Ember",
+  "performance" : {
+    "benchMs" : 0.52500000000000002,
+    "checkedAt" : "2026-11-15T03:20:10Z",
+    "energyMw" : 26
+  },
+  "runtime" : 1,
+  "schema" : 1,
+  "tags" : [
+    "sumi-e",
+    "mountains",
+    "ink-wash",
+    "dusk",
+    "calm"
+  ],
+  "updated" : "2026-11-15T03:11:19Z"
+}
