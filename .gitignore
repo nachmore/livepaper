@@ -6,5 +6,3 @@ build/
 /Scenes/*/.check/
 # `livepaper check` output inside any scene package
 *.lpscene/.check/
-# per-architecture fallback builds (scripts/build.sh)
-/.build-*/
