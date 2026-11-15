@@ -491,10 +491,12 @@ struct UninstallSheet: View {
                         VStack(alignment: .leading, spacing: 1) {
                             Text(row.title)
                                 .foregroundStyle(row.state == .skipped ? .secondary : .primary)
+                                .fixedSize(horizontal: false, vertical: true)
                             if let detail = row.detail {
                                 Text(detail).font(.callout)
                                     .foregroundStyle(row.state == .failed ? Color.red : .secondary)
                                     .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
                             }
                         }
                     }
