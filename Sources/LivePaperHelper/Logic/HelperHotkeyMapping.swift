@@ -25,7 +25,9 @@ enum HelperHotkeyProblem: Error, Equatable, Sendable, CustomStringConvertible {
     /// A plain key (or ⇧+key) would swallow normal typing in every app.
     case needsModifier(String)
     /// ⌃⌘Q is macOS's own Lock Screen shortcut. LivePaper covers it through the system lock
-    /// takeover (`immediateLockLaunchesScreenSaver`), so the helper must not grab it.
+    /// takeover (`immediateLockLaunchesScreenSaver`), so the helper must not grab it: a hotkey that
+    /// intercepted it would replace a lock that always locks with one that locks only when the
+    /// password is required immediately.
     case systemLockShortcut
 
     var description: String {
