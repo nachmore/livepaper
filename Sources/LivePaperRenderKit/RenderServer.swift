@@ -190,7 +190,7 @@ extension LivePaperRenderKit {
             source?.cancel()
             if wasListening { unlink(files.socket.path) } // ours: we hold the server lock
             if lockFD >= 0 { close(lockFD) }             // releases the lock for the next server
-            for job in pending { reply(job.fd, RenderResponse(ok: false, note: "render server stopped")) }
+            for job in pending { reply(job.fd, RenderResponse(ok: false, note: RenderServiceFiles.shuttingDownNote)) }
             pending.removeAll()
             if !busy { finishStopping() }
         }
@@ -273,7 +273,7 @@ extension LivePaperRenderKit {
         @MainActor
         private func enqueue(_ job: Job) {
             if isStopped || draining {
-                reply(job.fd, RenderResponse(ok: false, note: "render server is shutting down"))
+                reply(job.fd, RenderResponse(ok: false, note: RenderServiceFiles.shuttingDownNote))
                 return
             }
             pending.append(job)

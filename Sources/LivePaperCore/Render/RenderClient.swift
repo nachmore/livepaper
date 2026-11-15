@@ -84,6 +84,17 @@ public final class RenderClient: RenderClienting, @unchecked Sendable {
 
     private func sendBlocking(_ request: RenderRequest, timeout: TimeInterval, cancel: CancelToken) throws -> RenderResponse {
         let deadline = Date().addingTimeInterval(timeout)
+        while true {
+            let response = try sendOnce(request, timeout: timeout, deadline: deadline, cancel: cancel)
+            // A server that is handing over (to the app, or a --replace daemon) refuses new work for
+            // a moment; the next server is up within seconds, so try again rather than fail.
+            guard !response.ok, response.note == RenderServiceFiles.shuttingDownNote, request.op != .shutdown,
+                  Date().addingTimeInterval(0.25) < deadline, !cancel.isCancelled else { return response }
+            usleep(250_000)
+        }
+    }
+
+    private func sendOnce(_ request: RenderRequest, timeout: TimeInterval, deadline: Date, cancel: CancelToken) throws -> RenderResponse {
         let fd = try connectOrStart(deadline: deadline, spawn: allowSpawn && request.op != .shutdown && request.op != .ping)
         guard cancel.register(fd) else { close(fd); throw RenderClientError.cancelled }
         defer { cancel.unregister(); close(fd) }
@@ -119,12 +130,13 @@ public final class RenderClient: RenderClienting, @unchecked Sendable {
 private final class CancelToken: @unchecked Sendable {
     private let lock = NSLock()
     private var fd: Int32 = -1
-    private(set) var isCancelled = false
-    func register(_ fd: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; self.fd = fd; return !isCancelled }
+    private var cancelled = false
+    var isCancelled: Bool { lock.lock(); defer { lock.unlock() }; return cancelled }
+    func register(_ fd: Int32) -> Bool { lock.lock(); defer { lock.unlock() }; self.fd = fd; return !cancelled }
     func unregister() { lock.lock(); fd = -1; lock.unlock() }
     func cancel() {
         lock.lock(); defer { lock.unlock() }
-        isCancelled = true
+        cancelled = true
         if fd >= 0 { shutdown(fd, SHUT_RDWR) }
     }
 }
@@ -158,12 +170,17 @@ struct DaemonLauncher {
             guard Date() < deadline else { throw RenderClientError.daemonFailed("timed out waiting for another client to start the render server") }
             usleep(50_000)
         }
-        if LineSocket.isListening(path: socketPath) { return }
-        // Somebody holds the server lock: a server is starting up, or the app is taking over from a
-        // daemon that just exited. Wait for it rather than launching a second process.
-        if files.isServerLockHeld() {
-            if waitUntilListening(deadline: min(deadline, Date().addingTimeInterval(30)), child: nil) { return }
-            throw RenderClientError.daemonFailed("a render server holds \(files.serverLock.path) but is not accepting connections on \(socketPath)")
+        // Somebody holds the server lock: a server is starting up, the app is taking over from a
+        // daemon, or a server is on its way out. Wait for it to listen — or to let go of the lock,
+        // in which case we launch the daemon ourselves — rather than starting a second server.
+        let lockWait = min(deadline, Date().addingTimeInterval(30))
+        while true {
+            if LineSocket.isListening(path: socketPath) { return }
+            guard files.isServerLockHeld() else { break }
+            guard Date() < lockWait else {
+                throw RenderClientError.daemonFailed("a render server holds \(files.serverLock.path) but is not accepting connections on \(socketPath)")
+            }
+            usleep(100_000)
         }
         guard Self.launchedPID == 0 else {
             throw RenderClientError.daemonFailed("it already exited once in this session; see \(files.daemonLog.path)")
@@ -192,10 +209,11 @@ struct DaemonLauncher {
         throw RenderClientError.daemonNotFound(candidates.map(\.path))
     }
 
-    private func waitUntilListening(deadline: Date, child: pid_t?) -> Bool {
+    /// Waits for the daemon we launched to listen; gives up early if it exits.
+    private func waitUntilListening(deadline: Date, child: pid_t) -> Bool {
         while Date() < deadline {
             if LineSocket.isListening(path: files.socket.path) { return true }
-            if let child, kill(child, 0) != 0 { return false }
+            if kill(child, 0) != 0 { return false }
             usleep(100_000)
         }
         return false

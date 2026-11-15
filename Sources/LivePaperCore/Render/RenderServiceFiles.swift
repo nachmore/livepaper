@@ -15,6 +15,10 @@ import Foundation
 public struct RenderServiceFiles: Sendable, Equatable {
     public let socket: URL
 
+    /// RenderResponse.note of requests refused because the server is stopping or handing over.
+    /// Clients retry those (RenderClient) once the next server is up.
+    public static let shuttingDownNote = "render server is shutting down"
+
     public init(socket: URL = LPPaths.renderSocket) { self.socket = socket }
 
     public var directory: URL { socket.deletingLastPathComponent() }
