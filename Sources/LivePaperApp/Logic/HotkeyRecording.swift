@@ -102,7 +102,7 @@ enum HotkeyRecorder {
     static func reservedReason(_ hotkey: LPHotkey) -> String? {
         let set = Set(hotkey.modifiers)
         if hotkey.keyCode == KeyCode.q && set == [.control, .command] {
-            return "\u{2303}\u{2318}Q is the system lock shortcut. Use \u{201C}Use \u{2303}\u{2318}Q for LivePaper lock\u{201D} below instead."
+            return "\u{2303}\u{2318}Q is the system lock shortcut. Turn on \u{201C}Use \u{2303}\u{2318}Q and the lock key for LivePaper lock\u{201D} above instead."
         }
         guard let rule = reserved.first(where: { $0.keyCode == hotkey.keyCode && $0.modifiers == set }) else { return nil }
         return "\(display(hotkey)) \(rule.what)."

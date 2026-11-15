@@ -45,7 +45,7 @@ extension SelfTests {
             try expect(rejected(48, cmd), "⌘Tab switches apps")
             try expect(rejected(21, cmd | shift), "⌘⇧4 takes screenshots")
             if case .rejected(let why) = HotkeyRecorder.evaluate(keyCode: 12, rawFlags: ctrl | cmd) {
-                try expect(why.contains("Use \u{2303}\u{2318}Q for LivePaper lock"), why)
+                try expect(why.contains("Use \u{2303}\u{2318}Q and the lock key for LivePaper lock"), why)
             }
         },
         TestCase(name: "app.hotkey.display") {
