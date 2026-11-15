@@ -1,5 +1,8 @@
 # LivePaper
 
+[![CI](https://github.com/nachmore/livepaper/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/nachmore/livepaper/actions/workflows/ci.yml)
+[![Latest release](https://img.shields.io/github/v/release/nachmore/livepaper?sort=semver&display_name=tag)](https://github.com/nachmore/livepaper/releases/latest)
+
 LivePaper turns animations and videos into your Mac's screen saver — and, on macOS 26, that means
 your **live lock screen**. Bring a video, or describe a scene and let an AI coding agent (Claude
 Code, Codex or Kiro CLI) write it; LivePaper validates every scene for frame time, brightness and
@@ -52,6 +55,25 @@ desktop picture. LivePaper builds on exactly that:
   hidden copy render behind the lock screen until you unlock (Saver/README.md, "Known limitations").
 
 The contract between the components is in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Install
+
+Download LivePaper from [Releases](https://github.com/nachmore/livepaper/releases):
+
+* the [latest release](https://github.com/nachmore/livepaper/releases/latest) — recommended;
+* a beta (marked *Pre-release*), to try what's coming;
+* the [nightly](https://github.com/nachmore/livepaper/releases/tag/nightly), rebuilt from `main` on
+  every push.
+
+Open the `.dmg` and drag LivePaper onto Applications (or unzip the `.zip` and move LivePaper.app
+there), then open it: setup walks you through the rest. `SHA256SUMS` lets you check the download
+(`shasum -a 256 -c SHA256SUMS`).
+
+Builds that aren't notarized by Apple say so in their release notes, and macOS won't open them at
+first. If you trust the download, open LivePaper once, then click **Open Anyway** in System Settings ›
+Privacy & Security, or run `xattr -dr com.apple.quarantine /Applications/LivePaper.app`.
+
+How releases are made: [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Install from source
 
@@ -179,12 +201,16 @@ Sources/LivePaperCLI/         `livepaper`                Sources/LivePaperRender
 Saver/                        LivePaper.saver (built by scripts/build-saver.sh)
 Runtime/                      runtime.js, scene API docs, agent guide, scene template
 App/                          Info.plist, helper LaunchAgent plist, procedural app icon
-scripts/                      build.sh, build-saver.sh, dev-install.sh, uninstall-dev.sh, dev/
+scripts/                      build.sh, build-saver.sh, dev-install.sh, uninstall-dev.sh, release.sh, dev/
+scripts/ci/                   what CI runs: versions from refs, packaging, signing, publishing, lint
 ```
 
 * `swift build` builds every Swift target; `scripts/build.sh --debug` assembles a development
   bundle in a few seconds. The version lives in the `VERSION` file; the build number is the commit
   count.
+* **CI** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) lints the scripts, builds, runs the
+  self-tests and packages the app on every push and pull request; pushes to `main` update the
+  nightly, and `scripts/release.sh` tags betas and releases ([docs/RELEASING.md](docs/RELEASING.md)).
 * **Tests:** `swift build && swift run LivePaperSelfTest [filter]` (a small custom runner; no
   XCTest). Tests run against temporary directories through the `LIVEPAPER_HOME`,
   `LIVEPAPER_SAVERS_DIR`, `LIVEPAPER_LAUNCH_AGENTS_DIR` and `LIVEPAPER_WALLPAPER_STORE` overrides
