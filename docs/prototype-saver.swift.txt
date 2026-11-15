@@ -1,4 +1,4 @@
-// Voltron.saver — a macOS screen saver that plays the Voltron lock-screen scenes.
+// Prototype.saver — a macOS screen saver that plays the Prototype lock-screen scenes.
 //
 // Each scene is a self-contained HTML file (Resources/scenes/<id>.html) rendered live in a WKWebView.
 // Settings (System Settings › Screen Saver › Options…) are stored with ScreenSaverDefaults.
@@ -16,7 +16,7 @@ import IOKit.ps
 import ScreenSaver
 import WebKit
 
-private let kModuleName = "local.voltron.lockscreen.saver"
+private let kModuleName = "local.prototype.lockscreen.saver"
 
 struct SceneInfo: Decodable {
     let id: String
@@ -98,14 +98,14 @@ final class PassiveWebView: WKWebView {
 final class WeakScriptHandler: NSObject, WKScriptMessageHandler {
     func userContentController(_ ucc: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], body["type"] as? String == "error" else { return }
-        NSLog("Voltron scene error: %@", String(describing: body["message"] ?? "?"))
+        NSLog("Prototype scene error: %@", String(describing: body["message"] ?? "?"))
     }
 }
 
-@objc(VoltronSaverView)
-final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
-    private let bundle = Bundle(for: VoltronSaverView.self)
-    private lazy var scenes: [SceneInfo] = VoltronSaverView.loadScenes(from: bundle)
+@objc(PrototypeSaverView)
+final class PrototypeSaverView: ScreenSaverView, WKNavigationDelegate {
+    private let bundle = Bundle(for: PrototypeSaverView.self)
+    private lazy var scenes: [SceneInfo] = PrototypeSaverView.loadScenes(from: bundle)
     private let settings = SaverSettings()
     private var current: WKWebView?
     private var incoming: WKWebView?
@@ -205,7 +205,7 @@ final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
     }
 
     private func setPaused(_ paused: Bool) {
-        let js = paused ? "window.Voltron && Voltron.pause()" : "window.Voltron && Voltron.resume()"
+        let js = paused ? "window.Prototype && Prototype.pause()" : "window.Prototype && Prototype.resume()"
         for wv in [current, incoming].compactMap({ $0 }) { wv.evaluateJavaScript(js, completionHandler: nil) }
     }
 
@@ -230,7 +230,7 @@ final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
     private func dispose(_ wv: WKWebView) {
         wv.navigationDelegate = nil
         wv.stopLoading()
-        wv.configuration.userContentController.removeScriptMessageHandler(forName: "voltron")
+        wv.configuration.userContentController.removeScriptMessageHandler(forName: "prototype")
         wv.removeFromSuperview()
     }
 
@@ -238,7 +238,7 @@ final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
         NSColor.black.setFill()
         bounds.fill()
         if scenes.isEmpty || (current == nil && incoming == nil && started) {
-            let msg = (scenes.isEmpty ? "Voltron: no scenes found in the screen saver bundle." : "Voltron: the scene could not be displayed.") as NSString
+            let msg = (scenes.isEmpty ? "Prototype: no scenes found in the screen saver bundle." : "Prototype: the scene could not be displayed.") as NSString
             let attrs: [NSAttributedString.Key: Any] = [.foregroundColor: NSColor.gray, .font: NSFont.systemFont(ofSize: previewLike ? 10 : 18)]
             let size = msg.size(withAttributes: attrs)
             msg.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2), withAttributes: attrs)
@@ -329,8 +329,8 @@ final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
         ]
         let json = (try? JSONSerialization.data(withJSONObject: cfg)).flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
         conf.userContentController.addUserScript(
-            WKUserScript(source: "window.VOLTRON_CONFIG = \(json);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
-        conf.userContentController.add(WeakScriptHandler(), name: "voltron")
+            WKUserScript(source: "window.PROTOTYPE_CONFIG = \(json);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        conf.userContentController.add(WeakScriptHandler(), name: "prototype")
         let wv = PassiveWebView(frame: bounds, configuration: conf)
         // macOS 26 hosts legacy savers in a window that AppKit reports as occluded, so WebKit would treat
         // the page as hidden and never draw (black screen). Opt out of occlusion detection; display
@@ -362,8 +362,8 @@ final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
         let old = current
         current = webView
         incoming = nil
-        if !isAnimating || VoltronSaverView.displaysAsleep() {
-            webView.evaluateJavaScript("window.Voltron && Voltron.pause()", completionHandler: nil)
+        if !isAnimating || PrototypeSaverView.displaysAsleep() {
+            webView.evaluateJavaScript("window.Prototype && Prototype.pause()", completionHandler: nil)
         }
         // True crossfade: fade the new scene in on top, then drop the old one.
         NSAnimationContext.runAnimationGroup({ ctx in
@@ -396,7 +396,7 @@ final class VoltronSaverView: ScreenSaverView, WKNavigationDelegate {
     private func recover() {
         let now = Date()
         failures = failures.filter { now.timeIntervalSince($0) < 120 } + [now]
-        NSLog("Voltron: scene failure #%d", failures.count)
+        NSLog("Prototype: scene failure #%d", failures.count)
         if failures.count >= 4 {
             teardown()
             started = true
@@ -462,7 +462,7 @@ final class ConfigSheet: NSObject {
     }
 
     private func build() {
-        window.title = "Voltron Lock Screens"
+        window.title = "Prototype Lock Screens"
 
         // Items carry their ids/values, so duplicate titles can't shift the selection.
         let sceneMenu = NSMenu()
@@ -507,7 +507,7 @@ final class ConfigSheet: NSObject {
         cancel.keyEquivalent = "\u{1b}"
         let ok = NSButton(title: "OK", target: self, action: #selector(okPressed))
         ok.keyEquivalent = "\r"
-        let version = NSTextField(labelWithString: "Voltron Lock Screens · \(scenes.count) scenes")
+        let version = NSTextField(labelWithString: "Prototype Lock Screens · \(scenes.count) scenes")
         version.textColor = .tertiaryLabelColor
         version.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         let buttons = NSStackView(views: [version, NSView(), cancel, ok])
