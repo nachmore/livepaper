@@ -16,6 +16,9 @@ enum SceneCommands {
                        summary: "run a scene live and measure fps, CPU and energy", run: live),
             CLICommand(name: "compile", synopsis: "<dir.lpscene> [--out file.html|-]",
                        summary: "compile a web scene into one self-contained HTML file", run: compile),
+            CLICommand(name: "thumbnail", synopsis: "<dir.lpscene> [--t 8] [--out file.jpg] [--json]",
+                       summary: "render the library thumbnail (640x400 JPEG, no clock) into the scene's thumbnail.jpg",
+                       run: thumbnail),
         ]
     }
 
@@ -152,6 +155,21 @@ enum SceneCommands {
         try SceneCompiler().compile(package: pkg, to: out)
         print("wrote \(displayPath(out))")
         return ExitCode.ok
+    }
+
+    // MARK: - thumbnail
+
+    /// The same thumbnail the app makes for library scenes (render server `thumbnail` op: a
+    /// 1280x800 viewport downsampled to 640x400, no clock). The app only renders thumbnails for
+    /// the user's own scenes, so built-in scenes ship theirs — made with this command.
+    static func thumbnail(_ argv: [String]) async throws -> Int32 {
+        let args = try Arguments(argv, flags: ["json"], options: ["t", "out"])
+        let pkg = try sceneDirectory(args)
+        let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL } ?? pkg.appendingPathComponent("thumbnail.jpg")
+        let req = RenderRequest(op: .thumbnail, scene: pkg.path, t: try args.double("t"), out: out.path)
+        let r = try await RenderClient().send(req, timeout: RenderClient.defaultTimeout(for: req))
+        if args.flag("json") { printJSON(r) } else if r.ok { print("wrote \(displayPath(out))") }
+        return report(r)
     }
 
     // MARK: - Helpers
