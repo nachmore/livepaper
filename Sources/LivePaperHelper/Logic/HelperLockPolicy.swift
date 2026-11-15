@@ -49,6 +49,24 @@ enum HelperLockPolicy {
     }
 }
 
+/// The helper's answer to LPNotification.lockNow (ARCHITECTURE §4.5, §7): LPNotification.lockNowAccepted,
+/// posted with deliverImmediately as soon as the request arrives, echoing the request's id. The app
+/// starts ScreenSaverEngine itself when no answer arrives within a second, so the helper answers
+/// every request it handles — also when its lock flow then decides to do nothing or to refuse.
+enum HelperLockNowReply {
+    /// The request id of a lockNow notification (nil when absent or not a string).
+    static func requestID(from userInfo: [AnyHashable: Any]?) -> String? {
+        guard let id = userInfo?[LPNotification.requestIDKey] as? String, !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// userInfo of the matching lockNowAccepted. Without an id the answer carries none, which the
+    /// app treats as answering every request it is waiting for.
+    static func acceptedUserInfo(requestID: String?) -> [String: String]? {
+        requestID.map { [LPNotification.requestIDKey: $0] }
+    }
+}
+
 // MARK: - Hotkey registration
 
 enum HelperHotkeyAction: Equatable, Sendable {

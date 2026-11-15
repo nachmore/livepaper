@@ -337,6 +337,29 @@ extension SelfTests {
             s.sessionLocked = true
             guard case .skip = HelperLockPolicy.decide(s) else { throw TestFailure(description: "locked first") }
         },
+        TestCase(name: "helper.lock-now.accepts-with-request-id") {
+            try expectEqual(HelperLockNowReply.requestID(from: [LPNotification.requestIDKey: "A1"]), "A1")
+            try expect(HelperLockNowReply.requestID(from: nil) == nil && HelperLockNowReply.requestID(from: [LPNotification.requestIDKey: 7]) == nil
+                       && HelperLockNowReply.requestID(from: [LPNotification.requestIDKey: ""]) == nil)
+            try expectEqual(HelperLockNowReply.acceptedUserInfo(requestID: "A1"), [LPNotification.requestIDKey: "A1"])
+            try expect(HelperLockNowReply.acceptedUserInfo(requestID: nil) == nil)
+            // End to end against the app's real channel, on private names (nobody else listens):
+            // the helper's answer resolves the app's request, so the app doesn't launch the engine.
+            let tag = "com.nachmore.livepaper.selftest.\(UUID().uuidString.prefix(8))"
+            try MainActor.assumeIsolated {
+                let channel = DistributedHelperLockChannel(requestName: tag + ".lockNow", acceptedName: tag + ".lockNowAccepted")
+                let center = DistributedNotificationCenter.default()
+                let helper = center.addObserver(forName: .init(tag + ".lockNow"), object: nil, queue: .main) { note in
+                    center.postNotificationName(.init(tag + ".lockNowAccepted"), object: nil,
+                                                userInfo: HelperLockNowReply.acceptedUserInfo(requestID: HelperLockNowReply.requestID(from: note.userInfo)),
+                                                deliverImmediately: true)
+                }
+                defer { center.removeObserver(helper) }
+                var answered = false
+                try awaitMain { answered = await channel.requestLock(timeout: 5) }
+                try expect(answered, "the helper's lockNowAccepted answers the request")
+            }
+        },
         TestCase(name: "helper.launch.exits-after-uninstall") {
             let root = try tempDir("helper-uninstalled")
             defer { remove(root) }

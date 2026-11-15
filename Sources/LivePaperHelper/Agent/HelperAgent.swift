@@ -134,7 +134,19 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
     }
 
     @objc nonisolated private func lockNowNotification(_ note: Notification) {
-        onMain { $0.lock(.lockNowNotification) }
+        let requestID = HelperLockNowReply.requestID(from: note.userInfo)
+        onMain { agent in
+            // Answer first, so the app never starts a second screen saver after its 1 s timeout.
+            agent.acceptLockNow(requestID: requestID)
+            agent.lock(.lockNowNotification)
+        }
+    }
+
+    private func acceptLockNow(requestID: String?) {
+        DistributedNotificationCenter.default().postNotificationName(
+            .init(LPNotification.lockNowAccepted), object: nil,
+            userInfo: HelperLockNowReply.acceptedUserInfo(requestID: requestID), deliverImmediately: true)
+        log.info("lockNow \(requestID ?? "(no id)", privacy: .public) accepted")
     }
 
     @objc nonisolated private func openAppNotification(_ note: Notification) {
