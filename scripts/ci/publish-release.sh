@@ -11,12 +11,13 @@
 #   GH_TOKEN                            a token with contents: write (the workflow's GITHUB_TOKEN)
 #
 #   nightly  the rolling pre-release "nightly": its assets are replaced, its title and notes (the
-#            commits since the previous nightly) rewritten, then the tag is moved to this commit.
+#            commits since the previous nightly) rewritten, then the tag is moved to this commit —
+#            never backwards (re-running an older run publishes nothing).
 #   beta     a versioned pre-release for tag vX.Y.Z-beta.N (never "latest").
 #   stable   the release for tag vX.Y.Z, marked latest.
-#   beta and stable get generated notes (since the previous beta/release, or since the previous
-#   release for stable) after a short install header; the very first one lists the commits itself.
-#   Re-running the job updates the assets of an existing release instead of failing.
+#   beta and stable notes: an install header, the commits since the previous beta or release (for
+#   stable: the previous release), then GitHub's generated notes; the very first one lists the
+#   history instead. Re-running the job replaces the assets of an existing release (notes stay).
 #
 # --dry-run prints the gh commands instead of running them and needs no network (NIGHTLY_PREVIOUS
 # may name the previous nightly's commit, DRY_RUN_STATE=published pretends the release exists).
@@ -25,7 +26,7 @@ set -euo pipefail
 
 DRY=0
 [ "${1:-}" = --dry-run ] && { DRY=1; shift; }
-[ $# = 1 ] && [ -d "$1" ] || { sed -n '2,23p' "$0" >&2; exit 2; }
+[ $# = 1 ] && [ -d "$1" ] || { sed -n '2,24p' "$0" >&2; exit 2; }
 DIST="$(cd "$1" && pwd)"
 
 fail() { echo "✗ $*" >&2; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=Publish::$*" >&2; exit 1; }
@@ -67,16 +68,18 @@ FILES=(); for f in "${ASSETS[@]}"; do FILES+=("$DIST/$f"); done
 
 NOTES="$(mktemp "${TMPDIR:-/tmp}/livepaper-notes.XXXXXX")"
 trap 'rm -f "$NOTES"' EXIT
-# Commit subjects can contain @handles: keep them from notifying anyone (backticks are literal here).
-# shellcheck disable=SC2016
-no_mentions() { sed -E 's/(^|[^A-Za-z0-9`])@([A-Za-z0-9][A-Za-z0-9_-]*)/\1`@\2`/g'; }
-# commit_list <rev-range…>: up to 100 commit subjects as a Markdown list.
+ZWSP="$(printf '\342\200\213')"
+# Commit subjects become Markdown: a zero-width space after "@" keeps a handle from notifying
+# anyone, and "<" is escaped so a subject can't start HTML (or an <!-- comment) in the notes.
+md_subjects() { sed -e "s/@/@$ZWSP/g" -e 's/</\&lt;/g'; }
+# commit_list <git log arguments…>: up to 100 commit subjects as a Markdown list.
 commit_list() {
   local total
   total="$(git rev-list --count --no-merges "$@")"
-  git log --no-merges --max-count=100 --format="* %s (%h)" "$@" | no_mentions
+  git log --no-merges --max-count=100 --format="* %s (%h)" "$@" | md_subjects
   [ "$total" -le 100 ] || echo "* … and $((total - 100)) more"
 }
+
 {
   case "$CHANNEL" in
     nightly) printf '%s\n\n' "Rolling build of \`main\`, replaced on every push. For something steadier, use the [latest release]($REPO_URL/releases/latest)." ;;
@@ -88,8 +91,8 @@ commit_list() {
   echo
   echo "Download **$DMG**, open it and drag LivePaper onto Applications (or unzip **$ZIP** and move"
   echo "LivePaper.app to Applications). Then open LivePaper: setup walks you through the rest."
-  echo "Requires macOS 14 or later; the live lock screen needs macOS 26. To check the download:"
-  echo "\`shasum -a 256 -c SHA256SUMS\` in the folder you saved the files to."
+  echo "Requires macOS 14 or later; the live lock screen needs macOS 26. To check a download, run"
+  echo "\`shasum -a 256 -c --ignore-missing SHA256SUMS\` where you saved it (with SHA256SUMS)."
   if [ "$SIGNING" = adhoc ]; then
     echo
     echo "> [!IMPORTANT]"
@@ -101,33 +104,7 @@ commit_list() {
     echo ">   *Security* and click **Open Anyway** next to the LivePaper message (confirm with your password), or"
     echo "> * run \`xattr -dr com.apple.quarantine /Applications/LivePaper.app\` in Terminal, then open it."
   fi
-  if [ "$CHANNEL" = nightly ]; then
-    echo
-    PREV="${NIGHTLY_PREVIOUS:-}"
-    if [ "$DRY" = 0 ]; then
-      PREV="$(query api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq '.object.sha + " " + .object.type' || true)"
-      if [ "${PREV#* }" = tag ]; then   # an annotated tag: its commit
-        PREV="$(query api "repos/$GITHUB_REPOSITORY/git/tags/${PREV%% *}" --jq .object.sha || true)"
-      fi
-      PREV="${PREV%% *}"
-    fi
-    if [ -n "$PREV" ] && [ "$PREV" = "$GITHUB_SHA" ]; then
-      echo "Same commit as the previous nightly (rebuilt)."
-    elif [ -n "$PREV" ] && git cat-file -e "$PREV^{commit}" 2>/dev/null && git merge-base --is-ancestor "$PREV" "$GITHUB_SHA"; then
-      echo "### Changes since the previous nightly"
-      echo
-      commit_list "$PREV..$GITHUB_SHA"
-      echo
-      echo "[All changes]($REPO_URL/compare/$PREV...$GITHUB_SHA)"
-    else
-      # First nightly, or main was rewritten since the previous one.
-      echo "### Recent changes"
-      echo
-      commit_list --max-count=30 "$GITHUB_SHA"
-      echo
-      echo "[History]($REPO_URL/commits/$GITHUB_SHA)"
-    fi
-  fi
+  echo
 } > "$NOTES"
 
 # MARK: Publish -----------------------------------------------------------------------------------
@@ -138,18 +115,37 @@ release_state() {
   query release view "$1" --json isDraft --jq 'if .isDraft then "draft" else "published" end' || true
 }
 
+# The commit the nightly tag points at on GitHub (empty when there is no such tag yet).
+nightly_commit() {
+  if [ "$DRY" = 1 ]; then echo "${NIGHTLY_PREVIOUS:-}"; return 0; fi
+  local ref
+  ref="$(query api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" --jq '.object.sha + " " + .object.type' || true)"
+  if [ "${ref#* }" = tag ]; then   # an annotated tag: its commit
+    ref="$(query api "repos/$GITHUB_REPOSITORY/git/tags/${ref%% *}" --jq .object.sha || true)"
+  fi
+  echo "${ref%% *}"
+}
+
 # Points tag `nightly` at this commit (lightweight; created if missing). Through the API, so the
 # checkout needs no push credentials.
 move_nightly_tag() {
-  if [ "$DRY" = 0 ] && query api "repos/$GITHUB_REPOSITORY/git/ref/tags/nightly" >/dev/null; then
+  if [ -n "$1" ]; then
     gh_do api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true --silent
   else
     gh_do api -X POST "repos/$GITHUB_REPOSITORY/git/refs" -f ref=refs/tags/nightly -f sha="$GITHUB_SHA" --silent
   fi
 }
 
-# The version tag to start generated notes from: for stable the previous stable release, for a beta
-# the previous beta or release. Empty when there is none.
+# Replaces the release's files (each one is deleted, then uploaded: one retry if that fails).
+upload_assets() {
+  gh_do release upload "$1" "${FILES[@]}" --clobber && return 0
+  echo "  upload failed; retrying in 15 s" >&2
+  sleep 15
+  gh_do release upload "$1" "${FILES[@]}" --clobber
+}
+
+# The version tag the notes start from: for stable the previous stable release, for a beta the
+# previous beta or release. Empty when there is none.
 previous_version_tag() {
   local t seen=0 re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-beta\.[1-9][0-9]*)?$'
   [ "$CHANNEL" = stable ] && re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -167,8 +163,23 @@ STATE="$(release_state "$TAG")"
 step "$CHANNEL: $TITLE → $TAG (${STATE:-new release}; $SIGNING)"
 
 if [ "$CHANNEL" = nightly ]; then
+  PREV="$(nightly_commit)"
+  known() { git cat-file -e "$1^{commit}" 2>/dev/null; }
+  if [ -n "$PREV" ] && [ "$PREV" != "$GITHUB_SHA" ] && known "$PREV" && git merge-base --is-ancestor "$GITHUB_SHA" "$PREV"; then
+    # A re-run of an older workflow run: never move the nightly backwards.
+    echo "! the nightly already has $(git rev-parse --short=7 "$PREV"), which is newer than $SHORT: nothing to publish"
+    exit 0
+  fi
+  if [ -n "$PREV" ] && [ "$PREV" != "$GITHUB_SHA" ] && known "$PREV" && git merge-base --is-ancestor "$PREV" "$GITHUB_SHA"; then
+    { echo "### Changes since the previous nightly"; echo; commit_list "$PREV..$GITHUB_SHA"; echo
+      echo "[All changes]($REPO_URL/compare/$PREV...$GITHUB_SHA)"; } >> "$NOTES"
+  else
+    # The first nightly, a re-run of this one (the tag already moved here), or main was rewritten.
+    { echo "### Recent changes"; echo; commit_list --max-count=30 "$GITHUB_SHA"; echo
+      echo "[History]($REPO_URL/commits/$GITHUB_SHA)"; } >> "$NOTES"
+  fi
   if [ -n "$STATE" ]; then
-    gh_do release upload nightly "${FILES[@]}" --clobber
+    upload_assets nightly
     # Drop anything else attached to it (renamed assets from older workflow versions).
     if [ "$DRY" = 0 ]; then
       while IFS= read -r asset; do
@@ -176,16 +187,22 @@ if [ "$CHANNEL" = nightly ]; then
         [ "$keep" = 1 ] || [ -z "$asset" ] || gh_do release delete-asset nightly "$asset" --yes
       done < <(query release view nightly --json assets --jq '.assets[].name' || true)
     fi
-    gh_do release edit nightly --title "$TITLE" --notes-file "$NOTES" --prerelease --draft=false
+    if [ "$PREV" = "$GITHUB_SHA" ]; then
+      # Re-run after the tag moved: the notes already list this nightly's changes; keep them.
+      gh_do release edit nightly --title "$TITLE" --prerelease --draft=false
+    else
+      gh_do release edit nightly --title "$TITLE" --notes-file "$NOTES" --prerelease --draft=false
+    fi
   else
     gh_do release create nightly "${FILES[@]}" --target "$GITHUB_SHA" --title "$TITLE" --notes-file "$NOTES" \
       --prerelease --latest=false
   fi
-  move_nightly_tag
+  # Last, so a failure above leaves the tag where it was and a re-run lists the same changes.
+  move_nightly_tag "$PREV"
 else
   if [ -n "$STATE" ]; then
     # A re-run: the release (maybe a draft left by a failed upload) gets the new assets; its notes stay.
-    gh_do release upload "$TAG" "${FILES[@]}" --clobber
+    upload_assets "$TAG"
     if [ "$CHANNEL" = beta ]; then
       gh_do release edit "$TAG" --title "$TITLE" --prerelease --draft=false
     else
@@ -195,11 +212,13 @@ else
     args=(release create "$TAG" "${FILES[@]}" --verify-tag --title "$TITLE" --notes-file "$NOTES")
     START="$(previous_version_tag)"
     if [ -n "$START" ]; then
+      # Our commit list (main is mostly merged locally, and GitHub's generated notes only list pull
+      # requests), then GitHub's: pull requests, new contributors, the full-changelog link.
+      { echo "### Changes since $START"; echo; commit_list "$START..$GITHUB_SHA"; echo; } >> "$NOTES"
       args+=(--generate-notes --notes-start-tag "$START")
     else
-      # The first one: GitHub's default starting point could be the rolling nightly (a recent
-      # commit), so list the history ourselves.
-      { echo; echo "### Changes"; echo; commit_list "$GITHUB_SHA"; echo; echo "[History]($REPO_URL/commits/$TAG)"; } >> "$NOTES"
+      # The first one. (Not --generate-notes: GitHub's default starting point could be the nightly.)
+      { echo "### Changes"; echo; commit_list "$GITHUB_SHA"; echo; echo "[History]($REPO_URL/commits/$TAG)"; } >> "$NOTES"
     fi
     if [ "$CHANNEL" = beta ]; then args+=(--prerelease --latest=false); else args+=(--latest); fi
     gh_do "${args[@]}"

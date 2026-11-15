@@ -66,8 +66,8 @@ Download LivePaper from [Releases](https://github.com/nachmore/livepaper/release
   every push.
 
 Open the `.dmg` and drag LivePaper onto Applications (or unzip the `.zip` and move LivePaper.app
-there), then open it: setup walks you through the rest. `SHA256SUMS` lets you check the download
-(`shasum -a 256 -c SHA256SUMS`).
+there), then open it: setup walks you through the rest. `SHA256SUMS` lets you check the download:
+`shasum -a 256 -c --ignore-missing SHA256SUMS` in the folder you saved both to.
 
 Builds that aren't notarized by Apple say so in their release notes, and macOS won't open them at
 first. If you trust the download, open LivePaper once, then click **Open Anyway** in System Settings ›

@@ -19,9 +19,12 @@ usage() { sed -n '2,15p' "$0" >&2; exit 2; }
 fail() { echo "✗ $*" >&2; exit 1; }
 step() { echo "▸ $*"; }
 
+# checksums <dir> [file…]: SHA256SUMS for the files named (default: every .zip and .dmg in <dir>).
 checksums() {
-  local dir="$1" files=() f
-  for f in "$dir"/*.zip "$dir"/*.dmg; do [ -f "$f" ] && files+=("$(basename "$f")"); done
+  local dir="$1" files=() f; shift
+  if [ $# -gt 0 ]; then files=("$@"); else
+    for f in "$dir"/*.zip "$dir"/*.dmg; do [ -f "$f" ] && files+=("$(basename "$f")"); done
+  fi
   [ "${#files[@]}" -gt 0 ] || fail "no .zip or .dmg in $dir"
   (cd "$dir" && shasum -a 256 -- "${files[@]}" > SHA256SUMS && shasum -a 256 -c --strict SHA256SUMS >/dev/null)
   step "SHA256SUMS"
@@ -95,9 +98,13 @@ mkdir "$MOUNT"
 hdiutil attach -quiet -readonly -nobrowse -noautoopen -mountpoint "$MOUNT" "$DMG"
 [ "$(readlink "$MOUNT/Applications")" = /Applications ] || fail "$NAME.dmg: the Applications link is missing"
 check_copy "$MOUNT/LivePaper.app" "$NAME.dmg"
-hdiutil detach "$MOUNT" -quiet
-MOUNT=""
+# Spotlight or fseventsd can hold a fresh volume for a moment ("Resource busy"): retry, then force.
+for attempt in 1 2 3 4; do
+  if hdiutil detach "$MOUNT" -quiet; then MOUNT=""; break; fi
+  sleep $((attempt * 2))
+done
+if [ -n "$MOUNT" ]; then hdiutil detach "$MOUNT" -force -quiet || fail "couldn't detach $MOUNT"; MOUNT=""; fi
 
-checksums "$OUT"
+checksums "$OUT" "$NAME.zip" "$NAME.dmg"
 size() { du -h "$1" | cut -f1 | tr -d ' '; }
 echo "✓ $OUT: $NAME.zip $(size "$ZIP") · $NAME.dmg $(size "$DMG") · app $(du -sh "$APP" | cut -f1 | tr -d ' ')"

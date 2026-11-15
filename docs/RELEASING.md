@@ -41,15 +41,18 @@ cancelled half-way: publishes of the same ref queue, and a newer one waiting rep
 **Nightly** keeps one release, tagged `nightly`: each run uploads `LivePaper-nightly.zip`,
 `LivePaper-nightly.dmg` and `SHA256SUMS` over the old ones (deleting anything else attached), renames
 it `Nightly 0.1.0 (build 142, abc1234)`, rewrites its notes — install steps, then the commits since
-the previous nightly — and finally moves the `nightly` tag to the new commit. Stable download links:
+the previous nightly — and finally moves the `nightly` tag to the new commit. It never moves
+backwards: re-running an older run whose commit the nightly has already passed publishes nothing.
+Stable download links:
 `https://github.com/nachmore/livepaper/releases/download/nightly/LivePaper-nightly.dmg` (and `.zip`).
 
-**Betas and releases** get `LivePaper-<version>.zip`, `.dmg` and `SHA256SUMS`, a short install header
-and GitHub's generated notes since the previous beta or release (for a release: since the previous
-release, so the notes cover all its betas). The first beta and the first release have no
-predecessor, so their notes list the commits instead (GitHub's automatic starting point could be the
-nightly). Re-running a failed publish replaces the assets of the release it already created and
-leaves its notes alone.
+**Betas and releases** get `LivePaper-<version>.zip`, `.dmg` and `SHA256SUMS`, a short install header,
+the commits since the previous beta or release (for a release: since the previous release, so the
+notes cover all its betas) and then GitHub's generated notes for the same range (pull requests, new
+contributors, the full-changelog link; GitHub only lists pull requests, hence the commit list). The
+first beta and the first release have no predecessor: their notes list the history instead, without
+GitHub's part (its automatic starting point could be the nightly). Re-running a failed publish
+replaces the assets of the release it already created and leaves its notes alone.
 
 ## Cutting a beta or a release
 
@@ -72,7 +75,9 @@ git push origin v0.1.0-beta.1
 ```
 
 (`git push --atomic origin main <tag>` when there is a new VERSION commit or main has unpushed
-commits.) `--push` runs it for you. Until you push, `git tag -d <tag>` undoes everything. Watch the
+commits.) `--push` runs it for you. Until you push, the undo command it prints (`git tag -d <tag>`,
+plus `git reset --hard HEAD~1` when it made a VERSION commit) takes everything back; a tag that was
+made but never pushed blocks the next run until you push or delete it. Watch the
 run under *Actions*; the release appears when the publish job finishes (5–10 minutes ad-hoc, plus
 notarization with Developer ID).
 
@@ -97,7 +102,9 @@ when you cut the first beta): nightlies are labelled with `VERSION`, so until th
   it; CI passes it explicitly so the build and publish jobs agree). It must grow, because the app
   replaces the installed screen saver when the numbers differ, so CI checks out the full history
   (`build.sh` warns about shallow clones). Builds of the same commit — say a nightly and a beta —
-  share a number, which is fine: they are the same code.
+  share a number: the code is the same, but going from one to the other doesn't refresh the
+  installed screen saver, which keeps the version string (and signature) it was installed with
+  until a build with a higher number arrives.
 
 ## Signing
 

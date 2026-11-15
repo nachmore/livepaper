@@ -78,6 +78,9 @@ fi
 # Tags here and on origin, one per line.
 ALL_TAGS="$(printf '%s\n%s\n' "$(git tag --list 'v*')" "$REMOTE_TAGS" | sed '/^$/d' | sort -u)"
 has_tag() { printf '%s\n' "$ALL_TAGS" | grep -qxF -- "$1"; }
+# A tag made here but never pushed (only known when origin was checked).
+local_only() { [ "$FETCH" = 1 ] && git rev-parse -q --verify "refs/tags/$1" >/dev/null && ! printf '%s\n' "$REMOTE_TAGS" | grep -qxF -- "$1"; }
+unpushed() { fail "$1 exists only in this clone (it was never pushed): publish it with 'git push origin $1', or delete it with 'git tag -d $1'"; }
 
 # The newest stable release so far must not be newer than this one.
 LATEST=""
@@ -88,7 +91,10 @@ while IFS= read -r t; do
 done <<< "$ALL_TAGS"
 
 [ "$(vercmp "$VERSION" "$CURRENT")" != -1 ] || fail "$VERSION is lower than VERSION ($CURRENT)"
-has_tag "v$VERSION" && fail "v$VERSION is already released; release a higher version (scripts/release.sh $KIND X.Y.Z)"
+if has_tag "v$VERSION"; then
+  local_only "v$VERSION" && unpushed "v$VERSION"
+  fail "v$VERSION is already released; release a higher version (scripts/release.sh $KIND X.Y.Z)"
+fi
 if [ -n "$LATEST" ] && [ "$(vercmp "$VERSION" "$LATEST")" != 1 ]; then
   fail "$VERSION isn't newer than the latest release ($LATEST)"
 fi
@@ -100,6 +106,8 @@ if [ "$KIND" = beta ]; then
     n="${t#"v$VERSION-beta."}"
     [[ "$n" =~ ^[1-9][0-9]*$ ]] && [ "$n" -gt "$N" ] && N="$n"
   done <<< "$ALL_TAGS"
+  # Don't skip a number past a beta that was tagged but never pushed.
+  [ "$N" -gt 0 ] && local_only "v$VERSION-beta.$N" && unpushed "v$VERSION-beta.$N"
   TAG="v$VERSION-beta.$((N + 1))"
 else
   TAG="v$VERSION"
@@ -143,13 +151,15 @@ echo "▸ tagged $TAG ($(git rev-parse --short "$TAG^{commit}"))"
 
 PUSH_CMD=(git push origin "$TAG")
 if [ "$BUMP" = 1 ] || [ "$AHEAD" != 0 ] || [ "$FETCH" = 0 ]; then PUSH_CMD=(git push --atomic origin main "$TAG"); fi
+UNDO="git tag -d $TAG"
+[ "$BUMP" = 0 ] || UNDO="$UNDO && git reset --hard HEAD~1"
 if [ "$PUSH" = 1 ]; then
   echo "▸ ${PUSH_CMD[*]}"
-  "${PUSH_CMD[@]}"
+  "${PUSH_CMD[@]}" || fail "the push failed; $TAG is still only local. Retry with: ${PUSH_CMD[*]}  (or undo: $UNDO)"
   echo "✓ pushed: CI builds and publishes $TAG"
 else
   echo
   echo "To publish it (CI builds, tests and releases the tag):"
   echo "  ${PUSH_CMD[*]}"
-  echo "To undo instead: git tag -d $TAG$([ "$BUMP" = 1 ] && echo " && git reset --hard HEAD~1")"
+  echo "To undo instead: $UNDO"
 fi

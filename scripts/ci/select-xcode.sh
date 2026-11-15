@@ -20,7 +20,7 @@ fail() {
   exit 1
 }
 
-[ -d "$XCODE/Contents/Developer" ] || fail "$XCODE is not installed on this runner (update XCODE_APP in .github/workflows/ci.yml)"
+[ -d "$XCODE/Contents/Developer" ] || fail "$XCODE is not installed on this runner (pick an installed one: XCODE_VERSION in .github/workflows/ci.yml)"
 DEV="$XCODE/Contents/Developer"
 SWIFT_LINE="$(DEVELOPER_DIR="$DEV" xcrun swift --version 2>&1 | grep -m1 'Swift version')" \
   || fail "$XCODE has no working swift (licence not accepted?)"

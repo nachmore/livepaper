@@ -55,9 +55,12 @@ cmd_mode() {
 cmd_import() {
   require "${CERT_VARS[@]}"
   command -v security >/dev/null || fail "security(1) not found (macOS only)"
+  case "$MACOS_SIGN_IDENTITY" in
+    *$'\n'*|*$'\r'*) fail "MACOS_SIGN_IDENTITY contains a line break: set the secret again without one" ;;
+  esac
+  [ ! -e "$KEYCHAIN" ] || cmd_cleanup   # a previous import in this job
   mkdir -p "$STATE"; chmod 700 "$STATE"
-  [ ! -e "$KEYCHAIN" ] || cmd_cleanup
-  local password p12="$STATE/cert.p12" line
+  local password p12="$STATE/cert.p12" line identities name
   password="$(openssl rand -base64 32)"; mask "$password"
   decode_to MACOS_CERT_P12_BASE64 "$p12"
 
@@ -77,15 +80,22 @@ cmd_import() {
   security list-keychains -d user -s "$KEYCHAIN" ${list[@]+"${list[@]}"}
 
   # The identity must be usable for code signing (valid, with its private key, chain trusted).
-  # (MACOS_SIGN_IDENTITY may be the certificate's name or its SHA-1 hash, like codesign accepts.)
-  if ! security find-identity -v -p codesigning "$KEYCHAIN" | grep -qF -e "\"$MACOS_SIGN_IDENTITY\"" -e ") $MACOS_SIGN_IDENTITY "; then
+  # MACOS_SIGN_IDENTITY may be the certificate's name or its SHA-1 hash, as codesign accepts.
+  # find-identity prints lines like:   1) 0123…ABCD "Developer ID Application: Jane Doe (AB12CD34EF)"
+  identities="$(security find-identity -v -p codesigning "$KEYCHAIN")"
+  name="$(printf '%s\n' "$identities" | awk -v want="$MACOS_SIGN_IDENTITY" '
+    /^ *[0-9]+\) [0-9A-Fa-f]+ "/ {
+      hash = $2; label = $0; sub(/^ *[0-9]+\) [0-9A-Fa-f]+ "/, "", label); sub(/"[^"]*$/, "", label)
+      if (label == want || toupper(hash) == toupper(want)) { print label; exit }
+    }')"
+  if [ -z "$name" ]; then
     echo "  identities in the imported certificate:" >&2
-    security find-identity -v -p codesigning "$KEYCHAIN" | sed 's/^/    /' >&2
+    printf '%s\n' "$identities" | sed 's/^/    /' >&2
     fail "MACOS_SIGN_IDENTITY doesn't match a valid code-signing identity in MACOS_CERT_P12_BASE64"
   fi
-  case "$MACOS_SIGN_IDENTITY" in
+  case "$name" in
     "Developer ID Application:"*) ;;
-    *) echo "! MACOS_SIGN_IDENTITY isn't a 'Developer ID Application' identity; notarization will likely reject it" >&2 ;;
+    *) echo "! '$name' isn't a Developer ID Application identity; notarization will likely reject it" >&2 ;;
   esac
   step "signing identity ready"
 }

@@ -74,9 +74,10 @@ rc=0; "$BASH" "$SUT" >/dev/null 2>&1 || rc=$?
 if [ "$rc" = 2 ]; then PASS=$((PASS + 1)); echo "✓ no ref → usage"; else FAIL=$((FAIL + 1)); echo "✗ no ref → exit $rc (want 2)"; fi
 rc=0; "$BASH" "$SUT" --version-file "$TMP/missing" refs/heads/main >/dev/null 2>&1 || rc=$?
 if [ "$rc" = 1 ]; then PASS=$((PASS + 1)); echo "✓ missing VERSION file"; else FAIL=$((FAIL + 1)); echo "✗ missing VERSION file → exit $rc (want 1)"; fi
-# The repository's own VERSION is a plain X.Y.Z, so main can always publish a nightly.
-rc=0; "$BASH" "$SUT" refs/heads/main >/dev/null 2>&1 || rc=$?
-if [ "$rc" = 0 ]; then PASS=$((PASS + 1)); echo "✓ this checkout's VERSION"; else FAIL=$((FAIL + 1)); echo "✗ this checkout's VERSION → exit $rc"; fi
+# The repository's own VERSION is one CI can build (a branch may carry a suffixed one; main's
+# nightly needs a plain X.Y.Z, which the workflow's version step checks on main itself).
+rc=0; err="$("$BASH" "$SUT" refs/heads/ci-self-check 2>&1 >/dev/null)" || rc=$?
+if [ "$rc" = 0 ]; then PASS=$((PASS + 1)); echo "✓ this checkout's VERSION"; else FAIL=$((FAIL + 1)); echo "✗ this checkout's VERSION → exit $rc: $err"; fi
 
 echo "$PASS passed, $FAIL failed (bash $BASH_VERSION)"
 [ "$FAIL" = 0 ]
