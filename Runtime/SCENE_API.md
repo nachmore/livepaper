@@ -1,0 +1,357 @@
+# LivePaper scene API (runtime v1)
+
+A LivePaper **web scene** is one JavaScript file that draws on a full-screen canvas. LivePaper runs
+it as your Mac's screen saver — which on macOS 26 is also the live lock screen — for hours at a
+time, on battery as often as on power. This guide is for people and for AI coding agents alike.
+Exact types: `livepaper.d.ts`. A complete example: `templates/web/`.
+
+## Contents
+
+1. [Quick start](#1-quick-start)
+2. [The scene package](#2-the-scene-package)
+3. [Lifecycle](#3-lifecycle)
+4. [The frame object `lp`](#4-the-frame-object-lp)
+5. [Time and determinism](#5-time-and-determinism)
+6. [Long-run rules](#6-long-run-rules)
+7. [The clock](#7-the-clock)
+8. [Performance in WebKit](#8-performance-in-webkit)
+9. [Utilities](#9-utilities-livepaperutil)
+10. [Assets](#10-assets)
+11. [WebGL scenes](#11-webgl-scenes)
+12. [Rules](#12-rules)
+13. [Checking a scene](#13-checking-a-scene-livepaper-check)
+14. [Host bridge (for host developers)](#14-host-bridge-for-host-developers)
+
+## 1. Quick start
+
+`scene.json`:
+
+```json
+{
+  "schema": 1,
+  "id": "night-drift",
+  "name": "Night Drift",
+  "description": "Slow stars over a dark gradient.",
+  "kind": "web",
+  "runtime": 1,
+  "clock": { "position": "top" },
+  "tags": ["night"]
+}
+```
+
+`scene.js`:
+
+```js
+const U = LivePaper.util;
+const stars = U.makeStars({ count: 300, seed: 3 });
+let sky = null;
+
+LivePaper.scene({
+  resize(lp) {                       // build what doesn't move, once per size
+    sky = U.layer(lp.w, lp.h, lp.dpr);
+    const g = sky.ctx.createLinearGradient(0, 0, 0, lp.h);
+    g.addColorStop(0, '#02040a');
+    g.addColorStop(1, '#0b1a2e');
+    sky.ctx.fillStyle = g;
+    sky.ctx.fillRect(0, 0, lp.w, lp.h);
+  },
+  draw(lp) {                         // composite a few images per frame
+    lp.ctx.drawImage(sky.canvas, 0, 0, lp.w, lp.h);
+    stars.draw(lp.ctx, lp, { dx: -lp.t * 2, fraction: lp.quality });
+  }
+});
+```
+
+Then run `livepaper check <scene-dir>` and look at the PNGs it writes to `<scene-dir>/.check/`.
+
+## 2. The scene package
+
+A scene is a directory (`<id>.lpscene` in the library):
+
+| File | |
+|---|---|
+| `scene.json` | Manifest. `id` is kebab-case (`a-z`, `0-9`, inner `-`, ≤ 64 chars). `clock.position` is `top`, `bottom-left`, `bottom-right` or `none`. `performance` is written by `livepaper check`; don't edit it. |
+| `scene.js` | All the code. A classic script (not an ES module): no `import`/`export`, no other files are loaded. |
+| `assets/` | Optional small images, fonts, JSON or shader sources, inlined at compile time (§10). |
+| `.check/` | Output of the last `livepaper check` (report + PNGs). Not published. |
+
+LivePaper compiles the package into **one self-contained HTML file** (runtime + `scene.js` + assets
+inlined, network blocked by a Content-Security-Policy). The same file is what `livepaper check`
+renders and what the screen saver shows, so a scene that passes the check behaves the same on the
+lock screen.
+
+## 3. Lifecycle
+
+```js
+LivePaper.scene({
+  context: '2d',          // '2d' (default) | 'webgl' | 'webgl2'
+  clock: 'top',           // optional: overrides scene.json
+  setup(lp) {},           // once, after the canvas exists
+  resize(lp) {},          // after setup, and whenever w/h/dpr change
+  update(lp, dt) {},      // advance state by dt seconds (optional)
+  draw(lp) {}             // paint one frame (required)
+});
+```
+
+* Call `LivePaper.scene()` **exactly once**, at the top level of `scene.js`.
+* Order: `setup` → `resize` → (`update` → `draw`) every frame. `resize` runs again when the window
+  size, the pixel density, or the governor's render scale changes; the canvas has been resized and
+  cleared by then.
+* In all callbacks `this` is your definition object, so `this.particles = …` works; module-level
+  `let`/`const` variables work just as well.
+* Before each `draw` the runtime resets the 2D context to `setTransform(lp.dpr, 0, 0, lp.dpr, 0, 0)`,
+  `globalAlpha = 1` and `globalCompositeOperation = 'source-over'`: draw in CSS pixels and restore
+  anything else you change (`save()`/`restore()`).
+* Assets in `assets/` are decoded before `setup` runs.
+* An exception in a callback is reported (to `livepaper check`, and in red on screen in debug mode)
+  but does not stop the loop; fix every reported error.
+
+## 4. The frame object `lp`
+
+One object, updated in place and passed to every callback.
+
+| Field | Meaning |
+|---|---|
+| `canvas` | The full-viewport stage canvas. |
+| `ctx` / `gl` | The 2D context, or the WebGL context (the other is `null`). `context` says which. |
+| `w`, `h` | Viewport size in **CSS pixels**. Lay out in these units. |
+| `dpr` | Canvas pixels per CSS pixel = display density × render scale (e.g. 2 × 0.75 = 1.5). |
+| `pw`, `ph` | Canvas size in device pixels (`w × dpr`, `h × dpr`). Use for WebGL. |
+| `cx`, `cy`, `min`, `max`, `aspect` | Centre, short side, long side, `w / h`. Screens range from 32:9 ultra-wides to 5:4. |
+| `scale` | Render scale from the performance profile and governor (already included in `dpr`). |
+| `t`, `dt`, `frame` | Scene time (s), seconds since the last frame (≤ 0.1), frame counter. |
+| `mode` | `'live'`, `'still'`, `'bench'` or `'manual'`. |
+| `rand()` | Seeded PRNG in [0, 1). Same sequence every run. |
+| `quality` | 0.5–1. Lowered by the governor when frames run over budget: draw less when < 1. |
+| `clockRect` | `{x, y, w, h}` of the runtime clock in CSS px, or `null` when the runtime draws none. |
+| `clockVisible`, `clockAlpha` | Whether any clock should show now, and its eased 0–1 opacity (§7). |
+| `env` | `{power: 'ac'\|'battery', lowPower, reducedMotion, preview}`. |
+| `cfg` | The effective runtime configuration (read-only). |
+| `util` | Same as `LivePaper.util`. |
+
+Adapt to `env` where it matters: slow down and avoid flashes when `env.reducedMotion`; consider
+fewer particles when `env.power === 'battery'` or `env.lowPower` (the host already lowers fps and
+resolution then).
+
+## 5. Time and determinism
+
+LivePaper renders scenes at arbitrary moments — `livepaper check` takes stills at t = 0 … 600 s,
+the library renders thumbnails, the screen saver may start any scene at any time — so a scene must
+produce the same picture for the same `t`.
+
+* **Prefer pure functions of `lp.t`.** Positions, phases and colours computed from `lp.t` are
+  exact at any t, cost nothing to "skip ahead", and never drift. The template scene has no
+  `update()` at all.
+* **If you simulate, step with `dt` only.** Stills and benches replay `update(lp, dt)` in fixed
+  1/30 s steps from t = 0 up to the requested time, so a still at t = 600 runs `update()` 18,000
+  times before the frame is drawn. Keep `update()` cheap (O(particles), no allocation, no drawing).
+* **Randomness:** use `lp.rand()` or `LivePaper.util.mulberry32(seed)`. In capture modes
+  `Math.random` is seeded too, but live it is not: never let live-only randomness change layout.
+* Never read `Date.now()` / `performance.now()` for animation; use `lp.t`. (The clock is the only
+  thing that shows wall-clock time, via `LivePaper.clockParts()`.)
+* Don't use `setTimeout`/`setInterval`/`requestAnimationFrame` yourself: the runtime owns the loop,
+  pauses it when the display sleeps, and caps the frame rate.
+
+## 6. Long-run rules
+
+The screen saver runs for hours. Things that are fine in a 30-second demo break overnight:
+
+* **Bounded state.** No arrays that grow forever, no counters or accumulated floats without a
+  wrap. Wrap phases (`(lp.t * speed) % period`) or recycle particles in place.
+* **No slow decay.** Fades, zooms and camera moves must loop or settle, not run off to black, to
+  white, or out of the frame. `livepaper check` compares t = 600 with earlier stills.
+* **Precision.** `Math.sin(lp.t * 0.01)` is fine for days; feeding a huge `lp.t * 1000` into noise or
+  `sin` loses smoothness after hours. Keep arguments moderate or wrap them.
+* **No per-frame allocation** in hot paths (new arrays/objects/Path2D for thousands of items every
+  frame). Garbage collection pauses show up as stutter. Reuse buffers.
+* **Calm by default.** Lock screens are seen in the dark and at a glance: no strobing, no flashes,
+  no fast full-screen motion.
+
+## 7. The clock
+
+LivePaper draws an Apple-style lock-screen clock (date above a large time, SF font) over the scene.
+`scene.json` `"clock": {"position": …}` chooses where:
+
+| Position | |
+|---|---|
+| `top` (default) | Top centre — where macOS draws its own lock-screen clock. |
+| `bottom-left`, `bottom-right` | Bottom corners. |
+| `none` | The runtime draws no clock; the scene may draw its own. |
+
+**Keep the clock region dark and calm.** The clock is white; `livepaper check` measures the
+scene's brightness behind it (with the clock hidden) and fails scenes that make it hard to read.
+`lp.clockRect` tells you where it is, e.g. to keep particles or bright features out of it.
+
+**The hand-off.** When the user touches the keyboard or mouse on the lock screen, macOS draws its
+own lock UI — including Apple's clock at **top centre** — over the running scene. LivePaper then
+fades its clock out over 300 ms and sets `lp.clockVisible = false` (and `lp.clockAlpha` eases to 0);
+when the lock UI goes away it fades back. So:
+
+* With the runtime clock you need to do nothing.
+* With `clock: 'none'` and your own clock, draw it only while `lp.clockVisible` is true and multiply
+  its opacity by `lp.clockAlpha` — otherwise two clocks appear. Use `LivePaper.clockParts()` for
+  the text (`{time: "9:41", date: "Thursday, 13 November", hours, minutes, seconds, now}`), which
+  follows the user's locale and 12/24-hour setting.
+* Even with `clock: 'none'`, keep the **top-centre** region calm: Apple's clock appears there.
+
+```js
+LivePaper.scene({
+  clock: 'none',
+  draw(lp) {
+    // … scene …
+    if (lp.clockVisible) {
+      const p = LivePaper.clockParts();
+      lp.ctx.globalAlpha = lp.clockAlpha;
+      lp.ctx.fillStyle = '#fff';
+      lp.ctx.font = '600 72px -apple-system';
+      lp.ctx.fillText(p.time, 48, lp.h - 64);
+      lp.ctx.globalAlpha = 1;
+    }
+  }
+});
+```
+
+## 8. Performance in WebKit
+
+Budgets (enforced by `livepaper check`): **≤ 4 ms per frame at 1512×982 @2x** (a MacBook Pro
+screen) and ≤ 6 ms at 5120×1440 @1x, measured at the heaviest sampled moment; with `--power`,
+CPU energy at the battery profile (30 fps, 75 % resolution) should stay under 150 mW.
+
+What is expensive in this WebKit build is not what you might expect from Chrome:
+
+* **2D canvas cost tracks the number of draw calls**, much more than the number of pixels. One
+  `drawImage` of a full-screen layer is cheap; 3,000 `arc()` + `fill()` calls are not.
+  * Pre-render everything static (sky, terrain, vignettes, text) into `util.layer()` canvases in
+    `resize()`, then `drawImage` them in `draw()`.
+  * Batch shapes: build one `Path2D` per colour/alpha and `fill` it once (`util.makeStars` does
+    this — a few fills for hundreds of stars).
+  * Draw small things into a small offscreen canvas and scale it up: the upscale is a free blur.
+* **No `shadowBlur`, no `ctx.filter`** (blur, drop-shadow) in per-frame drawing — both are very
+  slow. Use `util.glow()` / `util.glowSprite()` (one cached radial-gradient sprite, one `drawImage`).
+* **Avoid read-backs and cross-context copies:** no `getImageData`, `toDataURL` or
+  `putImageData` of large areas per frame, and no drawing a WebGL canvas into a 2D canvas every frame
+  (a GPU→GPU copy plus synchronisation). Pick one context for the scene.
+* Gradients are cheap to *use*; creating hundreds per frame is not. Create them in `resize()` when
+  they don't move.
+* `lp.quality` < 1 means the governor already lowered the render scale because frames were over
+  budget: thin particles, skip secondary effects.
+
+The runtime does the rest: fps cap (60 on power, 30 on battery; a 60 fps cap renders every other
+frame on 120 Hz displays), render scale per performance profile, a governor that steps the scale
+down (×0.85 per step, floor 0.6) when update+draw stays over budget for ~2 s and back up when there
+is headroom, and pausing when the display sleeps or the page is hidden.
+
+## 9. Utilities (`LivePaper.util`)
+
+| | |
+|---|---|
+| `TAU`, `clamp(x,a,b)`, `lerp(a,b,t)`, `invLerp(a,b,x)`, `fract(x)`, `smoothstep(e0,e1,x)` | Maths. |
+| `ease.linear / inQuad / outQuad / inOutQuad / inCubic / outCubic / inOutCubic / inOutSine / outExpo / outBack` | Easing curves on t ∈ [0, 1]. |
+| `mulberry32(seed)` | Seeded PRNG factory → `() => [0, 1)`. |
+| `hash2(x, y)` | Integer lattice hash → [0, 1). |
+| `noise1(x)`, `noise2(x, y)`, `fbm2(x, y, octaves = 4)` | Smooth deterministic value noise → [0, 1]. |
+| `hexToRgb('#rrggbb')`, `rgba('#rrggbb', a)`, `mix('#a', '#b', t)` | Colours. |
+| `layer(w, h, dpr)` | Offscreen canvas `{canvas, ctx, w, h, dpr}`, `ctx` pre-scaled: draw in CSS px. |
+| `glowSprite(color, size?, falloff?)`, `glow(ctx, x, y, r, color, alpha, falloff?)` | Cached soft glows (additive). |
+| `makeStars({count, seed, tint, twinkle, glow})` | Parallax starfield; `.draw(ctx, lp, {x, y, w, h, dx, dy, brightness, fraction, size})`. |
+
+Also on `LivePaper`: `clockParts(date?)` (§7), `asset(name)`, `image(name)`, `text(name)` (§10).
+
+## 10. Assets
+
+Put small files in `assets/` (subfolders allowed). They are inlined into the compiled HTML as
+`data:` URLs, so they work offline and inside the sandboxed screen saver.
+
+* `LivePaper.image('sprites/moon.png')` — an `HTMLImageElement`, already decoded.
+* `LivePaper.text('palette.json')` — the file's text (`JSON.parse` it yourself); also for GLSL.
+* `LivePaper.asset('x.webp')` — the raw `data:` URL.
+* Fonts (`.woff2`, `.woff`, `.ttf`, `.otf`) are registered automatically under their file name
+  without extension: `assets/Inter.woff2` → `ctx.font = '600 40px Inter'`.
+
+Allowed types: png, jpg/jpeg, webp, gif, avif, svg, woff, woff2, ttf, otf, json, txt, csv, glsl,
+vert, frag, bin. Limits: 4 MB per file, 8 MB in total — and every byte is loaded each time the scene
+starts, so prefer drawing procedurally. Text assets (SVG, JSON, shaders) must not reference external
+URLs either.
+
+## 11. WebGL scenes
+
+```js
+LivePaper.scene({
+  context: 'webgl2',               // falls back to 'webgl' if unavailable
+  setup(lp) { /* compile shaders, create buffers */ },
+  draw(lp) {
+    const gl = lp.gl;              // viewport already set to (0, 0, lp.pw, lp.ph)
+    // … uniforms: resolution = [lp.pw, lp.ph], time = lp.t
+  }
+});
+```
+
+* Use `lp.pw`/`lp.ph` for the drawing-buffer size; the runtime resizes the canvas.
+* A full-screen fragment shader runs for every pixel: 6 million per frame at 1512×982 @2x. Keep
+  shaders short (few noise octaves), or render to a smaller framebuffer and upscale.
+* Don't set `preserveDrawingBuffer: true`, and don't mix WebGL with a per-frame 2D canvas copy.
+* Handle `webglcontextlost` if you allocate GPU resources lazily (rare; the scene is reloaded on
+  failures anyway).
+
+## 12. Rules
+
+* **Offline only.** No `fetch`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `import()`, beacons
+  or external URLs; the compiler rejects them and the page's security policy blocks them anyway.
+  Put files in `assets/`.
+* **No storage.** `localStorage`, `sessionStorage`, `indexedDB` and cookies are not available in
+  the screen saver. Derive everything from `lp.t` and seeds.
+* **One classic script.** No ES modules, no extra script files, no workers loaded from files.
+* **Original work only.** Scenes are shared publicly: no copyrighted characters, logos, artwork,
+  photos, fonts or text you don't have the rights to. Procedural art is ideal.
+* **Don't touch the page around you.** No DOM elements, CSS or event listeners of your own: the
+  runtime owns the page (and there is no input — the screen saver never receives clicks or keys).
+
+## 13. Checking a scene: `livepaper check`
+
+```
+livepaper check <scene-dir> [--quick] [--power] [--json]
+```
+
+It compiles the scene, renders stills at 1512×982 @2x (t = 0, 4, 12, 30, 90, 240, 600 s), 2560×720
+(32:9), 1280×1024 (5:4) and 320×200 @2x, collects JavaScript errors, benchmarks the heaviest moment
+at 1512×982 @2x and 5120×1440, measures brightness (whole frame, and behind the clock with the
+clock hidden), optionally measures live CPU energy (`--power`), and writes:
+
+* `<scene-dir>/.check/report.json` — `passed`, `problems` (each an actionable sentence; all must be
+  fixed), `warnings` (advice), `jsErrors`, `stills` (path, size, t, `meanLuma`, `clockLuma`),
+  `benchMs` (`"1512x982@2 t=30": 1.4`; entries ending in ` probe` are short runs that only locate the
+  heaviest moment), `energyMw`.
+* `<scene-dir>/.check/<W>x<H>@<dpr>-t<T>.png` — the stills. Look at them: they are what users see.
+* On success, `performance` in `scene.json`.
+
+Exit status: 0 passed · 1 the scene has problems · 2 usage error · 3 LivePaper itself could not
+render (render server unavailable). `--quick` renders fewer stills and skips the ultra-wide bench —
+for fast iteration; finish with a full check.
+
+Other commands: `livepaper still <dir> --t 8 --size 1512x982 --dpr 2 --out x.png`, `livepaper bench
+<dir> --t 30`, `livepaper live <dir>` (fps, CPU %, mW), `livepaper compile <dir>`.
+
+Thresholds: frame brightness ≤ 165/255 on average; behind the clock ≤ 120/255; not black at every
+sampled time; not black at t = 600 when earlier stills aren't.
+
+## 14. Host bridge (for host developers)
+
+Configuration precedence: built-in defaults < `window.LIVEPAPER_CONFIG` (inject with a user script
+at document start) < URL hash (`#still=1&t=12&clock=0&debug=1`, for development) <
+`LivePaper.host.config({...})` at run time. Keys: `still`, `t`, `bench`, `manual`, `clock`,
+`clockPosition`, `hour12`, `clockTime`, `fps`, `scale`, `dprMax`, `performance`, `power`,
+`lowPower`, `reducedMotion`, `preview`, `lockUI`, `seed`, `debug`, `governor`, `budgetMs`,
+`statsEvery` (see `livepaper.d.ts`).
+
+Host → page: `LivePaper.host.config(obj)`, `.pause()`, `.resume()`, `.lockUI(bool)`,
+`.power({power, lowPower, reducedMotion, fps, scale, performance})`, `.advance(dt)` (manual mode).
+
+Page → host, via `webkit.messageHandlers.livepaper.postMessage(...)`:
+`{type: 'ready', mode, scene, t, errors, clockRect, bench?, frames?, failed?}` once the first frame
+is drawn (`failed: true` if the scene never registered), `{type: 'error', message}` per distinct
+error (repeats are capped), `{type: 'stats', …}` on governor changes or every `statsEvery` seconds.
+
+Modes: **still** (`still: true, t`) steps to `t` and draws one frame; **bench** (`bench: N, t`)
+steps to `t`, warms up, renders N frames synchronously and reports ms/frame; **manual**
+(`manual: true`) draws on `host.advance(dt)` for frame-by-frame capture; otherwise **live**.
+`LivePaper.debug.clockRect()` / `.stats()` / `.errors()` / `.overlay(bool)` serve the render server.
