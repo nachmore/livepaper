@@ -1158,7 +1158,9 @@ private func expectKiroAgent(_ ws: AIWorkspace) throws {
     try expectEqual(agent["includeMcpJson"] as? Bool, false)
     try expectEqual((agent["mcpServers"] as? [String: Any])?.count, 0)
     let settings = agent["toolsSettings"] as? [String: Any]
-    try expectEqual((settings?["write"] as? [String: Any])?["allowedPaths"] as? [String], ["scene/**"])
+    let writable = ["scene/**", ws.root.path + "/scene/**"]
+    let paths = (settings?["write"] as? [String: Any])?["allowedPaths"] as? [String] ?? []
+    try expect(Set(writable).isSubset(of: Set(paths)) && paths.allSatisfy { $0 == "scene/**" || $0.hasSuffix("/scene/**") }, "\(paths)")
     let shell = settings?["shell"] as? [String: Any]
     try expectEqual(shell?["denyByDefault"] as? Bool, true)
     let patterns = shell?["allowedCommands"] as? [String] ?? []
@@ -1189,7 +1191,7 @@ private func expectKiroAgent(_ ws: AIWorkspace) throws {
     try expect((shellDeny?["exclude"] as? [String])?.contains("livepaper check *") == true)
     let writes = rules.filter { $0["capability"] as? String == "fs_write" }
     try expectEqual(writes.count, 1)
-    try expectEqual(writes.first?["match"] as? [String], ["scene/**"])
+    try expectEqual(writes.first?["match"] as? [String], paths)
     try expect(!rules.contains { ($0["capability"] as? String).map { !["shell", "fs_write", "fs_read"].contains($0) } ?? true },
                "nothing else allowed: \(rules)")
 }

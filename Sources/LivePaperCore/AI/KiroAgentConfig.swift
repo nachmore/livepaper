@@ -41,7 +41,17 @@ public enum KiroAgentConfig {
     /// V3 shell globs.
     static var shellGlobs: [String] { commands.flatMap { ["livepaper \($0)", "livepaper \($0) *"] } }
 
-    public static func json() throws -> Data {
+    /// Where writes are allowed: scene/** relative to the workspace, and the same as absolute paths
+    /// (Kiro's tools often name files absolutely, and /var vs /private/var spellings differ).
+    static func writablePatterns(for workspace: AIWorkspace) -> [String] {
+        var roots = [workspace.root.standardizedFileURL.path]
+        if let real = AISessionPolicy.realPath(workspace.root.path) { roots.append(real) }
+        var seen = Set<String>()
+        return (["scene/**"] + roots.map { ($0 as NSString).appendingPathComponent("scene/**") }).filter { seen.insert($0).inserted }
+    }
+
+    public static func json(for workspace: AIWorkspace) throws -> Data {
+        let writable = writablePatterns(for: workspace)
         let config: [String: Any] = [
             "name": name,
             "description": "LivePaper scene session: edits ./scene and runs only the livepaper scene commands",
@@ -53,7 +63,7 @@ public enum KiroAgentConfig {
             "resources": [String](),
             "hooks": [String: Any](),
             "toolsSettings": [
-                "write": ["allowedPaths": ["scene/**"]],
+                "write": ["allowedPaths": writable],
                 "shell": ["allowedCommands": shellRegexes, "denyByDefault": true],
             ],
             "includeMcpJson": false,
@@ -61,7 +71,7 @@ public enum KiroAgentConfig {
             "permissions": ["rules": [
                 ["capability": "shell", "match": shellGlobs, "effect": "allow"],
                 ["capability": "shell", "match": ["*"], "exclude": shellGlobs, "effect": "deny"],
-                ["capability": "fs_write", "match": ["scene/**"], "effect": "allow"],
+                ["capability": "fs_write", "match": writable, "effect": "allow"],
                 ["capability": "fs_read", "effect": "allow"],
             ]],
         ]
@@ -71,6 +81,6 @@ public enum KiroAgentConfig {
     public static func write(in workspace: AIWorkspace) throws {
         let url = url(in: workspace)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try (json() + Data("\n".utf8)).write(to: url, options: .atomic)
+        try (json(for: workspace) + Data("\n".utf8)).write(to: url, options: .atomic)
     }
 }
