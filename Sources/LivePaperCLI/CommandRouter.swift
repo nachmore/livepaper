@@ -29,6 +29,8 @@ struct Arguments {
     init(_ args: [String], flags allowedFlags: Set<String> = [], options allowedOptions: Set<String> = []) throws {
         var rest = args[...]
         while let arg = rest.popFirst() {
+            // `--` ends the options: everything after it is positional (e.g. a prompt starting with "--").
+            if arg == "--" { positional.append(contentsOf: rest); break }
             guard arg.hasPrefix("--"), arg.count > 2 else { positional.append(arg); continue }
             var name = String(arg.dropFirst(2)), inline: String?
             if let eq = name.firstIndex(of: "=") { inline = String(name[name.index(after: eq)...]); name = String(name[..<eq]) }
@@ -86,8 +88,11 @@ struct CLICommand {
 }
 
 enum CLI {
-    static var groups: [[CLICommand]] { [SceneCommands.all, ServerCommands.all, PlannedCommands.all] }
+    static var groups: [[CLICommand]] {
+        [SceneCommands.all, LibraryCommands.all, AICommands.all, InstallCommands.all, ServerCommands.all]
+    }
     static var commands: [CLICommand] { groups.flatMap { $0 } }
+    static let groupTitles = ["Scenes", "Library & screen saver", "AI authoring", "Installation", "Render server"]
 
     static func main(_ argv: [String]) async -> Int32 {
         var args = Array(argv.dropFirst())
@@ -96,7 +101,10 @@ enum CLI {
             printHelp()
             return args.isEmpty ? ExitCode.usage : ExitCode.ok
         }
-        if name == "--version" { print("livepaper (LivePaper runtime API \(SceneCompiler.supportedRuntime))"); return ExitCode.ok }
+        if name == "--version" || name == "version" {
+            print("livepaper \(CLIEnvironment.version.display) · LivePaper runtime API \(SceneCompiler.supportedRuntime)")
+            return ExitCode.ok
+        }
         args.removeFirst()
         guard let cmd = commands.first(where: { $0.name == name }) else {
             stderr("livepaper: unknown command '\(name)'. Run `livepaper help` for the list.")
@@ -112,6 +120,10 @@ enum CLI {
             stderr("livepaper \(cmd.name): the scene does not compile:")
             for m in e.messages { stderr("  \(m)") }
             return ExitCode.failed
+        } catch let e as LibraryError {
+            // Unknown id, built-in (read-only) scene, invalid package: the request can't be done as asked.
+            stderr("livepaper \(cmd.name): \(e.localizedDescription)")
+            return ExitCode.failed
         } catch {
             stderr("livepaper \(cmd.name): \(error.localizedDescription)")
             return ExitCode.unavailable
@@ -119,29 +131,17 @@ enum CLI {
     }
 
     static func printHelp() {
-        print("livepaper — build and validate LivePaper scenes\n\nusage: livepaper <command> [options]\n")
+        print("livepaper — create, validate and publish LivePaper scenes\n\nusage: livepaper <command> [options]")
         let width = commands.map(\.name.count).max() ?? 8
-        for c in commands { print("  \(c.name.padding(toLength: width, withPad: " ", startingAt: 0))  \(c.summary)") }
-        print("\nRun `livepaper help <command>` for a command's options.")
+        for (title, group) in zip(groupTitles, groups) {
+            print("\n\(title):")
+            for c in group { print("  \(c.name.padding(toLength: width, withPad: " ", startingAt: 0))  \(c.summary)") }
+        }
+        print("\nRun `livepaper help <command>` for a command's options; `livepaper --version` for the version.")
     }
 
     static func printUsage(of c: CLICommand) {
         print("usage: livepaper \(c.name) \(c.synopsis)\n\n\(c.summary)")
-    }
-}
-
-/// Commands other workstreams will provide; listed so `livepaper help` shows the whole surface.
-enum PlannedCommands {
-    static var all: [CLICommand] {
-        [("new", "<id> [--from <scene-id>]", "scaffold a new scene (or clone one) into the library"),
-         ("list", "", "list the scenes in the library"),
-         ("publish", "", "compile the playlist into the installed screen saver"),
-         ("doctor", "", "diagnose the LivePaper installation")].map { name, synopsis, summary in
-            CLICommand(name: name, synopsis: synopsis, summary: summary + " (not available yet)") { _ in
-                stderr("livepaper \(name): not available yet in this build.")
-                return ExitCode.unavailable
-            }
-        }
     }
 }
 

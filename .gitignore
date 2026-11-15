@@ -4,3 +4,5 @@ build/
 *.xcodeproj
 .DS_Store
 /Scenes/*/.check/
+# `livepaper check` output inside any scene package
+*.lpscene/.check/
