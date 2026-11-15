@@ -1,0 +1,265 @@
+# CI and releases for LivePaper (docs/RELEASING.md).
+#
+#   every push and pull request   lint · build · self-tests · universal release build · zip + dmg artifacts
+#   push to main                  … then the rolling "nightly" pre-release is updated
+#   tag vX.Y.Z-beta.N             … then a versioned pre-release
+#   tag vX.Y.Z                    … then the release, marked latest
+#
+# Builds are ad-hoc signed unless all six Developer ID secrets are set (see docs/RELEASING.md); the
+# publish job is the only one with write access or secrets, and it never runs for pull requests.
+name: CI
+
+on:
+  push:
+    branches: ['**']
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash   # bash -eo pipefail
+
+env:
+  # The newest GA GitHub-hosted macOS image whose Xcode has Swift ≥ 6.2 is macos-26 (arm64); pin the
+  # Xcode explicitly so an image update can't silently change the toolchain. Bump both together.
+  XCODE_VERSION: '26.6'   # → /Applications/Xcode_26.6.app
+  MIN_SWIFT: '6.2'
+  NO_COLOR: '1'
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    concurrency:
+      group: lint-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install shellcheck and actionlint (pinned, checksummed)
+        run: scripts/ci/install-linters.sh "$RUNNER_TEMP/bin"
+      - name: shellcheck + actionlint
+        run: scripts/ci/lint.sh
+      - name: Ref → version tests (bash 5)
+        run: bash scripts/ci/test-version-from-ref.sh
+
+  build:
+    name: Build and test
+    runs-on: macos-26
+    timeout-minutes: 60
+    concurrency:
+      # A newer push to the same branch / PR cancels this job (publishing has its own group below).
+      group: build-${{ github.event_name }}-${{ github.ref }}
+      cancel-in-progress: true
+    outputs:
+      channel: ${{ steps.version.outputs.channel }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+      asset_base: ${{ steps.version.outputs.asset_base }}
+      build_number: ${{ steps.version.outputs.build_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # the build number is the commit count
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: scripts/ci/select-xcode.sh "/Applications/Xcode_$XCODE_VERSION.app" "$MIN_SWIFT"
+
+      - name: Release channel and version
+        id: version
+        run: |
+          # Fails here, before any build, for a tag that doesn't match VERSION or isn't vX.Y.Z[-beta.N].
+          scripts/ci/version-from-ref.sh "$GITHUB_REF" | tee -a "$GITHUB_OUTPUT"
+          echo "build_number=$(git rev-list --count HEAD)" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Ref → version tests (bash 3.2)
+        run: scripts/ci/test-version-from-ref.sh
+
+      - name: Restore SwiftPM build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Saver/**') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: swift build
+        run: swift build
+
+      - name: Self-tests
+        run: |
+          # Opt-in tests (a real render server, real AI agents) stay off in CI.
+          unset LIVEPAPER_SELFTEST_E2E LIVEPAPER_SMOKE_HARNESS LIVEPAPER_SMOKE_OUT
+          log="$RUNNER_TEMP/selftest.log"
+          status=0
+          swift run --skip-build LivePaperSelfTest 2>&1 | tee "$log" || status=$?
+          grep '^✗' "$log" | sed -e 's/%/%25/g' -e 's/^/::error title=Self-test failed::/' || true
+          exit "$status"
+
+      - name: Release build (universal)
+        env:
+          LIVEPAPER_VERSION: ${{ steps.version.outputs.version }}
+          LIVEPAPER_BUILD: ${{ steps.version.outputs.build_number }}
+        run: scripts/build.sh
+
+      - name: Package zip + dmg
+        env:
+          ASSET_BASE: ${{ steps.version.outputs.asset_base }}
+        run: scripts/ci/package.sh build/LivePaper.app dist "$ASSET_BASE"
+
+      - name: Summary
+        env:
+          CHANNEL: ${{ steps.version.outputs.channel }}
+          VERSION: ${{ steps.version.outputs.version }}
+          TAG: ${{ steps.version.outputs.tag }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+        run: |
+          {
+            echo "### LivePaper $VERSION (build $BUILD_NUMBER)"
+            echo "Channel: \`$CHANNEL\`${TAG:+ · tag \`$TAG\`}"
+            echo
+            echo '```'
+            (cd dist && du -h -- *.zip *.dmg && cat SHA256SUMS)
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the zipped app
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: dist/${{ steps.version.outputs.asset_base }}.zip
+          archive: false   # the artifact is the .zip itself
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload release files (zip, dmg, SHA256SUMS)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ steps.version.outputs.asset_base }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0   # already compressed
+
+      - name: Save SwiftPM build cache
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  publish:
+    name: Publish ${{ needs.build.outputs.channel }}
+    needs: [lint, build]
+    # Pushes to main and release tags of this repository only: never pull requests or forks.
+    if: >-
+      github.event_name == 'push' && github.repository == 'nachmore/livepaper' &&
+      contains(fromJSON('["nightly", "beta", "stable"]'), needs.build.outputs.channel)
+    runs-on: macos-26
+    timeout-minutes: 120   # notarization can be slow
+    permissions:
+      contents: write   # create/update releases and move the nightly tag
+    concurrency:
+      # Never cancelled half-way; a newer pending publish of the same ref replaces an older one.
+      group: publish-${{ github.ref }}
+      cancel-in-progress: false
+    env:
+      CHANNEL: ${{ needs.build.outputs.channel }}
+      VERSION: ${{ needs.build.outputs.version }}
+      TAG: ${{ needs.build.outputs.tag }}
+      ASSET_BASE: ${{ needs.build.outputs.asset_base }}
+      BUILD_NUMBER: ${{ needs.build.outputs.build_number }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0   # tags and history for the release notes and the build number
+          persist-credentials: false
+
+      - name: Select Xcode
+        run: scripts/ci/select-xcode.sh "/Applications/Xcode_$XCODE_VERSION.app" "$MIN_SWIFT"
+
+      - name: Signing mode
+        id: signing
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+        run: scripts/ci/signing.sh mode | tee -a "$GITHUB_OUTPUT"
+
+      # Ad-hoc: publish exactly what the build job built and tested.
+      - name: Download the build job's packages
+        if: steps.signing.outputs.mode == 'adhoc'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: dist-${{ needs.build.outputs.asset_base }}
+          path: dist
+
+      # Developer ID: rebuild with the real identity and the hardened runtime, notarize, staple.
+      - name: Restore SwiftPM build cache
+        if: steps.signing.outputs.mode == 'developer-id'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .build
+          key: swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode${{ env.XCODE_VERSION }}-${{ hashFiles('Package.swift', 'Package.resolved', 'Sources/**', 'Saver/**') }}
+          restore-keys: |
+            swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode${{ env.XCODE_VERSION }}-
+
+      - name: Import the Developer ID certificate
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          MACOS_CERT_P12_BASE64: ${{ secrets.MACOS_CERT_P12_BASE64 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+        run: scripts/ci/signing.sh import
+
+      - name: Release build (Developer ID)
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          LIVEPAPER_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          LIVEPAPER_VERSION: ${{ needs.build.outputs.version }}
+          LIVEPAPER_BUILD: ${{ needs.build.outputs.build_number }}
+        run: scripts/build.sh
+
+      - name: Notarize and staple the app
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+        run: |
+          ditto -c -k --keepParent build/LivePaper.app "$RUNNER_TEMP/LivePaper-notarize.zip"
+          scripts/ci/signing.sh notarize "$RUNNER_TEMP/LivePaper-notarize.zip"
+          scripts/ci/signing.sh staple build/LivePaper.app
+
+      - name: Package, notarize and staple the dmg
+        if: steps.signing.outputs.mode == 'developer-id'
+        env:
+          LIVEPAPER_DMG_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+          NOTARY_KEY_P8_BASE64: ${{ secrets.NOTARY_KEY_P8_BASE64 }}
+        run: |
+          scripts/ci/package.sh build/LivePaper.app dist "$ASSET_BASE"
+          scripts/ci/signing.sh notarize "dist/$ASSET_BASE.dmg"
+          scripts/ci/signing.sh staple "dist/$ASSET_BASE.dmg"
+          scripts/ci/package.sh --checksums dist   # the dmg changed when it was stapled
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SIGNING: ${{ steps.signing.outputs.mode }}
+        run: scripts/ci/publish-release.sh dist
+
+      - name: Remove the signing keychain
+        if: always() && steps.signing.outputs.mode == 'developer-id'
+        run: scripts/ci/signing.sh cleanup
