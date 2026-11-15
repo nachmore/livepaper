@@ -1,4 +1,5 @@
 // SceneCommands — check / still / bench / live / compile: the scene authoring loop (ARCHITECTURE §9).
+import Darwin
 import Foundation
 import LivePaperCore
 
@@ -95,11 +96,13 @@ enum SceneCommands {
         let dpr = try args.double("dpr") ?? 2
         let t = try args.double("t") ?? 8
         let frame = CheckFrame(Int(size.width), Int(size.height), dpr: dpr, t: t)
-        let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL }
-            ?? pkg.appendingPathComponent(SceneChecker.checkDirectory).appendingPathComponent(frame.fileName)
+        let checkDir = pkg.appendingPathComponent(SceneChecker.checkDirectory)
+        let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL } ?? checkDir.appendingPathComponent(frame.fileName)
+        let target = RenderTarget(out, package: pkg, inside: [checkDir], ext: "png")
         let req = RenderRequest(op: .still, html: html.path, width: size.width, height: size.height, dpr: dpr, t: t,
-                                out: out.path, clock: !args.flag("no-clock"))
-        let r = try await RenderClient().send(req, timeout: RenderClient.defaultTimeout(for: req))
+                                out: target.serverOut.path, clock: !args.flag("no-clock"))
+        var r = try await RenderClient().send(req, timeout: RenderClient.defaultTimeout(for: req))
+        try target.finish(&r)
         if args.flag("json") { printJSON(r) } else if r.ok {
             var line = "wrote \(displayPath(out)) (\(frame.label)"
             if let l = r.meanLuma { line += ", brightness \(fmt(l))/255" }
@@ -171,8 +174,10 @@ enum SceneCommands {
         let args = try Arguments(argv, flags: ["json"], options: ["t", "out"])
         let pkg = try sceneDirectory(args)
         let out = args.string("out").map { URL(fileURLWithPath: $0).standardizedFileURL } ?? pkg.appendingPathComponent("thumbnail.jpg")
-        let req = RenderRequest(op: .thumbnail, scene: pkg.path, t: try args.double("t"), out: out.path)
-        let r = try await RenderClient().send(req, timeout: RenderClient.defaultTimeout(for: req))
+        let target = RenderTarget(out, package: pkg, inside: [pkg, pkg.appendingPathComponent(SceneChecker.checkDirectory)], ext: "jpg")
+        let req = RenderRequest(op: .thumbnail, scene: pkg.path, t: try args.double("t"), out: target.serverOut.path)
+        var r = try await RenderClient().send(req, timeout: RenderClient.defaultTimeout(for: req))
+        try target.finish(&r)
         if args.flag("json") { printJSON(r) } else if r.ok { print("wrote \(displayPath(out))") }
         return report(r)
     }
@@ -194,6 +199,40 @@ enum SceneCommands {
         let out = pkg.appendingPathComponent(SceneChecker.checkDirectory).appendingPathComponent(SceneChecker.compiledFile)
         try SceneCompiler().compile(package: pkg, to: out)
         return out
+    }
+
+    /// Where the render server writes an image the user asked for. The server only writes into the
+    /// scene package (RenderOutputPolicy), so an `--out` elsewhere is rendered into the package's
+    /// .check first and then moved by the CLI itself — with the caller's own permissions (and
+    /// sandbox), never the server's.
+    struct RenderTarget {
+        let out: URL
+        let serverOut: URL
+        init(_ out: URL, package: URL, inside allowed: [URL], ext: String) {
+            self.out = out
+            let parent = out.deletingLastPathComponent().standardizedFileURL.path
+            if allowed.contains(where: { $0.standardizedFileURL.path == parent }) {
+                serverOut = out
+            } else {
+                serverOut = package.appendingPathComponent(SceneChecker.checkDirectory)
+                    .appendingPathComponent(".out-\(UUID().uuidString).\(ext)")
+            }
+        }
+
+        /// Moves the rendered file into place (when it was rendered elsewhere) and reports `out`.
+        func finish(_ response: inout RenderResponse) throws {
+            guard serverOut != out else { return }
+            defer { try? FileManager.default.removeItem(at: serverOut) }
+            guard response.ok else { return }
+            try FileManager.default.createDirectory(at: out.deletingLastPathComponent(), withIntermediateDirectories: true)
+            if rename(serverOut.path, out.path) != 0 {
+                guard errno == EXDEV else {
+                    throw CLIFailure("could not write \(out.path): \(String(cString: strerror(errno)))")
+                }
+                try Data(contentsOf: serverOut).write(to: out, options: .atomic)
+            }
+            response.out = out.path
+        }
     }
 
     /// Prints problems from a render response; exit code 1 for JS errors or a failed render.

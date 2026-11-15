@@ -348,6 +348,14 @@ connection; the server renders strictly one request at a time on the main thread
   must report syntax errors with message and line. Nothing can load through it, so scenes stay as
   offline as in the saver.
 * `devicePixelRatio` is emulated per request; App Nap is disabled while serving (else fps caps at 30).
+* **Outputs are confined** (`RenderOutputPolicy`): the server runs outside any agent's sandbox, so it
+  writes a still only as a `.png` into the `.check` folder holding the request's html, a thumbnail
+  only as a `.jpg` into the scene package it renders, or either into `<support>/Workspaces` or a
+  temporary folder. Symlinks are resolved at write time (the parent folder is opened and its real
+  path checked, the file is created and renamed relative to it); an existing destination must be a
+  regular file. Anything else is refused before rendering. `livepaper still|thumbnail --out
+  <elsewhere>` renders into the package's `.check` and moves the file itself, with the caller's
+  own permissions.
 
 ## 9. CLI `livepaper` (`Sources/LivePaperCLI`, Foundation + Core only)
 ```

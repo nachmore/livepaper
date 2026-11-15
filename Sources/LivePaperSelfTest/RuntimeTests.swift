@@ -27,6 +27,7 @@ extension SelfTests {
             TestCase(name: "runtime.check.writesReportAndPerformance", run: RuntimeTests.checkWritesFiles),
             TestCase(name: "runtime.check.compileFailureSkipsRendering", run: RuntimeTests.checkCompileFailure),
             TestCase(name: "runtime.check.symlinkedCheckDirectory", run: RuntimeTests.checkSymlinkedCheckDirectory),
+            TestCase(name: "runtime.render.outputConfinement", run: RuntimeTests.renderOutputConfinement),
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
             TestCase(name: "runtime.client.waitsForServerHoldingLock", run: RuntimeTests.clientWaitsForLockHolder),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
@@ -373,6 +374,70 @@ enum RuntimeTests {
         try fm.createSymbolicLink(at: check.appendingPathComponent("1512x982@2-t4.png"), withDestinationURL: target)
         _ = try blocking { try await SceneChecker(compiler: SceneCompiler(), render: fake).check(package: pkg, options: CheckOptions(quick: true)) }
         try expectEqual((try? String(contentsOf: target, encoding: .utf8)) ?? "(deleted)", "my photo")
+    }
+
+    /// The render server runs outside any agent sandbox, so the `out` a client names must stay in
+    /// the request's own .check (or scene package, for thumbnails), LivePaper's AI workspaces or a
+    /// temporary directory — with symlinks resolved at the moment of writing.
+    static func renderOutputConfinement() throws {
+        let fm = FileManager.default
+        let root = try tempDir("outputs").resolvingSymlinksInPath()
+        defer { try? fm.removeItem(at: root) }
+        let support = root.appendingPathComponent("support"), scratch = root.appendingPathComponent("tmp")
+        let home = root.appendingPathComponent("home")
+        for d in [support.appendingPathComponent("Workspaces/s1/scene/.check"), scratch, home] {
+            try fm.createDirectory(at: d, withIntermediateDirectories: true)
+        }
+        let policy = RenderOutputPolicy(supportRoot: support, temporaryDirectories: [scratch])
+        let pkg = try package("out", js: minimalScene)
+        let check = pkg.appendingPathComponent(".check")
+        try fm.createDirectory(at: check, withIntermediateDirectories: true)
+        let html = check.appendingPathComponent("scene.html")
+        try Data("<html></html>".utf8).write(to: html)
+        let png = Data([0x89, 0x50, 0x4E, 0x47, 1, 2, 3])
+        func still(_ out: URL) -> RenderRequest { RenderRequest(op: .still, html: html.path, out: out.path) }
+        func refused(_ r: RenderRequest, _ why: String) throws {
+            do { _ = try policy.write(png, for: r); throw TestFailure(description: "expected a refusal: \(why) (\(r.out ?? "-"))") }
+            catch is RenderOutputError {}
+        }
+
+        // Allowed: the html's .check, the AI workspaces (missing folders are created), the temp dir.
+        try expectEqual(try Data(contentsOf: try policy.write(png, for: still(check.appendingPathComponent("a.png")))), png)
+        let ws = support.appendingPathComponent("Workspaces/s1/scene/.check/new/b.png")
+        _ = try policy.write(png, for: still(ws))
+        try expectEqual(try Data(contentsOf: ws), png)
+        _ = try policy.write(png, for: still(scratch.appendingPathComponent("c.png")))
+        try expectEqual(try Data(contentsOf: check.appendingPathComponent("a.png")), png)
+
+        // Refused: anywhere else, other file types, through a symlinked folder, over a non-file.
+        let thesis = home.appendingPathComponent("thesis.png")
+        try Data("my thesis".utf8).write(to: thesis)
+        try refused(still(thesis), "outside every allowed root")
+        try refused(still(check.appendingPathComponent("notes.docx")), "not a PNG")
+        try refused(still(URL(fileURLWithPath: "relative.png")), "relative")
+        try refused(still(check.appendingPathComponent("../../../home/thesis.png")), "dot-dot")
+        let linked = support.appendingPathComponent("Workspaces/s1/scene/.check/linked")
+        try fm.createSymbolicLink(at: linked, withDestinationURL: home)
+        try refused(still(linked.appendingPathComponent("thesis.png")), "symlinked folder")
+        try fm.createSymbolicLink(at: check.appendingPathComponent("link.png"), withDestinationURL: thesis)
+        try refused(still(check.appendingPathComponent("link.png")), "destination is a symlink")
+        try fm.createDirectory(at: check.appendingPathComponent("dir.png"), withIntermediateDirectories: true)
+        try refused(still(check.appendingPathComponent("dir.png")), "destination is a directory")
+        // An html outside any .check doesn't make its folder writable.
+        let looseHTML = home.appendingPathComponent("page.html")
+        try Data().write(to: looseHTML)
+        try refused(RenderRequest(op: .still, html: looseHTML.path, out: home.appendingPathComponent("x.png").path), "html's folder isn't a .check")
+        try expectEqual(try String(contentsOf: thesis, encoding: .utf8), "my thesis")
+        try expectEqual(try fm.contentsOfDirectory(atPath: home.path).sorted(), ["page.html", "thesis.png"])
+
+        // Thumbnails: into the scene package they render (JPEG only).
+        let thumb = RenderRequest(op: .thumbnail, scene: pkg.path, out: pkg.appendingPathComponent("thumbnail.jpg").path)
+        _ = try policy.write(png, for: thumb)
+        try refused(RenderRequest(op: .thumbnail, scene: pkg.path, out: pkg.appendingPathComponent("thumbnail.png").path), "not a JPEG")
+        try refused(RenderRequest(op: .thumbnail, scene: home.path, out: home.appendingPathComponent("thumbnail.jpg").path), "not a scene package")
+        try refused(RenderRequest(op: .thumbnail, scene: pkg.path, out: home.appendingPathComponent("thumbnail.jpg").path), "outside the package")
+        // Requests that write nothing need no out.
+        try refused(RenderRequest(op: .bench, html: html.path, out: check.appendingPathComponent("z.png").path), "bench writes nothing")
     }
 
     static func checkCompileFailure() throws {
