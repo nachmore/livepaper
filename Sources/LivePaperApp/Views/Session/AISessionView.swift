@@ -252,7 +252,7 @@ private struct SessionResultPanel: View {
             .aspectRatio(16.0 / 10.0, contentMode: .fit)
             .overlay {
                 if let candidate, selectedStill == nil {
-                    ScenePreview(item: candidate, quality: .full)
+                    ScenePreview(item: candidate, quality: .full, cornerRadius: 12)
                 } else if let still = selectedStill ?? state.stills.last {
                     ThumbnailImage(url: still, maxPixel: 1024)
                 } else {

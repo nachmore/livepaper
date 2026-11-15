@@ -92,33 +92,45 @@ enum SystemActions {
 /// Shows the Dock icon only while the main window is open (the app otherwise lives in the menu
 /// bar). Switching to `.accessory` while active hands focus back to the previous app, which is the
 /// expected behaviour when the user closes the window.
+///
+/// SwiftUI may keep and reuse the NSWindow of a `Window` scene after it is closed, so the policy
+/// keeps observing every main window it has seen: becoming key again (reopened from the menu bar,
+/// the Dock or a relaunch) restores the Dock icon even if the view hierarchy wasn't rebuilt.
 @MainActor
 final class DockIconPolicy {
     static let shared = DockIconPolicy()
     /// Off in the snapshot harness, which must never become a regular (focus-taking) app.
     var isEnabled = true
-    private var openMainWindows = Set<ObjectIdentifier>()
-    private var closeObservers: [ObjectIdentifier: NSObjectProtocol] = [:]
+    private var observed: [ObjectIdentifier: [NSObjectProtocol]] = [:]
+    private var open = Set<ObjectIdentifier>()
 
     func mainWindowAppeared(_ window: NSWindow) {
         guard isEnabled else { return }
         let key = ObjectIdentifier(window)
-        guard !openMainWindows.contains(key) else { return }
-        openMainWindows.insert(key)
-        closeObservers[key] = NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window,
-                                                                     queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.mainWindowClosed(key) }
+        if observed[key] == nil {
+            let nc = NotificationCenter.default
+            observed[key] = [
+                nc.addObserver(forName: NSWindow.didBecomeKeyNotification, object: window, queue: .main) { [weak self, weak window] _ in
+                    MainActor.assumeIsolated { if let window { self?.shown(window) } }
+                },
+                nc.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { [weak self] _ in
+                    MainActor.assumeIsolated { self?.closed(key) }
+                },
+            ]
         }
-        if NSApp.activationPolicy() != .regular {
-            NSApp.setActivationPolicy(.regular)
-            NSApp.activate()
-            window.makeKeyAndOrderFront(nil)
-        }
+        shown(window)
     }
 
-    private func mainWindowClosed(_ key: ObjectIdentifier) {
-        openMainWindows.remove(key)
-        if let o = closeObservers.removeValue(forKey: key) { NotificationCenter.default.removeObserver(o) }
-        if openMainWindows.isEmpty { NSApp.setActivationPolicy(.accessory) }
+    private func shown(_ window: NSWindow) {
+        open.insert(ObjectIdentifier(window))
+        guard NSApp.activationPolicy() != .regular else { return }
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate()
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    private func closed(_ key: ObjectIdentifier) {
+        open.remove(key)
+        if open.isEmpty { NSApp.setActivationPolicy(.accessory) }
     }
 }

@@ -27,6 +27,9 @@ struct ScenePreview: View {
     var quality: PreviewQuality = .full
     /// Shows the scene's clock overlay (web scenes; the saver draws it for video scenes).
     var showClock = true
+    /// Matches the container's rounded corners. SwiftUI's clipShape doesn't reliably clip AppKit
+    /// views (WKWebView, AVPlayerLayer), so the host layer masks them itself.
+    var cornerRadius: CGFloat = 0
     /// Reports runtime errors from the scene (e.g. to show a hint in the detail view).
     var onError: ((String) -> Void)?
 
@@ -55,11 +58,11 @@ struct ScenePreview: View {
         switch item.manifest.kind {
         case .video:
             if let video = videoURL {
-                LivePreviewRepresentable(content: .video(video, fit: item.manifest.video?.fit ?? .fill))
+                LivePreviewRepresentable(content: .video(video, fit: item.manifest.video?.fit ?? .fill), cornerRadius: cornerRadius)
             }
         case .web:
             if let compiledHTML {
-                LivePreviewRepresentable(content: .web(compiledHTML, config: runtimeConfig, onError: onError))
+                LivePreviewRepresentable(content: .web(compiledHTML, config: runtimeConfig, onError: onError), cornerRadius: cornerRadius)
             } else if compileError != nil {
                 Image(systemName: "exclamationmark.triangle")
                     .font(.title2)
@@ -135,12 +138,16 @@ fileprivate struct LivePreviewRepresentable: NSViewRepresentable {
     }
 
     let content: Content
+    var cornerRadius: CGFloat
 
     func makeNSView(context: Context) -> LivePreviewHostView {
-        LivePreviewHostView(content: content)
+        let view = LivePreviewHostView(content: content)
+        view.setCornerRadius(cornerRadius)
+        return view
     }
 
     func updateNSView(_ view: LivePreviewHostView, context: Context) {
+        view.setCornerRadius(cornerRadius)
         if view.content.identity != content.identity { view.replace(content) }
     }
 
@@ -188,6 +195,12 @@ fileprivate final class LivePreviewHostView: NSView {
     deinit {
         observers.forEach(NotificationCenter.default.removeObserver)
         workspaceObservers.forEach(NSWorkspace.shared.notificationCenter.removeObserver)
+    }
+
+    func setCornerRadius(_ radius: CGFloat) {
+        layer?.cornerRadius = radius
+        layer?.cornerCurve = .continuous
+        layer?.masksToBounds = radius > 0
     }
 
     /// Previews never take clicks or hovers; the card or detail view around them does.

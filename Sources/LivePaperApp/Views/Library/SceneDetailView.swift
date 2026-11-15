@@ -73,7 +73,7 @@ private struct SceneDetailContent: View {
             Color.black
                 .aspectRatio(aspect.ratio, contentMode: .fit)
                 .overlay {
-                    ScenePreview(item: entry.item, quality: .full, showClock: true) { message in previewError = message }
+                    ScenePreview(item: entry.item, quality: .full, showClock: true, cornerRadius: 14) { message in previewError = message }
                 }
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.primary.opacity(0.1)))
