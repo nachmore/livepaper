@@ -113,6 +113,13 @@ enum SnapshotHarness {
         shoot("sheet-delete-light", shortSheet, dark: false, SceneActionSheet(action: .delete("neon-rain")))
         shoot("settings-saver-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .screenSaver))
         shoot("settings-lock-light", CGSize(width: 640, height: 600), dark: false, SettingsView(initialTab: .lock))
+        (services.install as? MockInstallService)?.simulateHelperApprovalPending()
+        wait {
+            await model.setLockKeysShowScene(true)
+            await model.refreshInstallStatus()
+        }
+        shoot("settings-lock-approval-dark", CGSize(width: 640, height: 600), dark: true, SettingsView(initialTab: .lock))
+        shoot("onboarding-lock-approval-light", sheet, dark: false, OnboardingView(initialStep: .lock))
         shoot("settings-performance-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .performance))
         model.aiSettings.setModel("opus", for: .claude)
         model.aiSettings.customTemplate = "mytool --task {prompt_file} --cwd {workspace} --model {nope}"
