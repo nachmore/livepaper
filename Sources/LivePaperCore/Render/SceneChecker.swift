@@ -27,6 +27,8 @@ public struct CheckBudgets: Sendable, Equatable {
     public var energyMaxMw: Double = 300
     /// Live fps must reach this fraction of the battery profile's 30 fps cap.
     public var minLiveFpsFraction: Double = 0.85
+    /// How alive the scene must feel: coverage, spread, busyness and flicker (MotionAnalysis.swift).
+    public var motion = MotionBudgets()
     public init() {}
 }
 
@@ -56,9 +58,16 @@ public struct CheckPlan: Sendable, Equatable {
     public var benchSizes: [CheckFrame]
     public var benchFrames: Int
     public var power: Bool
+    /// Sizes the motion check renders (`t` unused), the moments it samples and the gaps it compares.
+    public var motionSizes: [CheckFrame] = []
+    public var motionTimes: [Double] = MotionAnalysis.defaultTimes
+    public var motionGaps: [Double] = MotionAnalysis.defaultGaps
 
     public static let primary = CheckFrame(1512, 982, dpr: 2, t: 0)
     public static let ultraWide = CheckFrame(5120, 1440, dpr: 1, t: 0)
+    /// Motion is analysed on small frames laid out at desktop sizes: 16:9 (640×360 px) and 5:4 (512×410 px).
+    public static let motionWide = CheckFrame(1280, 720, dpr: 0.5, t: 0)
+    public static let motionSquare = CheckFrame(1024, 820, dpr: 0.5, t: 0)
 
     public static func standard(power: Bool) -> CheckPlan {
         let times: [Double] = [0, 4, 12, 30, 90, 240, 600]
@@ -67,7 +76,7 @@ public struct CheckPlan: Sendable, Equatable {
         stills += [12, 90].map { CheckFrame(1280, 1024, dpr: 1, t: $0) }         // 5:4
         stills += [CheckFrame(320, 200, dpr: 2, t: 12)]                          // thumbnail-sized
         return CheckPlan(times: times, stills: stills, probeFrames: 30, probeTimes: Array(times.dropLast()),
-                         benchSizes: [primary, ultraWide], benchFrames: 120, power: power)
+                         benchSizes: [primary, ultraWide], benchFrames: 120, power: power, motionSizes: [motionWide, motionSquare])
     }
 
     /// A fast loop for iterating: three stills, one bench, no ultra-wide bench.
@@ -77,7 +86,7 @@ public struct CheckPlan: Sendable, Equatable {
         var bench = primary
         bench.t = 30
         return CheckPlan(times: times, stills: stills, probeFrames: 0, probeTimes: [], benchSizes: [bench],
-                         benchFrames: 60, power: power)
+                         benchFrames: 60, power: power, motionSizes: [motionWide])
     }
 }
 
@@ -87,6 +96,8 @@ public struct CheckResults: Sendable {
     public var stills: [(frame: CheckFrame, path: String, response: RenderResponse)] = []
     public var probes: [(frame: CheckFrame, response: RenderResponse)] = []
     public var benches: [(frame: CheckFrame, response: RenderResponse)] = []
+    /// One `motion` request per motion size; `heatmap` is the PNG it was asked to write.
+    public var motion: [(frame: CheckFrame, heatmap: String?, response: RenderResponse)] = []
     public var live: RenderResponse?
     public init() {}
 }
@@ -156,6 +167,16 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                                                  dpr: frame.dpr, t: frame.t, out: out, clock: true))
             results.stills.append((frame, out, r))
         }
+        for (i, size) in plan.motionSizes.enumerated() {
+            progress?("motion \(i + 1)/\(plan.motionSizes.count): \(size.sizeLabel) at \(MotionAnalysis.timeList(plan.motionTimes)), " +
+                      "each compared with \(plan.motionGaps.map { CheckFrame.num($0) + " s" }.joined(separator: ", ")) later")
+            let out = checkDir.appendingPathComponent(Self.motionFileName(size)).path
+            let grid = MotionAnalysis.grid(width: Int((Double(size.width) * size.dpr).rounded()), height: Int((Double(size.height) * size.dpr).rounded()))
+            let r = try await send(RenderRequest(op: .motion, html: html.path, width: Double(size.width), height: Double(size.height),
+                                                 dpr: size.dpr, out: out, clock: true, times: plan.motionTimes, gaps: plan.motionGaps,
+                                                 grid: [grid.cols, grid.rows]))
+            results.motion.append((size, out, r))
+        }
         for (i, t) in plan.probeTimes.enumerated() {
             var frame = CheckPlan.primary
             frame.t = t
@@ -186,6 +207,9 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
     private func send(_ request: RenderRequest) async throws -> RenderResponse {
         try await render.send(request, timeout: RenderClient.defaultTimeout(for: request))
     }
+
+    /// "motion-1280x720@0.5.png": the heat map of one motion size in .check/.
+    public static func motionFileName(_ size: CheckFrame) -> String { "motion-\(size.sizeLabel).png" }
 
     static func heaviestTime(_ probes: [(frame: CheckFrame, response: RenderResponse)]) -> Double? {
         probes.filter { $0.response.ok && $0.response.benchMs != nil }
@@ -264,6 +288,28 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                             "and \(hi.0.label)). Prefer calm, low-contrast motion behind the clock.")
         }
 
+        // Motion: is the scene gently alive everywhere, without being busy or flickering?
+        var motion: [MotionSummary] = []
+        var motionUnsupported: String?
+        for (frame, _, r) in results.motion {
+            collectErrors(r)
+            guard r.ok else {
+                // A render server from before the motion op can't even decode the request.
+                if (r.note ?? "").hasPrefix("bad request") { motionUnsupported = r.note } else { renderFailed(r, "motion measurement", frame) }
+                continue
+            }
+            guard let m = r.motion else { motionUnsupported = "it returned no motion data"; continue }
+            // `out` is set only when the server wrote the heat map.
+            motion.append(MotionAnalysis.summarize(m, size: frame.sizeLabel, budgets: b.motion, heatmap: r.out))
+        }
+        let motionVerdict = MotionAnalysis.verdict(motion, budgets: b.motion)
+        problems += motionVerdict.problems
+        warnings += motionVerdict.warnings
+        if let why = motionUnsupported {
+            warnings.append("Motion was not measured: the render server doesn't support it (\(why)). It is probably an older " +
+                            "LivePaper: quit and reopen LivePaper, or run `livepaper server stop`, then check again.")
+        }
+
         // Benches. Probes are short runs that only locate the heaviest phase.
         for (frame, r) in results.probes {
             collectErrors(r)
@@ -322,7 +368,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             warnings.append("Quick check: fewer stills and no ultra-wide benchmark. Run the full `livepaper check` before you finish.")
         }
         return CheckReport(passed: problems.isEmpty, problems: problems, warnings: warnings, jsErrors: jsErrors, stills: stills,
-                           benchMs: benchMs, energyMw: energy)
+                           benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion)
     }
 
     // MARK: - Manifest

@@ -4,8 +4,8 @@
 // The runner is outside the agent's sandbox, so it relays only what a scene command of that
 // workspace would send, and never lets a request widen what the agent can reach:
 //
-//   * ops: still, bench, live, thumbnail and ping (no shutdown);
-//   * still/bench/live name `<package>/.check/scene.html` of a package inside the workspace; the
+//   * ops: still, bench, live, motion, thumbnail and ping (no shutdown);
+//   * still/bench/live/motion name `<package>/.check/scene.html` of a package inside the workspace; the
 //     relay compiles that package itself (CSP, offline scanner) into a folder next to the
 //     workspaces that the agent can't write, and sends that file instead — so the server never
 //     renders HTML the agent wrote, which could otherwise load anything from the network;
@@ -165,7 +165,7 @@ final class RenderRelay: @unchecked Sendable {
             return (RenderRequest(op: .ping), nil)
         case .shutdown:
             throw Refusal(message: "the render server can't be stopped from an AI session")
-        case .still, .bench, .live:
+        case .still, .bench, .live, .motion:
             guard let html = r.html, html.hasPrefix("/") else { throw Refusal(message: "\(r.op.rawValue) needs the scene's compiled html") }
             let htmlURL = URL(fileURLWithPath: html).standardizedFileURL
             guard htmlURL.lastPathComponent == SceneChecker.compiledFile,
@@ -174,7 +174,7 @@ final class RenderRelay: @unchecked Sendable {
             }
             let package = htmlURL.deletingLastPathComponent().deletingLastPathComponent()
             try confine(package.path, "the scene")
-            if r.op == .still, let out = r.out { try confine(out, "out", extensions: ["png"]) }
+            if r.op == .still || r.op == .motion, let out = r.out { try confine(out, "out", extensions: ["png"]) }
             try FileManager.default.createDirectory(at: privateDirectory, withIntermediateDirectories: true)
             let compiled = privateDirectory.appendingPathComponent("\(UUID().uuidString).html")
             do { try compiler.compile(package: package, to: compiled) } catch let e as SceneCompileError {
@@ -183,7 +183,7 @@ final class RenderRelay: @unchecked Sendable {
             var p = r
             p.html = compiled.path
             p.scene = nil
-            if r.op != .still { p.out = nil }
+            if r.op != .still && r.op != .motion { p.out = nil }
             return (p, compiled)
         case .thumbnail:
             guard let scene = r.scene, let out = r.out else { throw Refusal(message: "thumbnail needs \"scene\" and \"out\"") }

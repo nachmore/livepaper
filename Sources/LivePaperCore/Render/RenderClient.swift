@@ -54,6 +54,7 @@ public final class RenderClient: RenderClienting, @unchecked Sendable {
         case .ping, .shutdown: return 10
         case .live: return (request.seconds ?? 12) + (request.warmup ?? 3) + 120
         case .still, .bench, .thumbnail: return 180
+        case .motion: return 300
         }
     }
 
