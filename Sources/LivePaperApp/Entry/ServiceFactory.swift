@@ -12,37 +12,26 @@ enum AppMode {
 enum AppBootstrap {
     /// The one model for the whole process (SwiftUI may create the App struct more than once).
     static let model: AppModel = {
-        let (services, environment, notice) = ServiceFactory.make(mock: AppMode.isMock)
-        let model = AppModel(services: services, environment: environment)
-        if let notice { model.banners.post(.warning, notice.title, message: notice.message) }
-        return model
+        let (services, environment) = ServiceFactory.make(mock: AppMode.isMock)
+        return AppModel(services: services, environment: environment)
     }()
 }
 
 enum ServiceFactory {
-    struct Notice { var title: String; var message: String }
-
     /// Builds services + environment. In mock mode every LivePaper path is redirected into a
     /// temporary root *before* anything reads LPPaths, so even code that bypasses the services
     /// (state.json, preview cache) stays out of the user's real files.
     @MainActor
-    static func make(mock: Bool, pace: Double = 1) -> (LivePaperServices, AppEnvironment, Notice?) {
+    static func make(mock: Bool, pace: Double = 1) -> (LivePaperServices, AppEnvironment) {
         if !mock {
-            do {
-                let live = try LivePaperServices.live()
-                let cache = FileManager.default.temporaryDirectory.appendingPathComponent("LivePaperPreviews")
-                return (live, environment(mock: false, defaults: UserDefaults.standard, cache: cache), nil)
-            } catch {
-                NSLog("LivePaper: live services unavailable (\(error.localizedDescription)); using sample data")
-            }
+            // Constructing the live services is cheap and writes nothing (LivePaperServices.live()).
+            let cache = FileManager.default.temporaryDirectory.appendingPathComponent("LivePaperPreviews")
+            return (LivePaperServices.live(), environment(mock: false, defaults: UserDefaults.standard, cache: cache))
         }
         let root = MockServices.temporaryRoot()
         redirectPaths(into: root)
         let env = environment(mock: true, defaults: InMemoryPreferences(), cache: root.appendingPathComponent("Previews"))
-        let notice = mock ? nil : Notice(
-            title: "Showing sample scenes",
-            message: "This build doesn't include LivePaper's system services yet, so nothing on your Mac will change.")
-        return (mockServices(root: root, pace: pace), env, notice)
+        return (mockServices(root: root, pace: pace), env)
     }
 
     /// Points LPPaths (via its environment overrides) at a scratch root.
@@ -50,10 +39,12 @@ enum ServiceFactory {
         let fm = FileManager.default
         let home = root.appendingPathComponent("Support"), savers = root.appendingPathComponent("Screen Savers")
         let store = root.appendingPathComponent("Wallpaper/Index.plist")
-        for dir in [home, savers, store.deletingLastPathComponent()] { try? fm.createDirectory(at: dir, withIntermediateDirectories: true) }
+        let agents = root.appendingPathComponent("LaunchAgents")
+        for dir in [home, savers, store.deletingLastPathComponent(), agents] { try? fm.createDirectory(at: dir, withIntermediateDirectories: true) }
         setenv("LIVEPAPER_HOME", home.path, 1)
         setenv("LIVEPAPER_SAVERS_DIR", savers.path, 1)
         setenv("LIVEPAPER_WALLPAPER_STORE", store.path, 1)
+        setenv("LIVEPAPER_LAUNCH_AGENTS_DIR", agents.path, 1)
     }
 
     @MainActor
@@ -66,16 +57,19 @@ enum ServiceFactory {
         }
     }
 
+    @MainActor
     static func environment(mock: Bool, defaults: PreferenceStore, cache: URL) -> AppEnvironment {
         let bundle = Bundle.main
         let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0-dev"
         let appPath = (!mock && bundle.bundleURL.pathExtension == "app") ? bundle.bundleURL.path : nil
-        let stateURL = LPPaths.stateFile
         // LPPaths already points at the scratch root in mock mode (redirectPaths runs first).
-        let lockPreference: BoolPreference = mock ? InMemoryBoolPreference() : LoginWindowLockPreference()
-        let lockTakeover = LockTakeover(preference: lockPreference, backupURL: LPPaths.backups.appendingPathComponent("loginwindow-lock.json"))
-        return AppEnvironment(isMock: mock, defaults: defaults, lockTakeover: lockTakeover, stateURL: stateURL,
-                              saveState: { try $0.save(to: stateURL) }, previewCacheDirectory: cache,
+        let stateURL = LPPaths.stateFile
+        // Mock mode never broadcasts a lock request or starts the screen saver (AppModel.lockNow
+        // shows a notice instead); these are only placeholders.
+        let helperLock: HelperLockChannel = mock ? FixedHelperLockChannel(answers: false) : DistributedHelperLockChannel()
+        let startScreenSaver: @MainActor () async throws -> Void = mock ? {} : { try await SystemActions.startScreenSaverEngine() }
+        return AppEnvironment(isMock: mock, defaults: defaults, stateURL: stateURL, saveState: { try $0.save(to: stateURL) },
+                              helperLock: helperLock, startScreenSaver: startScreenSaver, previewCacheDirectory: cache,
                               appVersion: version, appBundlePath: appPath)
     }
 }

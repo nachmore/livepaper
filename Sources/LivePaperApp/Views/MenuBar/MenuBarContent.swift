@@ -9,7 +9,8 @@ struct MenuBarContent: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        Button(lockTitle) { SystemActions.lockNow(model) }
+        Button(lockTitle) { Task { await model.lockNow() } }
+            .disabled(model.isLocking)
         Divider()
         Text("Screen saver: \(model.playlistSummary)")
         Button("Next Scene") { Task { await model.advanceScene() } }

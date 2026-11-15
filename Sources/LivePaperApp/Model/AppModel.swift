@@ -13,11 +13,13 @@ import LivePaperCore
 struct AppEnvironment {
     var isMock: Bool
     var defaults: PreferenceStore
-    /// ⌃⌘Q / lock-key takeover (the real loginwindow preference, or an in-memory one).
-    var lockTakeover: LockTakeover
     var stateURL: URL
     /// Persists state.json (the live implementation also notifies the helper).
     var saveState: (LPSharedState) throws -> Void
+    /// "Lock Now" asks the helper first (LPNotification.lockNow) …
+    var helperLock: HelperLockChannel
+    /// … and starts ScreenSaverEngine itself when no helper answers (AppKit; Entry/SystemActions).
+    var startScreenSaver: @MainActor () async throws -> Void
     /// Where compiled preview HTML is cached.
     var previewCacheDirectory: URL
     var appVersion: String
@@ -99,28 +101,31 @@ final class AppModel {
     // Screen saver, lock, system
     private(set) var playlist = PlaylistSettings()
     private(set) var isPublishing = false
-    private(set) var lastPublished: LPPlaylist?
+    /// The last successful publish, including scenes it had to leave out.
+    private(set) var lastPublishResult: PublishResult?
+    var lastPublished: LPPlaylist? { lastPublishResult?.playlist }
     private(set) var sharedState: LPSharedState
     private(set) var installStatus = InstallStatus()
-    /// ⌃⌘Q, Apple menu › Lock Screen and the lock key start the scene before locking.
-    private(set) var lockKeysShowScene: Bool
     private(set) var isInstallBusy = false
+    private(set) var isLocking = false
 
     // AI
     private(set) var harnesses: [AIHarness] = []
     private(set) var isDetectingHarnesses = false
     private(set) var hasDetectedHarnesses = false
-    var aiPreferences: AIPreferences {
-        didSet { aiPreferences.save(to: environment.defaults) }
+    /// Settings › AI, stored by AIServicing (ai-settings.json, shared with the CLI and sessions).
+    var aiSettings: AISettings {
+        didSet { if aiSettings != oldValue { saveAISettings() } }
     }
+    @ObservationIgnored private var aiSettingsSaveFailed = false
     private(set) var sessions: [AISessionModel] = []
 
     init(services: LivePaperServices, environment: AppEnvironment) {
         self.services = services
         self.environment = environment
         self.sharedState = LPSharedState.load(from: environment.stateURL)
-        self.lockKeysShowScene = environment.lockTakeover.isEnabled
-        self.aiPreferences = AIPreferences.load(from: environment.defaults)
+        // A small JSON file: read synchronously so the settings UI never shows defaults first.
+        self.aiSettings = services.ai.loadSettings()
         self.showOnboarding = !environment.defaults.bool(forKey: AppEnvironment.onboardingCompletedKey)
     }
 
@@ -131,6 +136,7 @@ final class AppModel {
         async let pl: Void = loadPlaylist()
         async let st: Void = refreshInstallStatus()
         _ = await (lib, pl, st)
+        syncLockKeysMirror()
         await detectHarnesses()
         await generateMissingThumbnails()
     }
@@ -321,8 +327,8 @@ final class AppModel {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
-            let item = try await services.library.importVideo(from: url, name: name, optimizeForBattery: optimizeForBattery) { p in
-                Task { @MainActor [weak self] in
+            let item = try await services.library.importVideo(from: url, name: name, optimizeForBattery: optimizeForBattery) { [weak self] p in
+                Task { @MainActor in
                     guard let self, self.videoImport != nil else { return }
                     self.videoImport?.fraction = min(max(p, 0), 1)
                 }
@@ -366,16 +372,25 @@ final class AppModel {
         defer { isPublishing = false }
         let publish = services.publish
         do {
-            let published = try await offMain { () -> LPPlaylist? in
+            let result = try await offMain { () -> PublishResult? in
                 try publish.saveSettings(settings)
-                return publishNow ? try publish.publish() : nil
+                return publishNow ? try publish.publishReport() : nil
             }
             playlist = settings
-            guard let published else { return true }
-            lastPublished = published
-            if announce {
-                let n = published.scenes.count
-                banners.post(.success, "Screen saver updated", message: n == 1 ? "1 scene published." : "\(n) scenes published.")
+            guard let result else { return true }
+            lastPublishResult = result
+            let n = result.playlist.scenes.count
+            let published = n == 1 ? "1 scene published" : "\(n) scenes published"
+            if !result.skipped.isEmpty {
+                // Always shown (even for quiet publishes): the saver won't play these scenes.
+                let skipped = result.skippedScenes
+                let names = skipped.map { "\u{201C}\(sceneNames[$0.id] ?? $0.id)\u{201D}" }.joined(separator: ", ")
+                banners.post(.warning, skipped.count == 1 ? "1 scene was left out of the screen saver"
+                                                          : "\(skipped.count) scenes were left out of the screen saver",
+                             message: "\(published). Not playable: \(names). \(skipped.first.map { $0.reason } ?? "")",
+                             actions: [.init(title: "Show Playlist") { [weak self] in self?.section = .playlist }])
+            } else if announce {
+                banners.post(.success, "Screen saver updated", message: published + ".")
             }
             return true
         } catch {
@@ -436,28 +451,75 @@ final class AppModel {
         }
     }
 
-    /// Turns the lock-key takeover on or off (backing up the system's previous value the first
-    /// time) and mirrors it into state.json for the helper.
-    func setLockKeysShowScene(_ on: Bool) {
+    /// ⌃⌘Q, Apple menu › Lock Screen and the lock key start the scene before locking.
+    var lockKeysShowScene: Bool { installStatus.lockKeysShowScene }
+
+    /// Turns the lock keys on or off through InstallServicing (which backs up the previous system
+    /// value the first time and restores it on uninstall) and mirrors the result into state.json.
+    func setLockKeysShowScene(_ on: Bool) async {
+        let before = installStatus
+        installStatus.lockKeysShowScene = on   // the toggle follows the click at once
+        let install = services.install
         do {
-            try environment.lockTakeover.setEnabled(on)
-            lockKeysShowScene = on
-            updateLock { $0.takeOverSystemLock = on; $0.takeOverLockKey = on }
+            try await offMain { try install.setLockKeysShowScene(on) }
+            await refreshInstallStatus()
         } catch {
-            banners.error("Couldn't change what the lock keys do", error) { [weak self] in self?.setLockKeysShowScene(on) }
+            installStatus = before
+            banners.error("Couldn't change what the lock keys do", error) { [weak self] in
+                Task { await self?.setLockKeysShowScene(on) }
+            }
+        }
+        syncLockKeysMirror()
+    }
+
+    /// state.json carries the lock-keys state for the helper; the system preference is the truth
+    /// (the user may also have changed it with `defaults`).
+    private func syncLockKeysMirror() {
+        let on = installStatus.lockKeysShowScene
+        if sharedState.lock.lockKeysShowScene != on { updateLock { $0.lockKeysShowScene = on } }
+    }
+
+    /// Outcome of "Lock Now".
+    enum LockRoute: Equatable { case helper, screenSaverEngine, sample, failed }
+
+    /// Menu-bar "Lock Now": the helper runs its lock flow; without a helper LivePaper starts the
+    /// screen saver itself. With "require password immediately" the saver locks, and loginwindow
+    /// draws its lock UI over the running scene (ARCHITECTURE §1, §7).
+    @discardableResult
+    func lockNow() async -> LockRoute {
+        if environment.isMock {
+            banners.post(.info, "Sample mode", message: "LivePaper would start the screen saver and lock now.")
+            return .sample
+        }
+        guard !isLocking else { return .failed }
+        isLocking = true
+        defer { isLocking = false }
+        if !installStatus.saverSelected {
+            banners.post(.warning, "LivePaper isn't your screen saver yet",
+                         message: "Locking will show the regular lock screen.",
+                         actions: [.init(title: "Set Up") { [weak self] in Task { await self?.makeLivePaperScreenSaver() } }])
+        }
+        if await environment.helperLock.requestLock(timeout: AppModel.helperLockTimeout) { return .helper }
+        do {
+            try await environment.startScreenSaver()
+            return .screenSaverEngine
+        } catch {
+            banners.error("Couldn't start the screen saver", error)
+            return .failed
         }
     }
+
+    /// How long "Lock Now" waits for the helper before starting the screen saver itself.
+    static let helperLockTimeout: TimeInterval = 1
 
     // MARK: - Install / system integration
 
     /// Everything setup and Settings show status for.
-    var setupState: SetupState { SetupState(install: installStatus, lockKeysShowScene: lockKeysShowScene) }
+    var setupState: SetupState { SetupState(install: installStatus) }
 
     func refreshInstallStatus() async {
         let install = services.install
         if let s = try? await offMain({ install.status() }) { installStatus = s }
-        // The user may have changed it with `defaults` or another tool meanwhile.
-        lockKeysShowScene = environment.lockTakeover.isEnabled
     }
 
     /// Installs (if needed) and selects the saver. Returns false when macOS needs the user to pick
@@ -509,42 +571,58 @@ final class AppModel {
         showOnboarding = false
     }
 
-    /// Runs the uninstall. The caller moves the app to the Trash and quits on success.
-    func uninstall(keepScenes: Bool) async -> Bool {
+    /// Runs every uninstall step and returns the step log (the sheet shows it). On success the
+    /// caller moves the app to the Trash and quits; with failures it offers to try again, which
+    /// skips the steps that already finished.
+    func uninstall(keepScenes: Bool) async -> UninstallReport {
         isInstallBusy = true
         defer { isInstallBusy = false }
         let install = services.install
         for s in sessions where s.isRunning { s.cancel() }
-        do {
-            // LivePaper changed the lock keys itself, so it restores them itself.
-            try environment.lockTakeover.restore()
-            lockKeysShowScene = environment.lockTakeover.isEnabled
-            try await offMain { try install.uninstall(removeLibrary: !keepScenes) }
+        let steps = (try? await offMain { install.performUninstall(removeLibrary: !keepScenes) }) ?? []
+        let report = UninstallReport.make(steps)
+        await refreshInstallStatus()
+        if report.succeeded {
             environment.defaults.removeObject(forKey: AppEnvironment.onboardingCompletedKey)
-            return true
-        } catch {
-            banners.error("Uninstall didn't finish", error) { [weak self] in
-                Task { _ = await self?.uninstall(keepScenes: keepScenes) }
-            }
-            await refreshInstallStatus()
-            return false
+            // state.json survives when the scenes are kept; don't leave it claiming the lock keys
+            // still show the scene (uninstall put the system preference back).
+            if keepScenes { syncLockKeysMirror() }
         }
+        return report
     }
 
     func uninstallPlan(keepScenes: Bool) -> UninstallPlan {
         UninstallPlan.make(keepScenes: keepScenes, userSceneCount: userEntries.count,
-                           restoresLockKeys: environment.lockTakeover.hasBackup, appBundlePath: environment.appBundlePath)
+                           restoresLockKeys: installStatus.lockKeysChangedByLivePaper, appBundlePath: environment.appBundlePath)
     }
 
     // MARK: - AI sessions
 
     /// Detected harnesses plus the user's custom command, if configured.
     var availableHarnesses: [AIHarness] {
-        harnesses + (aiPreferences.customHarness.map { [$0] } ?? [])
+        AIPreferences.availableHarnesses(detected: harnesses, settings: aiSettings)
     }
 
     var preferredHarness: AIHarness? {
-        AIPreferences.preferredHarness(in: availableHarnesses, preferredID: aiPreferences.defaultHarnessID)
+        AIPreferences.preferredHarness(in: availableHarnesses, preferredID: aiSettings.preferredHarness)
+    }
+
+    /// The model configured in Settings › AI for a harness (nil: the harness's own default).
+    func defaultModel(for harness: AIHarness?) -> String? {
+        harness.flatMap { aiSettings.model(for: $0.kind) }
+    }
+
+    private func saveAISettings() {
+        let settings = aiSettings
+        do {
+            try services.ai.saveSettings(settings)
+            aiSettingsSaveFailed = false
+        } catch {
+            // Settings are edited keystroke by keystroke: report a failure once, not per key.
+            guard !aiSettingsSaveFailed else { return }
+            aiSettingsSaveFailed = true
+            banners.error("Couldn't save the AI settings", error)
+        }
     }
 
     var runningSessions: [AISessionModel] { sessions.filter(\.isRunning) }
@@ -559,13 +637,15 @@ final class AppModel {
         hasDetectedHarnesses = true
     }
 
-    /// Starts an AI session and navigates to it.
+    /// Starts an AI session and navigates to it. `model` nil = the default from Settings › AI.
     @discardableResult
     func startSession(_ request: AISessionRequest, harness: AIHarness, model: String?, clonedFrom: String? = nil) -> AISessionModel? {
+        let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let chosen = (trimmed?.isEmpty == false ? trimmed : nil) ?? defaultModel(for: harness)
         do {
-            let handle = try services.ai.start(request, harness: harness, model: model)
-            let session = AISessionModel(handle: handle, request: request, harness: harness, model: model,
-                                         timeout: aiPreferences.timeout, clonedFrom: clonedFrom)
+            let handle = try services.ai.start(request, harness: harness, model: chosen)
+            let session = AISessionModel(handle: handle, request: request, harness: harness, model: chosen,
+                                         timeout: aiSettings.timeout, clonedFrom: clonedFrom)
             sessions.insert(session, at: 0)
             session.start { [weak self] s in self?.sessionDidFinish(s) }
             section = .session(session.id)

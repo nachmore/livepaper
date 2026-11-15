@@ -117,7 +117,7 @@ private struct LockSettingsTab: View {
         let checks = SetupChecklist.checks(for: .lock, state: model.setupState)
         Form {
             Section {
-                Toggle(isOn: Binding(get: { model.lockKeysShowScene }, set: { model.setLockKeysShowScene($0) })) {
+                Toggle(isOn: Binding(get: { model.lockKeysShowScene }, set: { on in Task { await model.setLockKeysShowScene(on) } })) {
                     Text("Use \u{2303}\u{2318}Q and the lock key for LivePaper lock")
                     Text("Also Apple menu \u{203A} Lock Screen. Your Mac starts the scene, then locks.")
                 }
@@ -146,7 +146,9 @@ private struct LockSettingsTab: View {
                     HStack {
                         SetupCheckRow(check: check)
                         Spacer()
-                        if check.state == .needed {
+                        if model.setupState.helperNeedsApproval {
+                            Button("Open Login Items\u{2026}") { SystemActions.openLoginItemsSettings() }
+                        } else if check.state == .needed {
                             Button("Start Helper") { Task { await model.registerHelper() } }
                                 .disabled(model.isInstallBusy)
                         }
@@ -212,10 +214,9 @@ private struct AISettingsTab: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        @Bindable var model = model
         Form {
             Section {
-                Picker("Default agent", selection: $model.aiPreferences.defaultHarnessID) {
+                Picker("Default agent", selection: binding(\.preferredHarness)) {
                     Text("First available").tag(String?.none)
                     ForEach(model.availableHarnesses) { Text($0.uiTitle).tag(Optional($0.id)) }
                 }
@@ -223,9 +224,14 @@ private struct AISettingsTab: View {
                     Text("No AI command-line tools were found on your PATH. Install Claude Code, Codex or Kiro CLI, or add a custom command below.")
                         .font(.callout).foregroundStyle(.secondary)
                 }
-                ForEach(model.harnesses) { harness in
-                    LabeledContent(harness.uiTitle, value: LPFormat.abbreviatingHome(harness.executable))
-                        .font(.callout)
+                ForEach(model.harnesses.filter { $0.kind != .custom }) { harness in
+                    LabeledContent {
+                        TextField("Model", text: modelBinding(harness.kind), prompt: Text("Default model"))
+                            .frame(maxWidth: 200)
+                    } label: {
+                        Text(harness.uiTitle)
+                        Text(LPFormat.abbreviatingHome(harness.executable))
+                    }
                 }
                 HStack {
                     Button("Look Again") { Task { await model.detectHarnesses() } }
@@ -234,34 +240,51 @@ private struct AISettingsTab: View {
                 }
             } header: {
                 Text("Agents")
+            } footer: {
+                Text("The model is passed to the agent unless you pick another one when starting a session. Leave it empty for the agent\u{2019}s own default.")
+                    .font(.callout).foregroundStyle(.secondary)
             }
             Section {
-                TextField("Model", text: $model.aiPreferences.model, prompt: Text("Agent default"))
-                Picker("Time limit", selection: $model.aiPreferences.timeoutMinutes) {
-                    ForEach(AIPreferences.timeoutChoices, id: \.self) { Text("\($0) minutes").tag($0) }
+                Picker("Time limit", selection: binding(\.timeoutMinutes)) {
+                    ForEach(AIPreferences.timeoutChoices(including: model.aiSettings.timeoutMinutes), id: \.self) {
+                        Text("\($0) minutes").tag($0)
+                    }
                 }
             } header: {
-                Text("Defaults")
+                Text("Sessions")
             } footer: {
                 Text("A session that runs longer than the time limit is stopped.")
                     .font(.callout).foregroundStyle(.secondary)
             }
             Section {
-                TextField("Command", text: $model.aiPreferences.customCommand,
+                let template = model.aiSettings.customTemplate ?? ""
+                TextField("Command", text: Binding(get: { template },
+                                                   set: { model.aiSettings.customTemplate = $0.isEmpty ? nil : $0 }),
                           prompt: Text("mytool --prompt-file {prompt_file} --cwd {workspace}"))
                     .font(.body.monospaced())
-                if let problem = AIPreferences.customCommandProblem(model.aiPreferences.customCommand) {
+                TextField("Model", text: modelBinding(.custom), prompt: Text("Fills {model}; optional"))
+                if let problem = AIPreferences.customCommandProblem(template) {
                     Label(problem, systemImage: "exclamationmark.triangle.fill").foregroundStyle(.orange)
                 }
             } header: {
                 Text("Custom command")
             } footer: {
-                Text("Runs in the session workspace. Placeholders: \(AIPreferences.placeholders.joined(separator: " ")).")
+                Text("Runs in the session workspace with the task on standard input. Placeholders: \(AIPreferences.placeholders.joined(separator: " ")).")
                     .font(.callout).foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
         .frame(minHeight: 500)
+    }
+
+    /// Edits one field of the stored AI settings (saved through AIServicing on every change).
+    private func binding<T>(_ keyPath: WritableKeyPath<AISettings, T>) -> Binding<T> {
+        Binding(get: { model.aiSettings[keyPath: keyPath] }, set: { model.aiSettings[keyPath: keyPath] = $0 })
+    }
+
+    private func modelBinding(_ kind: AIHarness.Kind) -> Binding<String> {
+        Binding(get: { model.aiSettings.models[kind.rawValue] ?? "" },
+                set: { model.aiSettings.models[kind.rawValue] = $0.isEmpty ? nil : $0 })
     }
 }
 
@@ -326,10 +349,75 @@ struct UninstallSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var keepScenes = true
     @State private var running = false
+    /// The step log of the last run; nil until Uninstall is pressed.
+    @State private var report: UninstallReport?
+
+    /// `report` lets the snapshot harness show the log state.
+    init(report: UninstallReport? = nil) {
+        _report = State(initialValue: report)
+    }
 
     var body: some View {
-        let plan = model.uninstallPlan(keepScenes: keepScenes)
         VStack(alignment: .leading, spacing: 16) {
+            if let report {
+                ResultView(report: report)
+            } else {
+                PlanView(plan: model.uninstallPlan(keepScenes: keepScenes))
+                Toggle("Keep my scenes", isOn: $keepScenes)
+                    .toggleStyle(.checkbox)
+                    .disabled(running)
+            }
+            HStack {
+                if running {
+                    ProgressView().controlSize(.small)
+                    Text("Uninstalling\u{2026}").foregroundStyle(.secondary)
+                }
+                Spacer()
+                buttons
+            }
+        }
+        .padding(22)
+        .frame(width: 520)
+    }
+
+    @ViewBuilder
+    private var buttons: some View {
+        if let report, report.succeeded {
+            Button(model.environment.appBundlePath == nil ? "Done" : "Move to Trash and Quit") {
+                dismiss()
+                SystemActions.moveAppToTrashAndQuit(model)
+            }
+            .keyboardShortcut(.defaultAction)
+        } else if report != nil {
+            Button("Close", role: .cancel) { dismiss() }
+                .keyboardShortcut(.cancelAction)
+                .disabled(running)
+            Button("Try Again", action: uninstall)
+                .keyboardShortcut(.defaultAction)
+                .disabled(running)
+        } else {
+            Button("Cancel", role: .cancel) { dismiss() }
+                .keyboardShortcut(.cancelAction)
+                .disabled(running)
+            Button("Uninstall", role: .destructive, action: uninstall)
+                .disabled(running)
+        }
+    }
+
+    private func uninstall() {
+        running = true
+        let keep = keepScenes
+        Task {
+            report = await model.uninstall(keepScenes: keep)
+            running = false
+        }
+    }
+
+    /// Before: exactly what will happen.
+    private struct PlanView: View {
+        let plan: UninstallPlan
+
+        var body: some View {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "trash.circle.fill")
                     .font(.system(size: 34))
@@ -343,8 +431,8 @@ struct UninstallSheet: View {
             VStack(alignment: .leading, spacing: 10) {
                 ForEach(plan.items) { item in
                     HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        Image(systemName: symbol(item.action))
-                            .foregroundStyle(tint(item.action))
+                        Image(systemName: Self.symbol(item.action))
+                            .foregroundStyle(Self.tint(item.action))
                             .frame(width: 18)
                         VStack(alignment: .leading, spacing: 1) {
                             Text(item.title)
@@ -358,52 +446,91 @@ struct UninstallSheet: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .card(cornerRadius: 10)
-            Toggle("Keep my scenes", isOn: $keepScenes)
-                .toggleStyle(.checkbox)
-                .disabled(running)
-            HStack {
-                if running {
-                    ProgressView().controlSize(.small)
-                    Text("Uninstalling\u{2026}").foregroundStyle(.secondary)
+        }
+
+        static func symbol(_ a: UninstallPlan.Item.Action) -> String {
+            switch a {
+            case .remove: return "minus.circle.fill"
+            case .restore: return "arrow.uturn.backward.circle.fill"
+            case .keep: return "checkmark.circle.fill"
+            }
+        }
+
+        static func tint(_ a: UninstallPlan.Item.Action) -> Color {
+            switch a {
+            case .remove: return .red
+            case .restore: return .blue
+            case .keep: return .green
+            }
+        }
+    }
+
+    /// After: the step log from InstallServicing.performUninstall.
+    private struct ResultView: View {
+        let report: UninstallReport
+
+        var body: some View {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: report.succeeded ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                    .font(.system(size: 34))
+                    .foregroundStyle(report.succeeded ? Color.green : Color.orange)
+                    .accessibilityHidden(true)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(report.succeeded ? "LivePaper was uninstalled" : "Uninstall didn\u{2019}t finish")
+                        .font(.title3.weight(.semibold))
+                    Text(report.summary).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-                Spacer()
-                Button("Cancel", role: .cancel) { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                    .disabled(running)
-                Button("Uninstall", role: .destructive, action: uninstall)
-                    .disabled(running)
+            }
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(report.rows) { row in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: Self.symbol(row.state))
+                            .foregroundStyle(Self.tint(row.state))
+                            .frame(width: 18)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(row.title)
+                                .foregroundStyle(row.state == .skipped ? .secondary : .primary)
+                            if let detail = row.detail {
+                                Text(detail).font(.callout)
+                                    .foregroundStyle(row.state == .failed ? Color.red : .secondary)
+                                    .textSelection(.enabled)
+                            }
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityValue(Self.label(row.state))
+                }
+            }
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .card(cornerRadius: 10)
+        }
+
+        static func symbol(_ s: UninstallReport.Row.State) -> String {
+            switch s {
+            case .done: return "checkmark.circle.fill"
+            case .skipped: return "minus.circle"
+            case .failed: return "xmark.octagon.fill"
+            case .planned: return "circle.dashed"
             }
         }
-        .padding(22)
-        .frame(width: 520)
-    }
 
-    private func uninstall() {
-        running = true
-        let keep = keepScenes
-        Task {
-            let ok = await model.uninstall(keepScenes: keep)
-            running = false
-            if ok {
-                dismiss()
-                SystemActions.moveAppToTrashAndQuit(model)
+        static func tint(_ s: UninstallReport.Row.State) -> Color {
+            switch s {
+            case .done: return .green
+            case .skipped, .planned: return .secondary
+            case .failed: return .red
             }
         }
-    }
 
-    private func symbol(_ a: UninstallPlan.Item.Action) -> String {
-        switch a {
-        case .remove: return "minus.circle.fill"
-        case .restore: return "arrow.uturn.backward.circle.fill"
-        case .keep: return "checkmark.circle.fill"
-        }
-    }
-
-    private func tint(_ a: UninstallPlan.Item.Action) -> Color {
-        switch a {
-        case .remove: return .red
-        case .restore: return .blue
-        case .keep: return .green
+        static func label(_ s: UninstallReport.Row.State) -> String {
+            switch s {
+            case .done: return "Done"
+            case .skipped: return "Skipped"
+            case .failed: return "Failed"
+            case .planned: return "Planned"
+            }
         }
     }
 }

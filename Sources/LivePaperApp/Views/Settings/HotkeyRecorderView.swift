@@ -90,10 +90,6 @@ struct HotkeyRecorderView: View {
 @MainActor
 @Observable
 final class RecorderSession {
-    /// Posted (distributed) when recording starts/stops so the helper can suspend its own hotkey;
-    /// otherwise pressing the current shortcut to re-record it would lock the screen.
-    static let recordingNotification = "com.nachmore.livepaper.hotkeyRecording"
-
     private(set) var isRecording = false
     private(set) var heldModifiers: [LPHotkey.Modifier] = []
     private(set) var message: String?
@@ -151,9 +147,12 @@ final class RecorderSession {
         announce(false)
     }
 
+    /// LPNotification.hotkeyRecording (distributed) when recording starts/stops, so the helper
+    /// suspends its own hotkey meanwhile; otherwise pressing the current shortcut to re-record it
+    /// would lock the screen. deliverImmediately: the helper is a background agent.
     private func announce(_ active: Bool) {
         DistributedNotificationCenter.default().postNotificationName(
-            .init(RecorderSession.recordingNotification), object: nil,
-            userInfo: ["active": active], deliverImmediately: true)
+            .init(LPNotification.hotkeyRecording), object: nil,
+            userInfo: [LPNotification.activeKey: active], deliverImmediately: true)
     }
 }

@@ -7,16 +7,6 @@
 import Foundation
 import ServiceManagement
 
-/// Registration state of a login item, mirroring SMAppService.Status.
-public enum LoginItemStatus: String, Sendable, Equatable {
-    case notRegistered
-    case enabled
-    /// Registered, but the user has to allow it in System Settings › Login Items.
-    case requiresApproval
-    /// The agent plist isn't in the app bundle.
-    case notFound
-}
-
 /// The SMAppService side, behind a protocol so tests never register a real login item (which
 /// would also post a user-visible "background item added" notification).
 public protocol LoginItemRegistering: Sendable {

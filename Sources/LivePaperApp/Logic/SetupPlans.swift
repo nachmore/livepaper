@@ -5,18 +5,20 @@ import LivePaperCore
 
 // MARK: - Onboarding
 
-/// What setup looks at: InstallServicing's status plus the lock-key takeover, which the app manages
-/// itself (see LockTakeover.swift).
+/// What setup looks at: InstallServicing's status (which includes the lock keys).
 struct SetupState: Equatable, Sendable {
     var install: InstallStatus
+
+    init(install: InstallStatus = InstallStatus()) {
+        self.install = install
+    }
+
     /// `immediateLockLaunchesScreenSaver` is on: ⌃⌘Q, Apple menu › Lock Screen and the lock key
     /// start the scene before locking.
-    var lockKeysShowScene: Bool
+    var lockKeysShowScene: Bool { install.lockKeysShowScene }
 
-    init(install: InstallStatus = InstallStatus(), lockKeysShowScene: Bool = false) {
-        self.install = install
-        self.lockKeysShowScene = lockKeysShowScene
-    }
+    /// The helper is registered as a login item but macOS waits for the user to allow it.
+    var helperNeedsApproval: Bool { !install.helperRunning && install.helperLoginItem == .requiresApproval }
 }
 
 /// The onboarding pages. Every page is idempotent: it shows live status and only offers the
@@ -96,9 +98,12 @@ enum SetupChecklist {
                                : "Makes \u{2303}\u{2318}Q, Apple menu \u{203A} Lock Screen and the lock key start your scene before locking. No permissions needed.",
                            state: state.lockKeysShowScene ? .done : .needed),
                 SetupCheck(id: .password, title: "Password required immediately", detail: passwordDetail, state: passwordState),
-                SetupCheck(id: .helper, title: "LivePaper helper running",
-                           detail: s.helperRunning ? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle."
-                                                   : "A small login item for your own lock shortcut and the screen saver's \u{201C}Open LivePaper\u{201D} button.",
+                SetupCheck(id: .helper, title: state.helperNeedsApproval ? "LivePaper helper waiting for approval" : "LivePaper helper running",
+                           detail: s.helperRunning
+                               ? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle."
+                               : state.helperNeedsApproval
+                                   ? "Allow LivePaper in System Settings \u{203A} General \u{203A} Login Items."
+                                   : "A small login item for your own lock shortcut and the screen saver's \u{201C}Open LivePaper\u{201D} button.",
                            state: s.helperRunning ? .done : .needed),
             ]
         }
@@ -142,7 +147,7 @@ struct UninstallPlan: Equatable, Sendable {
     /// - Parameters:
     ///   - keepScenes: the "Keep my scenes" checkbox.
     ///   - userSceneCount: shown next to the library row so the user knows what they'd lose.
-    ///   - restoresLockKeys: LivePaper changed what the lock keys do (LockTakeover has a backup).
+    ///   - restoresLockKeys: LivePaper changed what the lock keys do (`InstallStatus.lockKeysChangedByLivePaper`).
     ///   - appBundlePath: the running .app, or nil when not running from a bundle (e.g. `swift run`).
     static func make(keepScenes: Bool, userSceneCount: Int, restoresLockKeys: Bool, appBundlePath: String?,
                      home: String = NSHomeDirectory()) -> UninstallPlan {
@@ -170,5 +175,44 @@ struct UninstallPlan: Equatable, Sendable {
                               detail: LPFormat.abbreviatingHome(app, home: home)))
         }
         return UninstallPlan(items: items)
+    }
+}
+
+/// The uninstall step log (InstallServicing.performUninstall) as the sheet shows it.
+struct UninstallReport: Equatable, Sendable {
+    struct Row: Identifiable, Equatable, Sendable {
+        enum State: Equatable, Sendable { case done, skipped, failed, planned }
+        let id: Int
+        /// The step, with the home folder shown as "~".
+        let title: String
+        /// Why it was skipped or failed.
+        let detail: String?
+        let state: State
+    }
+
+    let rows: [Row]
+
+    var failures: [Row] { rows.filter { $0.state == .failed } }
+    var succeeded: Bool { failures.isEmpty }
+
+    static func make(_ steps: [InstallStep], home: String = NSHomeDirectory()) -> UninstallReport {
+        let prefix = home.hasSuffix("/") ? home : home + "/"
+        let rows = steps.enumerated().map { i, step -> Row in
+            let title = step.title.replacingOccurrences(of: prefix, with: "~/")
+            switch step.outcome {
+            case .done: return Row(id: i, title: title, detail: nil, state: .done)
+            case .planned: return Row(id: i, title: title, detail: nil, state: .planned)
+            case .skipped(let why): return Row(id: i, title: title, detail: "Nothing to do: \(why).", state: .skipped)
+            case .failed(let why): return Row(id: i, title: title, detail: why, state: .failed)
+            }
+        }
+        return UninstallReport(rows: rows)
+    }
+
+    /// One line above the log.
+    var summary: String {
+        let n = failures.count
+        if n == 0 { return "LivePaper was removed and your previous settings are back." }
+        return (n == 1 ? "1 step" : "\(n) steps") + " didn\u{2019}t finish. Try again, or fix the problem below and retry; finished steps are skipped."
     }
 }

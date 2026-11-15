@@ -90,6 +90,8 @@ struct ScenePreview: View {
             "lowPower": power.lowPower,
             "clock": showClock && quality == .full && model.playlist.showClock,
             "reducedMotion": NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            // lp.env.preview: scenes may simplify for the app's small, short-lived previews.
+            "preview": true,
         ]
         if quality == .hover {
             cfg["fps"] = 30

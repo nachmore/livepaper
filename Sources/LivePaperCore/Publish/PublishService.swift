@@ -26,14 +26,6 @@ public enum PublishError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-/// Outcome of a publish, including scenes that were left out (the saver still gets the rest).
-public struct PublishResult: Sendable, Equatable {
-    public var playlist: LPPlaylist
-    /// Scene id → why it was skipped (compile error, missing video, …).
-    public var skipped: [String: String]
-    public init(playlist: LPPlaylist, skipped: [String: String]) { self.playlist = playlist; self.skipped = skipped }
-}
-
 public final class PublishService: PublishServicing, @unchecked Sendable {
     public static let settingsFileName = "playlist-settings.json"
     static let stagingName = "Playlist.new"
@@ -83,9 +75,7 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
         saverURL.appendingPathComponent("Contents/Resources").appendingPathComponent(LPPlaylist.directoryName)
     }
 
-    @discardableResult public func publish() throws -> LPPlaylist { try publishReport().playlist }
-
-    /// Like publish(), but also reports scenes that had to be skipped.
+    /// Publishes and reports scenes that had to be skipped (`publish()` is the short form).
     @discardableResult public func publishReport() throws -> PublishResult {
         // In-process lock + cross-process file lock: the app and `livepaper publish` may race.
         lock.lock(); defer { lock.unlock() }
@@ -161,6 +151,10 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
             let source = scene.packageURL.appendingPathComponent(video.file)
             guard FileOps.isRegularFile(source) else { throw LibraryError.invalid("\(scene.id): \(video.file) is missing.") }
             let ext = source.pathExtension.isEmpty ? "mov" : source.pathExtension.lowercased()
+            // The saver drops entries it can't play; say so here, where the user can act on it.
+            guard LPPlaylistEntry.videoExtensions.contains(ext) else {
+                throw LibraryError.invalid("\(scene.id): the screen saver can't play .\(ext) files. Import the video again to convert it.")
+            }
             let file = "\(scene.id).\(ext)"
             try FileOps.hardLinkOrCopy(from: source, to: staging.appendingPathComponent(file))
             return LPPlaylistEntry(id: scene.id, name: m.name, kind: .video, file: file, clock: m.clock.position, fit: video.fit)

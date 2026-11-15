@@ -5,7 +5,6 @@
 // CommandRunning, so the whole service runs against temp directories with recorded commands. In
 // dry-run mode nothing is written and no command that changes anything is run; each step is only
 // recorded in `transcript`.
-import ApplicationServices
 import Darwin
 import Foundation
 import os
@@ -75,21 +74,6 @@ public enum InstallError: Error, LocalizedError, Sendable, Equatable {
     }
 }
 
-/// One logged installer step.
-public struct InstallStep: Sendable, Equatable {
-    public enum Outcome: Sendable, Equatable {
-        case done
-        /// Dry run: would have been done.
-        case planned
-        /// Nothing to do (already in the desired state).
-        case skipped(String)
-        case failed(String)
-    }
-    public var title: String
-    public var outcome: Outcome
-    public init(title: String, outcome: Outcome) { self.title = title; self.outcome = outcome }
-}
-
 /// A preference LivePaper changed, with the value to put back on uninstall.
 public struct DefaultsChange: Codable, Sendable, Equatable {
     public var domain: String
@@ -126,7 +110,6 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     private let runner: CommandRunning
     private let loginItem: LoginItemRegistering
     private let preferences: PreferencesAccessing
-    private let accessibility: @Sendable () -> Bool
     private let uid: uid_t
     private let osMajorVersion: Int
     private let store: WallpaperStore
@@ -137,13 +120,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// - Parameters:
     ///   - publisher: publishes content after installSaver (nil: don't publish).
     ///   - dryRun: record every step instead of performing it.
-    ///   - accessibility: whether this process is trusted for Accessibility (AXIsProcessTrusted).
     public init(paths: InstallPaths = .current(), publisher: PublishServicing?, runner: CommandRunning = SystemCommandRunner(),
                 loginItem: LoginItemRegistering = SMAppServiceAgent(), preferences: PreferencesAccessing = SystemPreferences(),
-                dryRun: Bool = false, accessibility: @escaping @Sendable () -> Bool = { AXIsProcessTrusted() },
+                dryRun: Bool = false,
                 uid: uid_t = getuid(), osMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) {
         self.paths = paths; self.publisher = publisher; self.runner = runner; self.loginItem = loginItem
-        self.preferences = preferences; self.dryRun = dryRun; self.accessibility = accessibility; self.uid = uid
+        self.preferences = preferences; self.dryRun = dryRun; self.uid = uid
         self.osMajorVersion = osMajorVersion
         self.store = WallpaperStore(url: paths.wallpaperStore)
     }
@@ -171,9 +153,11 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             saverUpToDate: installed && (templateVersion == nil || installedVersion == templateVersion),
             saverSelected: store.isSelected(),
             helperRunning: launchctl.map(SystemProbes.helperRunning) ?? false,
+            helperLoginItem: loginItem.status,
             passwordImmediately: SystemProbes.passwordImmediately(sysadminctlOutput: sysadminctl?.combinedOutput, managed: managed),
-            accessibilityTrusted: accessibility(),
-            managedByMDM: SystemProbes.isManaged(managed))
+            managedByMDM: SystemProbes.isManaged(managed),
+            lockKeysShowScene: lockKeysShowScene,
+            lockKeysChangedByLivePaper: loadDefaultsChanges().contains(where: Self.isLockKeysChange))
     }
 
     // MARK: - Saver
@@ -335,10 +319,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                              : "x-apple.systempreferences:com.apple.ScreenSaver-Settings.extension"
     }
 
-    public static let accessibilitySettingsURL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
-
     public func openScreenSaverSettings() { openURL(screenSaverSettingsURL) }
-    public func openAccessibilitySettings() { openURL(Self.accessibilitySettingsURL) }
 
     /// Core doesn't link AppKit, so NSWorkspace isn't available: /usr/bin/open does the same.
     private func openURL(_ url: String) {
@@ -372,9 +353,10 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     /// Puts one preference changed with `changeSystemDefault` back to its value from before
     /// LivePaper and forgets the backup. No-op if LivePaper never changed it.
-    public func restoreSystemDefault(domain: String, key: String, currentHost: Bool = false) throws {
+    /// - Parameter title: the step's title in the transcript (default "Restore <domain> <key>").
+    public func restoreSystemDefault(domain: String, key: String, currentHost: Bool = false, title: String? = nil) throws {
         let matches = { (c: DefaultsChange) in c.domain == domain && c.key == key && c.currentHost == currentHost }
-        try perform("Restore \(domain) \(key)", skipIf: { loadDefaultsChanges().contains(where: matches) ? nil : "not changed by LivePaper" }) {
+        try perform(title ?? "Restore \(domain) \(key)", skipIf: { loadDefaultsChanges().contains(where: matches) ? nil : "not changed by LivePaper" }) {
             var changes = loadDefaultsChanges()
             guard let index = changes.firstIndex(where: matches) else { return "not changed by LivePaper" }
             guard preferences.set(Self.previousValue(changes[index]), domain: domain, key: key, currentHost: currentHost) else {
@@ -386,30 +368,49 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
     }
 
-    // MARK: - Lock takeover (ARCHITECTURE §7)
+    // MARK: - Lock keys (ARCHITECTURE §1, §7)
 
     /// With this loginwindow preference on, ⌃⌘Q, the Apple-menu Lock Screen item and the Touch ID /
     /// lock key start the screen saver before locking, so the lock screen shows the scene. It is a
-    /// plain user preference (no permissions needed); loginwindow picks it up without a logout.
-    public static let lockTakeoverDomain = "com.apple.loginwindow"
-    public static let lockTakeoverKey = "immediateLockLaunchesScreenSaver"
+    /// plain user preference (no permissions needed); loginwindow picks it up without a logout and
+    /// still locks if the saver can't run. Lid-close and display-sleep locks aren't affected.
+    public static let lockKeysDomain = "com.apple.loginwindow"
+    public static let lockKeysKey = "immediateLockLaunchesScreenSaver"
 
-    public var systemLockTakeoverEnabled: Bool {
-        (preferences.value(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey, currentHost: false) as? NSNumber)?.boolValue == true
+    /// Whether the lock keys currently show the scene (the live preference, whoever set it).
+    public var lockKeysShowScene: Bool {
+        (preferences.value(domain: Self.lockKeysDomain, key: Self.lockKeysKey, currentHost: false) as? NSNumber)?.boolValue == true
     }
 
-    /// On: sets the preference (remembering the previous value for uninstall). Off: restores the
-    /// value from before LivePaper, and turns it off explicitly if that was "on".
-    public func setSystemLockTakeover(_ enabled: Bool) throws {
-        if enabled {
-            try changeSystemDefault(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey, to: true)
+    /// On: sets the preference, remembering the value from before LivePaper's first change for
+    /// uninstall. Off: restores that value, and turns it off explicitly if it was "on" (the backup
+    /// then keeps "on" so uninstall leaves the Mac as LivePaper found it).
+    public func setLockKeysShowScene(_ on: Bool) throws {
+        if on {
+            try changeSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, to: true)
             return
         }
-        try restoreSystemDefault(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey)
-        if systemLockTakeoverEnabled {
-            try changeSystemDefault(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey, to: false)
+        try restoreSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey)
+        if lockKeysShowScene {
+            try changeSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, to: false)
         }
     }
+
+    /// Title of the uninstall step that puts the lock keys back.
+    public static let restoreLockKeysTitle = "Restore what \u{2303}\u{2318}Q and the lock key do"
+
+    private static func isLockKeysChange(_ c: DefaultsChange) -> Bool {
+        c.domain == lockKeysDomain && c.key == lockKeysKey && !c.currentHost
+    }
+
+    @available(*, deprecated, renamed: "lockKeysDomain")
+    public static var lockTakeoverDomain: String { lockKeysDomain }
+    @available(*, deprecated, renamed: "lockKeysKey")
+    public static var lockTakeoverKey: String { lockKeysKey }
+    @available(*, deprecated, renamed: "lockKeysShowScene")
+    public var systemLockTakeoverEnabled: Bool { lockKeysShowScene }
+    @available(*, deprecated, renamed: "setLockKeysShowScene(_:)")
+    public func setSystemLockTakeover(_ enabled: Bool) throws { try setLockKeysShowScene(enabled) }
 
     private static func previousValue(_ change: DefaultsChange) -> Any? {
         change.previous.flatMap { (try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any])?["value"] }
@@ -446,13 +447,14 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     /// Runs every uninstall step (continuing past failures; each step is idempotent, so running
     /// uninstall again retries what failed) and returns what happened. In a dry run nothing
-    /// changes: steps with something to do are `.planned`, the rest `.skipped`.
+    /// changes: steps with something to do are `.planned`, the rest `.skipped`. The lock keys are
+    /// restored with the other changed preferences (step 3).
     @discardableResult public func performUninstall(removeLibrary: Bool) -> [InstallStep] {
         let start = transcript.count
         let fm = FileManager.default
         // 1. The helper first, so nothing restarts the saver or reacts to the changes below.
         attempt { try unregisterHelper() }
-        // 2. The previous screen-saver choice, then 3. any other preference LivePaper changed.
+        // 2. The previous screen-saver choice, 3. the lock keys, 4. any other preference LivePaper changed.
         attempt {
             try perform("Restore the previous screen saver choice",
                         skipIf: { FileOps.entryExists(paths.wallpaperStoreBackup) ? nil : "LivePaper didn't change it" }) {
@@ -460,13 +462,14 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 return nil
             }
         }
+        attempt { try restoreSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, title: Self.restoreLockKeysTitle) }
         attempt {
             try perform("Restore changed system settings", skipIf: { loadDefaultsChanges().isEmpty ? "nothing changed" : nil }) {
                 try restoreDefaults()
                 return nil
             }
         }
-        // 4. The saver bundle (renamed first so it leaves the screen-saver list atomically).
+        // 5. The saver bundle (renamed first so it leaves the screen-saver list atomically).
         attempt {
             try perform("Remove \(paths.installedSaver.path)",
                         skipIf: { FileOps.entryExists(paths.installedSaver) ? nil : "not installed" }) {
@@ -476,7 +479,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 return nil
             }
         }
-        // 5. LivePaper's data. Backups survive a failed restore so a second uninstall can retry it.
+        // 6. LivePaper's data. Backups survive a failed restore so a second uninstall can retry it.
         let restoreFailed = transcript.dropFirst(start).contains { if case .failed = $0.outcome { return true }; return false }
         var kept = removeLibrary ? Set<String>() : Self.keptWithLibrary
         if restoreFailed { kept.insert(paths.backups.lastPathComponent) }
@@ -496,14 +499,6 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             }
         }
         return Array(transcript.dropFirst(start))
-    }
-
-    public func uninstall(removeLibrary: Bool) throws {
-        let failed = performUninstall(removeLibrary: removeLibrary).compactMap { step -> String? in
-            if case .failed(let why) = step.outcome { return "\(step.title): \(why)" }
-            return nil
-        }
-        if !failed.isEmpty { throw InstallError.uninstallIncomplete(failed) }
     }
 
     // MARK: - Step bookkeeping

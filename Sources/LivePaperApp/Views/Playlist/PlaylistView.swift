@@ -12,6 +12,7 @@ struct PlaylistView: View {
 
     var body: some View {
         Form {
+            skippedSection
             scenesSection
             playbackSection
             performanceSection
@@ -32,6 +33,43 @@ struct PlaylistView: View {
     }
 
     private var available: [String] { model.availableSceneIDs }
+
+    // MARK: skipped scenes
+
+    /// Scenes the last publish had to leave out (PublishResult.skipped): the saver plays the rest.
+    @ViewBuilder
+    private var skippedSection: some View {
+        if let result = model.lastPublishResult, !result.skipped.isEmpty {
+            Section {
+                ForEach(result.skippedScenes) { skipped in
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(model.sceneNames[skipped.id] ?? skipped.id)
+                            Text(skipped.reason)
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer()
+                        if model.entry(id: skipped.id) != nil {
+                            Button("Show") { model.showScene(skipped.id) }
+                                .controlSize(.small)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                }
+            } header: {
+                Text("Left out of the screen saver")
+            } footer: {
+                Text("The screen saver plays the other scenes. Fix these scenes, then publish again.")
+                    .font(.callout).foregroundStyle(.secondary)
+            }
+        }
+    }
 
     // MARK: scenes
 
@@ -155,8 +193,10 @@ struct PlaylistView: View {
 
     private var statusText: String {
         if hasChanges { return "Unsaved changes \u{2014} " + PlaylistDraft.summary(draft.settings, available: available, names: model.sceneNames) }
-        if let published = model.lastPublished {
-            return "Published \u{00B7} " + (published.scenes.count == 1 ? "1 scene" : "\(published.scenes.count) scenes")
+        if let result = model.lastPublishResult {
+            let n = result.playlist.scenes.count
+            let left = result.skipped.count
+            return "Published \u{00B7} " + (n == 1 ? "1 scene" : "\(n) scenes") + (left > 0 ? " \u{00B7} \(left) left out" : "")
         }
         return model.playlistSummary
     }

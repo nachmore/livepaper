@@ -8,6 +8,7 @@ import LivePaperCore
 final class MockAIService: AIServicing, @unchecked Sendable {
     private let library: MockLibraryService
     private let workspaces: URL
+    private let settingsURL: URL
     private let pace: Double
     /// Snapshot/test hook: sessions stop after this many scripted steps and keep "running" until
     /// cancelled, which freezes the UI in its mid-session state.
@@ -16,7 +17,19 @@ final class MockAIService: AIServicing, @unchecked Sendable {
     init(library: MockLibraryService, workspaces: URL, pace: Double) {
         self.library = library
         self.workspaces = workspaces
+        settingsURL = workspaces.deletingLastPathComponent().appendingPathComponent("ai-settings.json")
         self.pace = pace
+    }
+
+    func loadSettings() -> AISettings {
+        guard let data = try? Data(contentsOf: settingsURL),
+              let s = try? JSONDecoder().decode(AISettings.self, from: data) else { return AISettings() }
+        return s
+    }
+
+    func saveSettings(_ settings: AISettings) throws {
+        try FileManager.default.createDirectory(at: settingsURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(settings).write(to: settingsURL, options: .atomic)
     }
 
     func detectHarnesses() async -> [AIHarness] {

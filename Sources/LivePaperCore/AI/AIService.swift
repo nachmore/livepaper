@@ -1,40 +1,7 @@
 // AIService — AIServicing: detects harnesses, builds session workspaces and starts AISessions.
+// Settings (AISettings, ServiceProtocols.swift) live in <support>/ai-settings.json.
 import Foundation
 import os
-
-/// AI preferences (Settings › AI), persisted as JSON in the support directory.
-public struct AISettings: Codable, Sendable, Equatable {
-    public static let defaultTimeoutMinutes = 20
-
-    /// `AIHarness.id` of the harness the user picked last.
-    public var preferredHarness: String?
-    /// Harness kind (`AIHarness.Kind.rawValue`) → model name. Missing = the harness's default.
-    public var models: [String: String]
-    /// Harness kind → extra command-line options (advanced; e.g. a cheaper reasoning effort).
-    public var extraArguments: [String: [String]]
-    /// The user-defined command template (`AIHarness.customTemplate`), if any.
-    public var customTemplate: String?
-    public var timeoutMinutes: Int
-
-    public init(preferredHarness: String? = nil, models: [String: String] = [:], extraArguments: [String: [String]] = [:],
-                customTemplate: String? = nil, timeoutMinutes: Int = AISettings.defaultTimeoutMinutes) {
-        self.preferredHarness = preferredHarness; self.models = models; self.extraArguments = extraArguments
-        self.customTemplate = customTemplate; self.timeoutMinutes = timeoutMinutes
-    }
-
-    // Tolerant decoding: settings written by other versions must not reset everything.
-    public init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        preferredHarness = try? c.decodeIfPresent(String.self, forKey: .preferredHarness)
-        models = (try? c.decodeIfPresent([String: String].self, forKey: .models)) ?? [:]
-        extraArguments = (try? c.decodeIfPresent([String: [String]].self, forKey: .extraArguments)) ?? [:]
-        customTemplate = try? c.decodeIfPresent(String.self, forKey: .customTemplate)
-        timeoutMinutes = (try? c.decodeIfPresent(Int.self, forKey: .timeoutMinutes)) ?? AISettings.defaultTimeoutMinutes
-    }
-
-    /// The session timeout, clamped to 1 minute … 4 hours.
-    public var timeout: TimeInterval { TimeInterval(min(max(timeoutMinutes, 1), 240)) * 60 }
-}
 
 public final class AIService: AIServicing, @unchecked Sendable {
     public static let settingsFileName = "ai-settings.json"
@@ -82,8 +49,7 @@ public final class AIService: AIServicing, @unchecked Sendable {
 
     /// A harness for the user's custom command template (Settings › AI › Custom).
     public static func customHarness(template: String, name: String = "Custom command") -> AIHarness {
-        let program = (try? CommandTemplate.tokenize(template))?.first ?? template
-        return AIHarness(kind: .custom, name: name, executable: program, customTemplate: template)
+        AIHarness.custom(template: template, name: name)
     }
 
     // MARK: - AIServicing

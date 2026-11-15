@@ -233,6 +233,9 @@ final class MockPublishService: PublishServicing, @unchecked Sendable {
     private var generation = 0
     /// Test hook: the next publish throws.
     var failNextPublish = false
+    /// Test/snapshot hook: scene id → reason; those scenes are left out like a real publish
+    /// leaves out scenes that don't compile.
+    var simulatedSkips: [String: String] = [:]
 
     struct PublishFailed: LocalizedError {
         var errorDescription: String? { "The screen saver bundle is busy (simulated failure)." }
@@ -254,15 +257,18 @@ final class MockPublishService: PublishServicing, @unchecked Sendable {
         try JSONEncoder().encode(s).write(to: settingsURL, options: .atomic)
     }
 
-    func publish() throws -> LPPlaylist {
+    func publishReport() throws -> PublishResult {
         if pace > 0 { Thread.sleep(forTimeInterval: 0.4 * pace) }
         lock.lock(); defer { lock.unlock() }
         if failNextPublish { failNextPublish = false; throw PublishFailed() }
         let s = loadSettings()
         let scenes = try library.scenes()
         let byID = Dictionary(scenes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        let ids = PlaylistDraft(s).effectiveSceneIDs(available: scenes.map(\.id))
-        guard !ids.isEmpty else { throw LibraryError.invalid("there are no scenes to publish") }
+        let chosen = PlaylistDraft(s).effectiveSceneIDs(available: scenes.map(\.id))
+        guard !chosen.isEmpty else { throw PublishError.noScenes }
+        let skipped = simulatedSkips.filter { chosen.contains($0.key) }
+        let ids = chosen.filter { skipped[$0] == nil }
+        guard !ids.isEmpty else { throw PublishError.nothingPublishable(skipped.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }) }
         generation += 1
         let entries: [LPPlaylistEntry] = ids.compactMap { id in
             guard let m = byID[id]?.manifest else { return nil }
@@ -271,8 +277,9 @@ final class MockPublishService: PublishServicing, @unchecked Sendable {
                                   clock: m.clock.position, fit: m.video?.fit)
                 : LPPlaylistEntry(id: id, name: m.name, kind: .web, file: "\(id).html", clock: m.clock.position)
         }
-        return LPPlaylist(generation: generation, mode: s.mode, cycleMinutes: s.cycleMinutes, showClock: s.showClock,
-                          performance: s.performance, scenes: entries)
+        let playlist = LPPlaylist(generation: generation, mode: s.mode, cycleMinutes: s.cycleMinutes, showClock: s.showClock,
+                                  performance: s.performance, scenes: entries)
+        return PublishResult(playlist: playlist, skipped: skipped)
     }
 }
 
@@ -282,10 +289,12 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     private let lock = NSLock()
     private var current: InstallStatus
     private var selectAttempts = 0
+    /// The lock-keys value from before LivePaper's first change (what uninstall restores).
+    private var lockKeysBefore = false
+    /// Test hook: uninstall steps whose title contains this fail (and leave their part in place).
+    var failingUninstallStep: String?
 
-    init(status: InstallStatus = InstallStatus(saverInstalled: false, saverUpToDate: false, saverSelected: false,
-                                                helperRunning: false, passwordImmediately: false,
-                                                accessibilityTrusted: false, managedByMDM: false)) {
+    init(status: InstallStatus = InstallStatus()) {
         current = status
     }
 
@@ -305,11 +314,53 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
         return current.saverSelected
     }
 
-    func registerHelper() throws { mutate { $0.helperRunning = true; $0.passwordImmediately = true } }
-    func unregisterHelper() throws { mutate { $0.helperRunning = false } }
+    func registerHelper() throws { mutate { $0.helperRunning = true; $0.helperLoginItem = .enabled; $0.passwordImmediately = true } }
+    func unregisterHelper() throws { mutate { $0.helperRunning = false; $0.helperLoginItem = .notRegistered } }
     func openScreenSaverSettings() { mutate { $0.saverSelected = $0.saverInstalled } }
-    func openAccessibilitySettings() { mutate { $0.accessibilityTrusted = true } }
-    func uninstall(removeLibrary: Bool) throws { mutate { $0 = InstallStatus() } }
+
+    /// Same backup semantics as InstallService: the value from before the first change is kept
+    /// until it is restored (turning it off) or uninstall puts it back.
+    func setLockKeysShowScene(_ on: Bool) throws {
+        mutate { s in
+            if on {
+                if !s.lockKeysChangedByLivePaper { lockKeysBefore = s.lockKeysShowScene; s.lockKeysChangedByLivePaper = true }
+                s.lockKeysShowScene = true
+                return
+            }
+            if s.lockKeysChangedByLivePaper { s.lockKeysShowScene = lockKeysBefore; s.lockKeysChangedByLivePaper = false }
+            if s.lockKeysShowScene { lockKeysBefore = true; s.lockKeysChangedByLivePaper = true; s.lockKeysShowScene = false }
+        }
+    }
+
+    func performUninstall(removeLibrary: Bool) -> [InstallStep] {
+        lock.lock(); defer { lock.unlock() }
+        var steps: [InstallStep] = []
+        func step(_ title: String, needed: Bool, skipReason: String, _ apply: () -> Void) {
+            if !needed { steps.append(InstallStep(title: title, outcome: .skipped(skipReason))); return }
+            if let failing = failingUninstallStep, title.contains(failing) {
+                steps.append(InstallStep(title: title, outcome: .failed("simulated failure")))
+                return
+            }
+            apply()
+            steps.append(InstallStep(title: title, outcome: .done))
+        }
+        step("Unregister the helper login item", needed: current.helperRunning, skipReason: "not registered") {
+            current.helperRunning = false; current.helperLoginItem = .notRegistered
+        }
+        step("Restore the previous screen saver choice", needed: current.saverSelected, skipReason: "LivePaper didn't change it") {
+            current.saverSelected = false
+        }
+        step(InstallService.restoreLockKeysTitle, needed: current.lockKeysChangedByLivePaper, skipReason: "not changed by LivePaper") {
+            current.lockKeysShowScene = lockKeysBefore; current.lockKeysChangedByLivePaper = false
+        }
+        step("Remove \(LPPaths.installedSaver.path)", needed: current.saverInstalled, skipReason: "not installed") {
+            current.saverInstalled = false; current.saverUpToDate = false
+        }
+        step(removeLibrary ? "Delete \(LPPaths.supportRoot.path), including the scene library"
+                           : "Delete LivePaper's caches, workspaces and backups (keeping the scene library)",
+             needed: true, skipReason: "") {}
+        return steps
+    }
 }
 
 // MARK: - Render / check / compile
