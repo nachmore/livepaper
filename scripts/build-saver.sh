@@ -34,7 +34,7 @@ if ! xcrun swiftc --version >/dev/null 2>&1 && [ -d /Library/Developer/CommandLi
 fi
 
 SAVER="$OUT/LivePaper.saver"
-ARCHS=(${LIVEPAPER_ARCHS:-arm64 x86_64})
+read -r -a ARCHS <<< "${LIVEPAPER_ARCHS:-arm64 x86_64}"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/livepaper-saver.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 

@@ -63,7 +63,7 @@ if [ -z "${LIVEPAPER_BUILD:-}" ] && [ "$(git -C "$ROOT" rev-parse --is-shallow-r
   echo "! shallow clone: build $BUILD counts only the fetched commits (fetch the full history or set LIVEPAPER_BUILD)" >&2
 fi
 IDENTITY="${LIVEPAPER_SIGN_IDENTITY:--}"
-if [ "$DEBUG" = 1 ]; then ARCHS=("$(uname -m)"); else ARCHS=(${LIVEPAPER_ARCHS:-arm64 x86_64}); fi
+if [ "$DEBUG" = 1 ]; then ARCHS=("$(uname -m)"); else read -r -a ARCHS <<< "${LIVEPAPER_ARCHS:-arm64 x86_64}"; fi
 
 APP="$OUT/LivePaper.app"
 CACHE="$OUT/.cache"
