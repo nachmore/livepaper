@@ -372,6 +372,7 @@ extension SelfTests {
         TestCase(name: "app.model.publish-failure-banner") {
             try withModel("publish-fail") { model, fx in
                 let publish = try unwrap(fx.services.publish as? MockPublishService)
+                try fx.services.install.installSaver()
                 publish.failNextPublish = true
                 var ok = true
                 try awaitMain { ok = await model.savePlaylist(PlaylistSettings(mode: .sequence)) }
@@ -383,6 +384,18 @@ extension SelfTests {
                 try expectEqual(banner.actions.map(\.title), ["Try Again"])
                 banner.actions[0].perform()
                 try awaitMain(until: { model.playlist.mode == .sequence })
+            }
+        },
+        TestCase(name: "app.model.publish-without-saver") {
+            try withModel("publish-nosaver") { model, fx in
+                let publish = try unwrap(fx.services.publish as? MockPublishService)
+                publish.failNextPublish = true
+                try awaitMain { _ = await model.savePlaylist(PlaylistSettings(mode: .sequence)) }
+                let banner = try unwrap(model.banners.banners.last)
+                try expectEqual(banner.actions.map(\.title), ["Set Up\u{2026}"])
+                model.showOnboarding = false
+                banner.actions[0].perform()
+                try expect(model.showOnboarding)
             }
         },
         TestCase(name: "app.model.clone-delete") {

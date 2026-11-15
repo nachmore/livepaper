@@ -374,8 +374,15 @@ final class AppModel {
             }
             return true
         } catch {
-            banners.error("Couldn't update the screen saver", error) { [weak self] in
-                Task { await self?.savePlaylist(settings, announce: announce, publishNow: publishNow) }
+            await refreshInstallStatus()
+            if !installStatus.saverInstalled {
+                // The likely cause; setup installs the saver, which then publishes these settings.
+                banners.post(.error, "LivePaper's screen saver isn't installed", message: error.localizedDescription,
+                             actions: [.init(title: "Set Up\u{2026}") { [weak self] in self?.showOnboarding = true }])
+            } else {
+                banners.error("Couldn't update the screen saver", error) { [weak self] in
+                    Task { await self?.savePlaylist(settings, announce: announce, publishNow: publishNow) }
+                }
             }
             return false
         }
