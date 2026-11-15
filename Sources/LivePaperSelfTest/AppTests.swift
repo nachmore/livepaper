@@ -524,6 +524,18 @@ extension SelfTests {
             settings.sceneIDs = ["d"]
             try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available)).sequence.ids, ["d"])
             try expect(FullScreenPreviewRequest.playlist(settings, available: []) == nil, "nothing to preview")
+            // It changes scene on the playlist's cadence, like the saver; never for one scene or the library.
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available)).autoAdvanceInterval, nil)
+            settings.mode = .shuffle
+            settings.sceneIDs = []
+            settings.cycleMinutes = 2
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available)).autoAdvanceInterval, 120)
+            settings.cycleMinutes = 0
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available)).autoAdvanceInterval, nil)
+            settings.cycleMinutes = 5
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: ["a"])).autoAdvanceInterval, nil)
+            try expectEqual(try unwrap(FullScreenPreviewRequest.library(start: "a", visible: available, all: available,
+                                                                        playlist: settings)).autoAdvanceInterval, nil)
         },
         TestCase(name: "app.fullscreen.hint-visibility") {
             let t0 = Date(timeIntervalSince1970: 1_000)

@@ -80,6 +80,15 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
     var showClock: Bool
     /// The playlist's performance profile (fps cap and render scale, like the saver).
     var performance: LPPerformanceProfile
+    /// A playlist preview changes scene on the playlist's own cadence ("Change scene"), like the
+    /// saver; 0 = only with ← →.
+    var cycleMinutes = 0
+
+    /// How long a scene stays before the preview moves on by itself (nil: it doesn't).
+    var autoAdvanceInterval: TimeInterval? {
+        guard sequence.source == .playlist, sequence.canStep, cycleMinutes > 0 else { return nil }
+        return TimeInterval(cycleMinutes) * 60
+    }
 
     /// One library scene, stepping through the library order, with the saved playlist's clock and
     /// performance settings (what the saver would use for it).
@@ -94,7 +103,8 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
     static func playlist(_ settings: PlaylistSettings, available: [String], start: String? = nil) -> FullScreenPreviewRequest? {
         let ids = PlaylistDraft(settings).effectiveSceneIDs(available: available)
         guard let sequence = FullScreenPreviewSequence(ids: ids, start: start, source: .playlist) else { return nil }
-        return FullScreenPreviewRequest(sequence: sequence, showClock: settings.showClock, performance: settings.performance)
+        return FullScreenPreviewRequest(sequence: sequence, showClock: settings.showClock, performance: settings.performance,
+                                        cycleMinutes: settings.mode == .single ? 0 : settings.cycleMinutes)
     }
 }
 

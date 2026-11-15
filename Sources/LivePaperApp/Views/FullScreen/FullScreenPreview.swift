@@ -11,7 +11,8 @@
 // Controls: Esc, a click, ⌘. (and Space, as in Quick Look) close it with a 0.25 s fade; ← → step
 // through the library or playlist order; C toggles the clock; L simulates the lock UI
 // (LivePaper.host.lockUI) so the clock hand-off can be seen. The hint bar fades out after 3 s and
-// returns when the pointer moves.
+// returns when the pointer moves. A playlist preview also changes scene by itself on the playlist's
+// "Change scene" cadence, as the saver does.
 //
 // Power: the scene runs only while the window can be seen (LiveSceneHostView). Closing stops it at
 // once (frozen for the fade, released right after); hiding the app, switching to another app, the
@@ -72,6 +73,9 @@ private final class FullScreenPreviewSession {
     private let model: AppModel
     private var sequence: FullScreenPreviewSequence
     private let performance: LPPerformanceProfile
+    /// Playlist previews move on by themselves, like the saver (nil: only ← →).
+    private let autoAdvance: TimeInterval?
+    private var advanceTimer: Timer?
     private var clockOn: Bool
     private var lockPreview = false
     /// Per scene shown, like a new saver session.
@@ -104,6 +108,7 @@ private final class FullScreenPreviewSession {
         self.model = model
         sequence = request.sequence
         performance = request.performance
+        autoAdvance = request.autoAdvanceInterval
         clockOn = request.showClock
         displayID = screen.displayID
         window = FullScreenPreviewWindow(frame: screen.frame)
@@ -160,6 +165,7 @@ private final class FullScreenPreviewSession {
         loadGeneration += 1
         hintTimer?.invalidate(); hintTimer = nil
         pointerTimer?.invalidate(); pointerTimer = nil
+        advanceTimer?.invalidate(); advanceTimer = nil
         hint.reset()
         pointer.reset()
         removeObservers()
@@ -265,6 +271,7 @@ private final class FullScreenPreviewSession {
         state.position = sequence.positionText
         state.message = nil
         refreshHint()
+        scheduleAutoAdvance()
         switch manifest.kind {
         case .video:
             guard let file = manifest.video?.file else {
@@ -330,6 +337,21 @@ private final class FullScreenPreviewSession {
                            stateScript: FullScreenSceneConfig.stateScript(showClock: clockOn, lockUI: lockPreview))
         case .video:
             host.setVideoClockVisible(FullScreenSceneConfig.nativeClockVisible(showClock: clockOn, lockUI: lockPreview), animated: true)
+        }
+    }
+
+    /// The next scene after the playlist's "Change scene" time (restarted by every change).
+    private func scheduleAutoAdvance() {
+        advanceTimer?.invalidate()
+        advanceTimer = nil
+        guard let interval = autoAdvance, phase == .open else { return }
+        advanceTimer = Self.oneShot(at: Date().addingTimeInterval(interval)) { [weak self] in
+            guard let self, self.phase == .open else { return }
+            self.advanceTimer = nil
+            if self.sequence.retain(available: Set(self.model.availableSceneIDs)), self.sequence.step(1) {
+                self.seed = FullScreenSceneConfig.randomSeed()
+                self.showCurrent()
+            }
         }
     }
 
@@ -423,7 +445,10 @@ private final class FullScreenPreviewSession {
     }
 
     private func applyPointer(_ update: IdleVisibility.Update) {
-        if let visible = update.visible { NSCursor.setHiddenUntilMouseMoves(!visible) }
+        // Only a pointer resting on the preview hides (it may be on another display).
+        if let visible = update.visible, visible || window.frame.contains(NSEvent.mouseLocation) {
+            NSCursor.setHiddenUntilMouseMoves(!visible)
+        }
         if let date = update.armTimer {
             pointerTimer?.invalidate()
             pointerTimer = Self.oneShot(at: date) { [weak self] in
