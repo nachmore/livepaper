@@ -123,9 +123,12 @@ public enum LPNotification {
     public static let lockUIHidden = "com.apple.screenLockUIIsHidden"
     /// Kept for source compatibility; macOS posts only Shown/Hidden as distributed notifications.
     public static let lockUIShowing = lockUIShown
-    /// System: screen saver lifecycle.
+    /// System: screen saver lifecycle, posted by loginwindow's ScreenSaverDaemon (macOS 26.7
+    /// disassembly: `_screenSaverStart:` posts didstart with deliverImmediately for every start —
+    /// idle, hot corner, ScreenSaverEngine, lock keys; `_screenSaverStop` posts willstop/didstop).
     public static let saverWillStop = "com.apple.screensaver.willstop"
     public static let saverDidStart = "com.apple.screensaver.didstart"
+    public static let saverDidStop = "com.apple.screensaver.didstop"
     public static let screenLocked = "com.apple.screenIsLocked"
     public static let screenUnlocked = "com.apple.screenIsUnlocked"
 }

@@ -12,6 +12,10 @@ enum SaverLog {
     static let saver = Logger(subsystem: subsystem, category: "saver")
     /// Messages from scenes (JS errors, video failures).
     static let scene = Logger(subsystem: subsystem, category: "scene")
+    /// One structured line per lifecycle step (init, window, start/stop, lock, didstart, sleep,
+    /// willstop, load/run/pause/release), notice level so it is persisted:
+    /// `log show --last 1h --predicate 'subsystem == "com.nachmore.livepaper.saver" && category == "lifecycle"'`
+    static let lifecycle = Logger(subsystem: subsystem, category: "lifecycle")
 }
 
 // MARK: - Power
@@ -56,6 +60,10 @@ final class SaverPowerMonitor {
 /// while an app is inactive — and a screen-saver host never becomes active — so with the default
 /// suspension behaviour (coalesce) a notification the poster didn't flag as immediate would be held
 /// back until it no longer matters (lock UI hand-off, willstop).
+///
+/// NSWorkspace's app notifications are filtered here and forwarded under the saver's own names
+/// (SaverSystemEvent): ScreenSaverEngine launching/quitting, and the preview host (System Settings)
+/// becoming or ceasing to be the frontmost app.
 final class SaverNotificationRelay: NSObject {
     private let handler: (String) -> Void
 
@@ -71,6 +79,10 @@ final class SaverNotificationRelay: NSObject {
         for name in [NSWorkspace.screensDidSleepNotification, NSWorkspace.screensDidWakeNotification] {
             workspace.addObserver(self, selector: #selector(received(_:)), name: name, object: nil)
         }
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification,
+                     NSWorkspace.didActivateApplicationNotification] {
+            workspace.addObserver(self, selector: #selector(receivedApp(_:)), name: name, object: nil)
+        }
     }
 
     deinit {
@@ -79,9 +91,57 @@ final class SaverNotificationRelay: NSObject {
     }
 
     @objc private func received(_ note: Notification) {
-        let name = note.name.rawValue
+        forward(note.name.rawValue)
+    }
+
+    @objc private func receivedApp(_ note: Notification) {
+        let bundleID = (note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication)?.bundleIdentifier
+        switch note.name {
+        case NSWorkspace.didLaunchApplicationNotification where bundleID == SaverEngineProbe.bundleIdentifier:
+            forward(SaverSystemEvent.engineLaunchedName)
+        case NSWorkspace.didTerminateApplicationNotification where bundleID == SaverEngineProbe.bundleIdentifier:
+            forward(SaverSystemEvent.engineTerminatedName)
+        case NSWorkspace.didActivateApplicationNotification:
+            forward(SaverPreviewHost.isActive(frontmostBundleIdentifier: bundleID)
+                    ? SaverSystemEvent.previewHostActivatedName : SaverSystemEvent.previewHostDeactivatedName)
+        default:
+            break
+        }
+    }
+
+    private func forward(_ name: String) {
         if Thread.isMainThread { handler(name) } else { DispatchQueue.main.async { [handler] in handler(name) } }
     }
+}
+
+// MARK: - Screen saver engine, frontmost app
+
+enum SaverEngineProbe {
+    /// /System/Library/CoreServices/ScreenSaverEngine.app (LSUIElement). On macOS 26 it draws
+    /// nothing: it asks loginwindow to start the saver and quits on com.apple.screensaver.didstop.
+    static let bundleIdentifier = "com.apple.ScreenSaver.Engine"
+
+    /// A Launch Services query (no polling: read at startAnimation and on lifecycle events).
+    static var isRunning: Bool {
+        if SaverDevOverrides.simulatedSystem { return false }
+        return !NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier).isEmpty
+    }
+
+    static var frontmostBundleIdentifier: String? {
+        if SaverDevOverrides.simulatedSystem { return "dev.livepaper.saverhost" }
+        return NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    }
+}
+
+// MARK: - Dev hosts
+
+enum SaverDevOverrides {
+    /// Set by scripts/dev/saverhost-lp.swift for itself (the real, sandboxed host never has it): the
+    /// polled system facts (session lock, display sleep, ScreenSaverEngine, frontmost app) read as
+    /// "unlocked, awake, no engine, another app in front", so a scripted scenario doesn't depend on
+    /// the state of the Mac it runs on. Events still arrive through the test hook.
+    static let simulatedSystemKey = "LIVEPAPER_SAVER_SIMULATED_SYSTEM"
+    static let simulatedSystem: Bool = getenv(simulatedSystemKey) != nil
 }
 
 // MARK: - Session lock
@@ -90,6 +150,7 @@ enum SaverSessionLock {
     /// Whether the login session is locked right now. `CGSSessionScreenIsLocked` is only present in
     /// the session dictionary while the screen is locked.
     static var isLocked: Bool {
+        if SaverDevOverrides.simulatedSystem { return false }
         guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
         return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
     }
@@ -101,6 +162,7 @@ extension NSView {
     /// True when the display showing this view is asleep (falls back to the main display while the
     /// view isn't on a screen yet).
     var saverDisplayIsAsleep: Bool {
+        if SaverDevOverrides.simulatedSystem { return false }
         let key = NSDeviceDescriptionKey("NSScreenNumber")
         let id = (window?.screen?.deviceDescription[key] as? NSNumber)?.uint32Value ?? CGMainDisplayID()
         return CGDisplayIsAsleep(id) != 0

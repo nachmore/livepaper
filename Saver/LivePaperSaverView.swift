@@ -11,8 +11,12 @@
 //  * isPreview is unreliable there; frames narrower than 500 pt are treated as previews too.
 //  * The host window is reported as occluded, so WebKit would never draw (see WebSceneHost).
 //  * After every unlock WallpaperAgent prewarms a hidden, never-presented instance. A real instance
-//    therefore loads nothing until the session is locked (SaverRunGate) — never on startAnimation
-//    alone and never from viewDidMoveToWindow.
+//    therefore loads nothing until something says a saver is up — a locked session, loginwindow's
+//    didstart or a running ScreenSaverEngine (SaverRunGate / SaverGatePolicy) — never on
+//    startAnimation alone and never from viewDidMoveToWindow; and it frees its scenes again a few
+//    seconds after its gate closes (unlock, stopAnimation).
+//  * Every lifecycle step is logged (os_log category `lifecycle`, notice level, so `log show`
+//    keeps it) with this view's id, so real lock cycles show which instance did what.
 //  * When the user touches the keyboard/mouse, loginwindow draws its lock UI (with Apple's clock)
 //    over the running saver, bracketed by com.apple.screenLockUIIsShown / …IsHidden (LPNotification);
 //    we hide our clock meanwhile so there are never two clocks.
@@ -27,6 +31,16 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     private static let cycleCrossfadeDuration: TimeInterval = 2.0
     /// Keep the scene on screen during loginwindow's fade-out before quitting the host.
     private static let exitDelay: TimeInterval = 0.5
+    /// A real instance frees its scenes this long after its gate closed for good (unlock,
+    /// stopAnimation), unless the gate reopens or willstop ends the process first. Long enough for
+    /// loginwindow's fade-out to keep showing the last frame.
+    private static let releaseDelay: TimeInterval = 5
+
+    /// Every view in this host process (weak), for the log's "others running" count.
+    private static let registry = NSHashTable<LivePaperSaverView>.weakObjects()
+    private static var nextInstanceNumber = 1
+    /// didstart/didstop seen by any view of this process (a view created later still knows).
+    private static var startLatch = SaverStartLatch()
 
     private struct Plan {
         var deck: SaverDeck
@@ -55,36 +69,57 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     private var power = SaverPowerState(onBattery: false, lowPowerMode: false)
     private var powerMonitor: SaverPowerMonitor?
     private var notifications: SaverNotificationRelay?
+    private var windowObservers: [NSObjectProtocol] = []
+    private var windowVisibility = SaverWindowVisibility()
+    private var releaseWork: DispatchWorkItem?
     private var optionsSheet: OptionsSheetController?
+    /// "v1", "v2", … within this host process (logs).
+    private let instanceID: String
+    private let createdAt = Date()
+    private var startedAnimationAt: Date?
+    private var lastLoggedRun: Bool?
 
     /// System Settings thumbnails and other small hosts: no lock gate, no cycling, no bookkeeping, no exit.
     private var previewLike: Bool { isPreview || bounds.width < 500 }
 
     override init?(frame: NSRect, isPreview: Bool) {
+        instanceID = Self.takeInstanceID()
         super.init(frame: frame, isPreview: isPreview)
-        commonInit()
+        commonInit(isPreview: isPreview)
     }
 
     required init?(coder: NSCoder) {
+        instanceID = Self.takeInstanceID()
         super.init(coder: coder)
-        commonInit()
+        commonInit(isPreview: isPreview)
     }
 
-    private func commonInit() {
+    private static func takeInstanceID() -> String {
+        defer { nextInstanceNumber += 1 }
+        return "v\(nextInstanceNumber)"
+    }
+
+    private func commonInit(isPreview: Bool) {
         // We never draw per frame (WebKit and AVFoundation drive their own frames); a long interval
         // keeps ScreenSaverView's own animation timer from waking the CPU for nothing.
         animationTimeInterval = 3600
         wantsLayer = true
         layer?.backgroundColor = NSColor.black.cgColor
         gate.preview = previewLike
+        gate.saverStarted = Self.startLatch.started
+        Self.registry.add(self)
         notifications = SaverNotificationRelay(distributedNames: SaverSystemEvent.distributedNames) { [weak self] name in
             self?.handleNotification(named: name)
         }
+        logLifecycle("init", "isPreview=\(isPreview ? 1 : 0) previewLike=\(previewLike ? 1 : 0) frame=\(Self.describe(frame.size))")
     }
 
     deinit {
         cycleTimer?.invalidate()
         retryWork?.cancel()
+        releaseWork?.cancel()
+        for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
+        SaverLog.lifecycle.notice("event=deinit view=\(self.instanceID, privacy: .public)")
     }
 
     override var isOpaque: Bool { true }
@@ -98,35 +133,87 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
 
     // MARK: Lifecycle
 
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        observeWindow()
+        // Never starts anything for a real instance: only a preview's visibility is re-read.
+        refreshWindowVisibility()
+        logLifecycle("viewDidMoveToWindow")
+        if gate.preview { update() }
+    }
+
     override func startAnimation() {
         super.startAnimation()
+        startedAnimationAt = Date()
         gate.animating = true
         gate.preview = previewLike
-        // Authoritative at start; com.apple.screenIsLocked/Unlocked keep it current afterwards.
+        // Authoritative at start; the notifications keep them current afterwards.
         gate.sessionLocked = SaverSessionLock.isLocked
         gate.displaysAsleep = saverDisplayIsAsleep
+        gate.saverStarted = Self.startLatch.started
+        gate.engineRunning = SaverEngineProbe.isRunning
+        if gate.preview { gate.previewHostActive = SaverPreviewHost.isActive(frontmostBundleIdentifier: SaverEngineProbe.frontmostBundleIdentifier) }
+        refreshWindowVisibility()
+        logLifecycle("startAnimation")
         update()
     }
 
     override func stopAnimation() {
         super.stopAnimation()
         gate.animating = false
+        logLifecycle("stopAnimation")
         update()
     }
 
-    /// Brings the saver in line with the run gate: loads the playlist the first moment it may, and
-    /// otherwise pauses or resumes what is on screen.
+    /// Brings the saver in line with the run gate: loads the playlist the first moment it may,
+    /// otherwise pauses or resumes what is on screen, and schedules or cancels the release.
     private func update() {
         if !started {
             if gate.mayLoad {
                 begin()
-            } else if gate.animating && !gate.preview && !loggedWaitingForLock {
+            } else if gate.animating && !loggedWaitingForLock {
                 loggedWaitingForLock = true
-                SaverLog.saver.info("session not locked (prewarmed instance?); waiting for com.apple.screenIsLocked")
+                SaverLog.saver.info("view \(self.instanceID, privacy: .public) waiting for \(self.gate.waitingFor ?? "?", privacy: .public)")
             }
+        } else {
+            applyRunState()
+        }
+        scheduleReleaseIfNeeded()
+        let run = gate.shouldRun
+        if lastLoggedRun != run {
+            if lastLoggedRun != nil || run { logLifecycle(run ? "run" : "pause") }
+            lastLoggedRun = run
+        }
+    }
+
+    /// A real instance whose gate closed for good frees its web view / player (and its WebContent
+    /// process) after `releaseDelay`; the next run loads the playlist afresh.
+    private func scheduleReleaseIfNeeded() {
+        guard started, gate.shouldRelease else {
+            releaseWork?.cancel()
+            releaseWork = nil
             return
         }
-        applyRunState()
+        guard releaseWork == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.releaseWork = nil
+            guard self.started, self.gate.shouldRelease else { return }
+            self.release()
+        }
+        releaseWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.releaseDelay, execute: work)
+    }
+
+    private func release() {
+        tearDownScenes()
+        plan = nil
+        content = nil
+        started = false
+        shownStep = 0
+        skipOffset = 0
+        loggedWaitingForLock = false
+        logLifecycle("release", "scenes freed; the next run reloads the playlist")
     }
 
     private func begin() {
@@ -144,6 +231,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         for problem in content.problems { SaverLog.saver.error("playlist: \(problem, privacy: .public)") }
         guard let playlist = content.playlist, !content.isEmpty else {
             SaverLog.saver.info("no playable scenes; showing the fallback")
+            logLifecycle("load", "fallback")
             install(FallbackSceneHost(reason: .noScenes, context: fallbackContext()), crossfade: Self.firstRevealDuration)
             applyRunState()
             return
@@ -161,6 +249,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             \(playlist.mode.rawValue, privacy: .public), \(planned.joined ? "joined" : "new", privacy: .public) session \
             \(planned.session.epoch, privacy: .public), preview \(self.gate.preview, privacy: .public)
             """)
+        logLifecycle("load", "publish=\(playlist.generation) scenes=\(deck.count)")
         show(step: schedule.step(at: Date()), crossfade: Self.firstRevealDuration)
         applyRunState()
     }
@@ -203,7 +292,10 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         cycleTimer?.invalidate()
         cycleTimer = nil
         retryWork?.cancel()
+        releaseWork?.cancel()
+        releaseWork = nil
         SaverLog.saver.info("screen saver stopping; quitting the host")
+        logLifecycle("exit", "in \(Self.exitDelay) s")
         DispatchQueue.main.asyncAfter(deadline: .now() + Self.exitDelay) { exit(0) }
     }
 
@@ -233,21 +325,77 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     @objc(livepaperHandleNotificationNamed:)
     func handleNotification(named name: String) {
         guard let event = SaverSystemEvent(notificationName: name) else { return }
+        Self.startLatch.apply(event)
         switch event {
         case .lockUIShown, .lockUIHidden:
             applyLockUI(event)
-        case .screenLocked, .screenUnlocked, .screensDidSleep, .screensDidWake:
+            logLifecycle(event.rawValue)
+        case .screenLocked, .screenUnlocked, .screensDidSleep, .screensDidWake, .saverDidStart, .saverDidStop,
+             .engineLaunched, .engineTerminated, .previewHostActivated, .previewHostDeactivated:
             gate.apply(event)
+            // Re-read on the moments that matter (the launch notification may not be posted for
+            // the background-only engine); the engine events themselves are authoritative.
+            if event != .engineLaunched && event != .engineTerminated { gate.engineRunning = SaverEngineProbe.isRunning }
             // Unlocking removes the lock UI even if its IsHidden notification was missed.
             if event == .screenUnlocked { applyLockUI(event) }
-            SaverLog.saver.debug("\(event.rawValue, privacy: .public): running \(self.gate.shouldRun, privacy: .public)")
+            logLifecycle(event.rawValue)
+            update()
+        case .windowChanged:
+            refreshWindowVisibility()
+            logLifecycle(event.rawValue)
             update()
         case .willStop:
+            gate.apply(event)
+            logLifecycle(event.rawValue, previewLike ? "ignored by previews" : "")
             if !previewLike { prepareToExit() }
         case .published:
             // Real sessions read the playlist once at start; previews follow the app live.
             if previewLike && started { restart() }
         }
+    }
+
+    // MARK: Window (previews' visibility; logs)
+
+    private func observeWindow() {
+        for observer in windowObservers { NotificationCenter.default.removeObserver(observer) }
+        windowObservers = []
+        guard let window else { return }
+        let names: [Notification.Name] = [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                                          NSWindow.didDeminiaturizeNotification, NSWindow.willCloseNotification,
+                                          NSWindow.didChangeScreenNotification]
+        for name in names {
+            windowObservers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                self?.handleNotification(named: SaverSystemEvent.windowChangedName)
+            })
+        }
+    }
+
+    private func refreshWindowVisibility() {
+        guard let window else { gate.windowVisible = false; return }
+        gate.windowVisible = windowVisibility.isVisible(orderedIn: window.isVisible, miniaturized: window.isMiniaturized,
+                                                        occlusionVisible: window.occlusionState.contains(.visible))
+    }
+
+    // MARK: Lifecycle log
+
+    private static func describe(_ size: NSSize) -> String { "\(Int(size.width))x\(Int(size.height))" }
+
+    private var windowSummary: String {
+        guard let window else { return "none" }
+        let screen = (window.screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.stringValue ?? "?"
+        return "#\(window.windowNumber) visible=\(window.isVisible ? 1 : 0) occlusionVisible=\(window.occlusionState.contains(.visible) ? 1 : 0) "
+            + "level=\(window.level.rawValue) screen=\(screen) size=\(Self.describe(window.frame.size))"
+    }
+
+    /// One structured line per lifecycle step: `event=… view=… <gate> started=… window=…`. The
+    /// process id is part of every os_log entry. Notice level, so the lines are persisted.
+    private func logLifecycle(_ event: String, _ detail: String = "") {
+        let others = Self.registry.allObjects.filter { $0 !== self && $0.gate.shouldRun }.count
+        let sinceStart = startedAnimationAt.map { String(format: "%.1f", Date().timeIntervalSince($0)) } ?? "-"
+        let line = "event=\(event) view=\(instanceID) preview=\(gate.preview ? 1 : 0) \(gate.summary) started=\(started ? 1 : 0) "
+            + "othersRunning=\(others) age=\(String(format: "%.1f", Date().timeIntervalSince(createdAt))) sinceStart=\(sinceStart) "
+            + "window=[\(windowSummary)]" + (detail.isEmpty ? "" : " \(detail)")
+        SaverLog.lifecycle.notice("\(line, privacy: .public)")
     }
 
     private func applyLockUI(_ event: SaverSystemEvent) {
@@ -268,7 +416,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     }
 
     private var resolvedProfile: LPPerformanceProfile.Resolved {
-        SaverPerformance.resolve(content?.playlist?.performance ?? .automatic, power: power, preview: gate.preview)
+        SaverPerformance.resolve(content?.playlist?.performance ?? .automatic, power: power, preview: gate.preview, policy: gate.policy)
     }
 
     // MARK: Scenes
@@ -370,8 +518,10 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     @objc(livepaperDiagnostics)
     var diagnostics: NSDictionary {
         var d: [String: Any] = [
-            "preview": gate.preview, "sessionLocked": gate.sessionLocked, "animating": gate.animating,
+            "view": instanceID, "preview": gate.preview, "sessionLocked": gate.sessionLocked, "animating": gate.animating,
             "started": started, "running": gate.shouldRun, "displaysAsleep": gate.displaysAsleep,
+            "saverStarted": gate.saverStarted, "engineRunning": gate.engineRunning, "windowVisible": gate.windowVisible,
+            "previewHostActive": gate.previewHostActive, "releasePending": releaseWork != nil, "gate": gate.summary,
             "lockUIShowing": lockUI.isShowing, "generation": content?.playlist?.generation ?? -1,
             "scene": current?.entryID ?? "", "kind": current?.kind ?? "none", "loading": incoming?.entryID ?? NSNull(),
             "problems": content?.problems ?? [], "step": shownStep, "skipOffset": skipOffset,

@@ -7,11 +7,16 @@
 //   1. prewarm gate   — a started, non-preview instance loads nothing while the session is unlocked
 //   2. web scene      — loads on "screen locked", config injected, clock hand-off (lock UI shown →
 //                       hidden), display sleep pauses frames, a second display agrees on the
-//                       scene, unlock pauses, session bookkeeping isolated, Options sheet
+//                       scene, unlock pauses and then releases the scene, session bookkeeping
+//                       isolated, Options sheet
+//   2b. explicit start — didstart while unlocked renders (password delay / hot corner); didstop
+//                       pauses; a lock while the displays sleep loads nothing until wake
 //   3. queued state   — lock UI already up before the page is ready → scene starts with its clock hidden
 //   4. publish after signing — rewrites Playlist/ inside the signed bundle, a new view plays it
 //   5. video scene    — AVPlayerLayer plays, native clock fades out/in with the lock UI, sleep pauses
-//   6. preview        — small preview instance renders immediately without a lock
+//   6. preview        — small preview instance renders without a lock once System Settings is
+//                       frontmost; pauses while locked, when System Settings goes to the background
+//                       and when its window is ordered out
 //   7. fallback       — empty playlist → built-in fallback; lock UI hides its hint and clock
 //   8. recovery       — an undecodable video is retried with back-off, then skipped
 //   9. willstop       — ignored by previews; a real instance exits the host (exit code 0)
@@ -20,6 +25,10 @@
 //   LIVEPAPER_SAVER_STATE_FILE=/tmp/x/state.json build/dev/saverhost-lp build/LivePaper.saver /tmp/x
 //
 // Expects the playlist from scripts/dev/make-test-playlist.sh (defaults) and restores it at the end.
+//
+// Determinism: the host sets LIVEPAPER_SAVER_SIMULATED_SYSTEM for itself, so the saver's polled
+// facts (session lock, display sleep, ScreenSaverEngine, frontmost app) read "unlocked, awake, no
+// engine, another app in front" whatever state this Mac is in (locked, display asleep …).
 //
 // Focus safety: activation policy .prohibited (the process can never become active or show a Dock
 // icon), every window lives at (-30000, -30000), and the whole scenario is ONE process launch.
@@ -58,6 +67,8 @@ guard let statePath = ProcessInfo.processInfo.environment[stateKey], !statePath.
 }
 try? FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
 try? FileManager.default.removeItem(atPath: statePath)
+// Before the bundle loads (SaverDevOverrides reads it once).
+setenv("LIVEPAPER_SAVER_SIMULATED_SYSTEM", "1", 1)
 
 struct Check: Encodable { let name: String; let pass: Bool; let detail: String }
 var checks: [Check] = []
@@ -319,10 +330,39 @@ func writePlaylist(mode: String, generation: Int, scenes: [[String: String]]) th
     } else {
         check("options: configureSheet", false)
     }
+    // Unlock without willstop (a direct lock): the scene is released after the grace period, so no
+    // WebContent process stays resident and the next run reloads the playlist.
+    let released = await waitUntil(8) { (diagnostics(web)["started"] as? Bool) == false && webViews(in: web).isEmpty }
+    check("web: released a few seconds after unlock", released, "\(diagnostics(web)["gate"] ?? "?")")
     harness.dispose(web)
     let record = (try? Data(contentsOf: URL(fileURLWithPath: statePath)))
         .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } ?? [:]
     check("bookkeeping: session record went to \(stateKey)", record["lastShown"] as? String == "test-web", "\(record)")
+
+    // 2b. Explicit start while unlocked; lock while the displays sleep --------------------------
+    if let explicit = harness.makeView(size: fullSize, preview: false) {
+        explicit.startAnimation()
+        deliver("com.apple.screensaver.didstart", to: explicit)   // session stays unlocked
+        let ready = await waitUntil(8) { (currentDiag(explicit)["ready"] as? Bool) == true }
+        check("explicit start: didstart renders while the session is unlocked", ready && diagnostics(explicit)["running"] as? Bool == true,
+              "\(diagnostics(explicit)["gate"] ?? "?")")
+        deliver("com.apple.screensaver.didstop", to: explicit)
+        await delay(0.3)
+        check("explicit start: didstop pauses", diagnostics(explicit)["running"] as? Bool == false)
+        harness.dispose(explicit)
+    }
+    if let dark = harness.makeView(size: fullSize, preview: false) {
+        dark.startAnimation()
+        deliver("NSWorkspaceScreensDidSleepNotification", to: dark)
+        deliver("com.apple.screenIsLocked", to: dark)   // lid close / display-sleep lock
+        await delay(1.5)
+        check("sleep lock: nothing loads while the displays sleep", (diagnostics(dark)["started"] as? Bool) == false && dark.subviews.isEmpty,
+              "\(diagnostics(dark)["gate"] ?? "?")")
+        deliver("NSWorkspaceScreensDidWakeNotification", to: dark)
+        let ready = await waitUntil(8) { (currentDiag(dark)["ready"] as? Bool) == true }
+        check("sleep lock: loads on wake", ready)
+        harness.dispose(dark)
+    }
 
     // 3. Lock UI state queued before the page is ready ----------------------------------------
     // A fresh session record: in sequence mode a new session continues after the last scene shown.
@@ -388,12 +428,36 @@ func writePlaylist(mode: String, generation: Int, scenes: [[String: String]]) th
     }
     harness.dispose(video)
 
-    // 6. Preview renders without a lock ---------------------------------------------------------
+    // 6. Preview renders without a lock while System Settings is in front ---------------------------
     guard let preview = harness.makeView(size: NSSize(width: 300, height: 188), preview: true) else { return }
     preview.startAnimation()
+    // This host is never frontmost; the relay's event stands in for System Settings activating.
+    deliver("LivePaperPreviewHostActivated", to: preview)
     let previewReady = await waitUntil(10) { (currentDiag(preview)["ready"] as? Bool) == true }
-    check("preview: renders immediately (no lock needed)", previewReady && diagnostics(preview)["preview"] as? Bool == true)
+    check("preview: renders without a lock", previewReady && diagnostics(preview)["preview"] as? Bool == true
+          && diagnostics(preview)["running"] as? Bool == true, "\(diagnostics(preview)["gate"] ?? "?")")
     await snapshotLayers(preview, "preview.png")
+    let previewPlayer = playerLayer(in: preview)?.player
+    deliver("com.apple.screenIsLocked", to: preview)
+    await delay(0.3)
+    check("preview: pauses while the Mac is locked", diagnostics(preview)["running"] as? Bool == false && (previewPlayer?.rate ?? 0) == 0,
+          "\(diagnostics(preview)["gate"] ?? "?"), rate \(previewPlayer?.rate ?? -1)")
+    deliver("com.apple.screenIsUnlocked", to: preview)
+    await delay(0.3)
+    check("preview: resumes on unlock", diagnostics(preview)["running"] as? Bool == true)
+    deliver("LivePaperPreviewHostDeactivated", to: preview)
+    await delay(0.3)
+    check("preview: pauses when System Settings goes to the background", diagnostics(preview)["running"] as? Bool == false)
+    deliver("LivePaperPreviewHostActivated", to: preview)
+    preview.window?.orderOut(nil)
+    deliver("LivePaperWindowChanged", to: preview)
+    await delay(0.3)
+    check("preview: pauses when its window is ordered out", diagnostics(preview)["running"] as? Bool == false,
+          "\(diagnostics(preview)["gate"] ?? "?")")
+    preview.window?.orderFrontRegardless()
+    deliver("LivePaperWindowChanged", to: preview)
+    await delay(0.3)
+    check("preview: resumes when shown again", diagnostics(preview)["running"] as? Bool == true && diagnostics(preview)["started"] as? Bool == true)
 
     // 7. Fallback ---------------------------------------------------------------------------------
     do { try writePlaylist(mode: "shuffle", generation: 3, scenes: []) } catch { check("empty playlist", false, "\(error)") }
@@ -453,7 +517,7 @@ let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 let activity = ProcessInfo.processInfo.beginActivity(options: [.userInitiatedAllowingIdleSystemSleep, .latencyCritical],
                                                      reason: "LivePaper saver dev host")
-DispatchQueue.main.asyncAfter(deadline: .now() + 120) {
+DispatchQueue.main.asyncAfter(deadline: .now() + 180) {
     print("FAIL: scenario timed out")
     writeReport()
     exit(4)

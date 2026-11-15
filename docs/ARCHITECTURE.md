@@ -31,8 +31,11 @@ This document is the contract between components. Keep it current when interface
   ⇒ This is LivePaper's "lock keys show the scene" toggle: no Accessibility/Input Monitoring needed.
 * **Prewarm:** after every unlock WallpaperAgent spawns a hidden, never-presented saver instance.
   With WebKit occlusion detection disabled it would animate forever (~45 % of a core). Non-preview
-  instances must render nothing until `CGSSessionScreenIsLocked` is true / `com.apple.screenIsLocked`
-  arrives, and pause on `com.apple.screenIsUnlocked`.
+  instances must render nothing until a saver is actually up — the session is locked
+  (`CGSSessionScreenIsLocked` / `com.apple.screenIsLocked`), loginwindow posted
+  `com.apple.screensaver.didstart` (every start, also while unlocked; verified in disassembly,
+  delivery to the sandboxed host unverified), or ScreenSaverEngine runs — and pause on unlock,
+  `didstop`, `stopAnimation` and display sleep (Saver/README.md, "The run gate").
 * When the user touches a key/mouse while the saver runs, the lock UI (with Apple's own clock) is
   drawn over the saver. Distributed notifications `com.apple.screenLockUIIsShown` / `com.apple.screenLockUIIsHidden`
   (object = uid string) bracket that (verified). ⇒ scenes must hide their own clock then (no double clock).
@@ -275,10 +278,14 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
 `.power(obj)`, `.advance(dt)` (manual mode). Page→host via `webkit.messageHandlers.livepaper.postMessage({...})`.
 
 ## 6. Saver (`Saver/`, details in `Saver/README.md`)
-* **Prewarm gate:** a non-preview instance loads nothing until the session is locked
-  (`CGSSessionCopyCurrentDictionary()["CGSSessionScreenIsLocked"]`, else wait for
-  `com.apple.screenIsLocked`); `com.apple.screenIsUnlocked` pauses everything. Previews
-  (`isPreview || width < 500` — `isPreview` is unreliable in the macOS 26 host) render at once.
+* **Run gate** (`SaverRunGate`, switches in `SaverGatePolicy`): a non-preview instance renders only
+  while started (startAnimation, no stopAnimation/willstop) **and** a saver is up (session locked,
+  `didstart` since the last unlock/`didstop`, or ScreenSaverEngine running) **and** the displays are
+  awake. It loads nothing before that (also not while the displays sleep) and frees its scenes 5 s
+  after its gate closes (unlock, `didstop`, stopAnimation). Previews (`isPreview || width < 500` —
+  `isPreview` is unreliable in the macOS 26 host) render once started but pause while locked, while
+  the displays sleep, while System Settings isn't frontmost and while their window is hidden; web
+  previews run at 15 fps. Every lifecycle step is logged (os_log category `lifecycle`, notice level).
 * Reads `Playlist/playlist.json`; keeps entries whose file is a plain name with a supported
   extension (§4.3) that exists; picks a scene (shuffle with no-repeat across sessions and displays
   agreeing per 30 s epoch); crossfades every `cycleMinutes`; fallback scene when nothing plays.
@@ -293,7 +300,8 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   re-applied on `ready`.
 * **Immediate delivery:** every distributed observer uses `.deliverImmediately` (§1).
 * Power: pause on `screensDidSleep`, resume on wake; `Automatic` profile = battery saver on battery
-  or Low Power Mode; exit host process 0.5 s after `com.apple.screensaver.willstop` (non-preview only).
+  or Low Power Mode; previews at 15 fps; exit host process 0.5 s after `com.apple.screensaver.willstop`
+  (non-preview only).
 * Options sheet: summary + "Open LivePaper…" (posts `openApp`, which the helper turns into launching
   the app — the sandboxed saver can't launch apps itself).
 * **Publishing after signing:** publish rewrites `Contents/Resources/Playlist/` of the installed,

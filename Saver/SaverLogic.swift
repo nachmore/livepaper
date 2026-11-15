@@ -285,17 +285,32 @@ struct SaverRecoveryPolicy: Equatable {
 // MARK: - System events and lock-UI hand-off
 
 /// Everything the saver reacts to, decoupled from where it came from (distributed notifications,
-/// NSWorkspace, or the in-process test hook).
+/// NSWorkspace, the view's own window, or the in-process test hook).
 enum SaverSystemEvent: String {
     /// loginwindow drew its lock UI (clock + password field) over the running saver.
     case lockUIShown
     /// …and removed it again.
     case lockUIHidden
     case screenLocked, screenUnlocked, willStop, screensDidSleep, screensDidWake, published
+    /// loginwindow started / stopped a screen saver run (com.apple.screensaver.didstart / didstop).
+    case saverDidStart, saverDidStop
+    /// ScreenSaverEngine (what LivePaper's lock and `open -a ScreenSaverEngine` launch) started / quit.
+    case engineLaunched, engineTerminated
+    /// The app that shows previews (System Settings) became / stopped being the frontmost app.
+    case previewHostActivated, previewHostDeactivated
+    /// The view's window was ordered in/out, (de)miniaturised, closed or changed occlusion/screen.
+    case windowChanged
 
     /// Names of NSWorkspace's display-sleep notifications (`NSWorkspace.screensDid…Notification.rawValue`).
     static let screensDidSleepName = "NSWorkspaceScreensDidSleepNotification"
     static let screensDidWakeName = "NSWorkspaceScreensDidWakeNotification"
+    /// Names the saver's notification relay gives to NSWorkspace app notifications it has already
+    /// filtered (the plain NSWorkspace names say nothing about which app). Also used by the dev host.
+    static let engineLaunchedName = "LivePaperScreenSaverEngineLaunched"
+    static let engineTerminatedName = "LivePaperScreenSaverEngineTerminated"
+    static let previewHostActivatedName = "LivePaperPreviewHostActivated"
+    static let previewHostDeactivatedName = "LivePaperPreviewHostDeactivated"
+    static let windowChangedName = "LivePaperWindowChanged"
 
     init?(notificationName name: String) {
         // `lockUIShowing` is an alias of `lockUIShown` on current macOS; both mean "hide our clock".
@@ -305,9 +320,16 @@ enum SaverSystemEvent: String {
         case LPNotification.screenLocked: self = .screenLocked
         case LPNotification.screenUnlocked: self = .screenUnlocked
         case LPNotification.saverWillStop: self = .willStop
+        case LPNotification.saverDidStart: self = .saverDidStart
+        case LPNotification.saverDidStop: self = .saverDidStop
         case LPNotification.published: self = .published
         case Self.screensDidSleepName: self = .screensDidSleep
         case Self.screensDidWakeName: self = .screensDidWake
+        case Self.engineLaunchedName: self = .engineLaunched
+        case Self.engineTerminatedName: self = .engineTerminated
+        case Self.previewHostActivatedName: self = .previewHostActivated
+        case Self.previewHostDeactivatedName: self = .previewHostDeactivated
+        case Self.windowChangedName: self = .windowChanged
         default: return nil
         }
     }
@@ -316,7 +338,7 @@ enum SaverSystemEvent: String {
     static let distributedNames: [String] = {
         let all = [LPNotification.lockUIShowing, LPNotification.lockUIShown, LPNotification.lockUIHidden,
                    LPNotification.screenLocked, LPNotification.screenUnlocked, LPNotification.saverWillStop,
-                   LPNotification.published]
+                   LPNotification.saverDidStart, LPNotification.saverDidStop, LPNotification.published]
         var seen = Set<String>()
         return all.filter { seen.insert($0).inserted }
     }()
@@ -342,14 +364,44 @@ struct SaverLockUIState: Equatable {
 
 // MARK: - Run gate (prewarm)
 
+/// Which signals open the run gate of a real (non-preview) instance — the one place to change once
+/// real lock cycles have been logged (category `lifecycle`, see Saver/README.md "Run gate"). The
+/// self tests say what each switch does.
+struct SaverGatePolicy: Equatable {
+    /// A locked session opens the gate. Kept on while it is unverified that didstart reaches the
+    /// sandboxed host: without it, every lock would stay black if it doesn't. The cost: a prewarmed
+    /// instance that has had startAnimation also renders behind a direct lock (⌃⌘Q without the lock
+    /// keys switch, lid close, display sleep) while the displays are on, until unlock. Turn it off
+    /// once the logs show didstart arriving for idle, hot-corner, lock-key and LivePaper starts.
+    var sessionLockOpens = true
+    /// loginwindow's com.apple.screensaver.didstart opens the gate — also while the session is
+    /// unlocked (a password delay, "Never", a hot corner), where the saver used to stay black.
+    var didStartOpens = true
+    /// A running ScreenSaverEngine opens the gate: it only runs while a saver it started is up (it
+    /// quits on didstop). Covers LivePaper's own lock if didstart were not delivered.
+    var engineOpens = true
+    /// Frame-rate cap for web scenes in previews (System Settings).
+    var previewFPS = 15
+
+    static let standard = SaverGatePolicy()
+}
+
 /// Decides when the saver may load and animate scenes.
 ///
 /// After every unlock WallpaperAgent spawns a hidden, never-presented saver instance so that the
 /// next start is fast. Web scenes run with WebKit's occlusion detection disabled (they would never
 /// draw otherwise, see WebSceneHost), so that hidden copy would animate for as long as the user
-/// works — measured at ~45 % of a CPU core in the prototype. A real (non-preview) instance therefore
-/// loads nothing until the login session is actually locked, and pauses again when it is unlocked.
-/// Previews (System Settings thumbnails) render immediately. Video scenes follow the same rule.
+/// works — measured at ~45 % of a CPU core in the prototype. So a real (non-preview) instance runs
+/// only while all of these hold:
+///  * startAnimation has been called and stopAnimation hasn't (and willstop hasn't arrived);
+///  * something says a saver is actually up (`SaverGatePolicy`): the session is locked, or
+///    loginwindow posted didstart (cleared by didstop, willstop and unlock), or ScreenSaverEngine
+///    runs;
+///  * the displays are awake.
+/// Nothing is loaded before that (also not while the displays sleep), and a loaded instance whose
+/// gate closes for good (unlock, stopAnimation) releases its scenes (`shouldRelease`).
+/// Previews (System Settings) run while started, unless the session is locked, the displays sleep,
+/// their window can't be seen or System Settings isn't the frontmost app.
 struct SaverRunGate: Equatable {
     /// System Settings preview or another small host (`isPreview || width < 500`).
     var preview: Bool
@@ -361,21 +413,127 @@ struct SaverRunGate: Equatable {
     var displaysAsleep = false
     /// com.apple.screensaver.willstop arrived; the host process is about to exit.
     var exiting = false
+    /// loginwindow posted didstart and no didstop, willstop or unlock since.
+    var saverStarted = false
+    /// ScreenSaverEngine is running.
+    var engineRunning = false
+    /// Previews: the window is ordered in, not miniaturised, and not reported occluded.
+    var windowVisible = true
+    /// Previews: the app that shows them (System Settings) is frontmost (or that is unknown).
+    var previewHostActive = true
+    var policy = SaverGatePolicy.standard
 
-    /// Scenes may be loaded and session bookkeeping written.
-    var mayLoad: Bool { animating && !exiting && (preview || sessionLocked) }
+    init(preview: Bool, sessionLocked: Bool, policy: SaverGatePolicy = .standard) {
+        self.preview = preview
+        self.sessionLocked = sessionLocked
+        self.policy = policy
+    }
+
+    /// What says a saver is up for a real instance (nil: nothing does). For previews: "preview".
+    var openedBy: String? {
+        if preview { return "preview" }
+        if policy.didStartOpens && saverStarted { return "didstart" }
+        if policy.engineOpens && engineRunning { return "engine" }
+        if policy.sessionLockOpens && sessionLocked { return "locked" }
+        return nil
+    }
+
+    /// Every condition except display sleep holds.
+    var active: Bool {
+        guard animating, !exiting else { return false }
+        if preview { return !sessionLocked && windowVisible && previewHostActive }
+        return openedBy != nil
+    }
     /// Loaded scenes may animate or play, and the cycle and clock timers may run.
-    var shouldRun: Bool { mayLoad && !displaysAsleep }
+    var shouldRun: Bool { active && !displaysAsleep }
+    /// Scenes may be loaded and session bookkeeping written: only when they would run right away
+    /// (never while the displays sleep, or for an instance nothing has presented).
+    var mayLoad: Bool { shouldRun }
+    /// A loaded real instance whose gate has closed (unlock, didstop, stopAnimation) should free its
+    /// scenes — after a grace period, so loginwindow's fade-out still shows the last frame. Previews
+    /// and instances that are about to exit keep theirs.
+    var shouldRelease: Bool { !preview && !exiting && !active }
 
-    /// Applies the lock and display-sleep events (others are ignored).
+    /// Why nothing runs (for the log), or nil when it runs.
+    var waitingFor: String? {
+        if shouldRun { return nil }
+        if exiting { return "exit (willstop)" }
+        if !animating { return "startAnimation" }
+        if preview {
+            if sessionLocked { return "unlock (previews pause while locked)" }
+            if !windowVisible { return "the preview window to be visible" }
+            if !previewHostActive { return "System Settings to be frontmost" }
+        } else if openedBy == nil {
+            return "a saver start (didstart, ScreenSaverEngine or a locked session)"
+        }
+        return "the displays to wake"
+    }
+
+    /// One line for the lifecycle log.
+    var summary: String {
+        func b(_ v: Bool) -> Int { v ? 1 : 0 }
+        return "anim=\(b(animating)) locked=\(b(sessionLocked)) didstart=\(b(saverStarted)) engine=\(b(engineRunning)) "
+            + "asleep=\(b(displaysAsleep)) exiting=\(b(exiting))"
+            + (preview ? " window=\(b(windowVisible)) host=\(b(previewHostActive))" : "")
+            + " → \(shouldRun ? "run (\(openedBy ?? "?"))" : "wait for \(waitingFor ?? "?")")"
+    }
+
+    /// Applies a system event (lock-UI, publish and window events don't change the gate).
     mutating func apply(_ event: SaverSystemEvent) {
         switch event {
         case .screenLocked: sessionLocked = true
-        case .screenUnlocked: sessionLocked = false
+        // A run that was started ends with the unlock, its didstop or willstop.
+        case .screenUnlocked: sessionLocked = false; saverStarted = false
+        case .saverDidStart: saverStarted = true
+        case .saverDidStop, .willStop: saverStarted = false
         case .screensDidSleep: displaysAsleep = true
         case .screensDidWake: displaysAsleep = false
+        case .engineLaunched: engineRunning = true
+        case .engineTerminated: engineRunning = false
+        case .previewHostActivated: previewHostActive = true
+        case .previewHostDeactivated: previewHostActive = false
+        case .lockUIShown, .lockUIHidden, .published, .windowChanged: break
+        }
+    }
+}
+
+/// "A saver run is in progress", remembered per host process so that an instance created after
+/// didstart (WallpaperAgent may add the presented view next to the prewarmed one) still knows.
+struct SaverStartLatch: Equatable {
+    private(set) var started = false
+
+    mutating func apply(_ event: SaverSystemEvent) {
+        switch event {
+        case .saverDidStart: started = true
+        case .saverDidStop, .willStop, .screenUnlocked: started = false
         default: break
         }
+    }
+}
+
+/// Whether a preview's window can be seen, from what AppKit reports in the (remote-view) host. Each
+/// signal is trusted only once it has said "visible": the macOS 26 saver host reports its window as
+/// always occluded, and a host that never reports visibility must not pause previews forever.
+/// (Which signals System Settings' preview host reports is unverified; see Saver/README.md.)
+struct SaverWindowVisibility: Equatable {
+    private(set) var orderedInTrusted = false
+    private(set) var occlusionTrusted = false
+
+    mutating func isVisible(orderedIn: Bool, miniaturized: Bool, occlusionVisible: Bool) -> Bool {
+        if orderedIn { orderedInTrusted = true }
+        if occlusionVisible { occlusionTrusted = true }
+        return !miniaturized && (!orderedInTrusted || orderedIn) && (!occlusionTrusted || occlusionVisible)
+    }
+}
+
+/// The app whose windows show LivePaper's preview instances.
+enum SaverPreviewHost {
+    static let bundleIdentifiers: Set<String> = ["com.apple.systempreferences"]
+
+    /// Previews run while their host app is frontmost. Unknown (nil) counts as frontmost, so a
+    /// preview is never paused on a guess.
+    static func isActive(frontmostBundleIdentifier: String?) -> Bool {
+        frontmostBundleIdentifier.map(bundleIdentifiers.contains) ?? true
     }
 }
 
@@ -389,9 +547,10 @@ struct SaverPowerState: Equatable {
 
 enum SaverPerformance {
     /// Frame rate / render scale for web scenes. Previews (System Settings thumbnails) are tiny, so
-    /// they render at full scale but at 30 fps.
-    static func resolve(_ profile: LPPerformanceProfile, power: SaverPowerState, preview: Bool) -> LPPerformanceProfile.Resolved {
-        if preview { return .init(fps: 30, scale: 1) }
+    /// they render at full scale but at `SaverGatePolicy.previewFPS` (15 fps).
+    static func resolve(_ profile: LPPerformanceProfile, power: SaverPowerState, preview: Bool,
+                        policy: SaverGatePolicy = .standard) -> LPPerformanceProfile.Resolved {
+        if preview { return .init(fps: policy.previewFPS, scale: 1) }
         return profile.resolved(onBatteryOrLowPower: power.prefersBatterySaver)
     }
 }
