@@ -319,6 +319,42 @@ extension SelfTests {
             // A session marker without a workspace refuses the scene commands too.
             try expectEqual(try sb.run(["compile", pkg.path], extraEnv: [AISessionPolicy.sessionVariable: "s1"]).status, 2)
         },
+        cliTest("cli.check.motion") { sb in
+            // `check` against a stand-in render server whose motion answer is "only the top-left
+            // corner moves": the summary shows the motion numbers and the map, the check fails with
+            // an actionable problem, and report.json carries the numbers.
+            let pkg = sb.root.appendingPathComponent("corner.lpscene")
+            try CLITestSupport.writeWebScene(at: pkg, id: "corner", name: "Corner")
+            let motionAsked = RuntimeTests.Flag()
+            _ = try RuntimeTests.serve(sb.support.appendingPathComponent("render.sock"), count: 12) { line in
+                guard let req = try? JSONDecoder().decode(RenderRequest.self, from: line) else { return Data("{}".utf8) }
+                var resp: RenderResponse
+                switch req.op {
+                case .still: resp = RenderResponse(ok: true, ready: true, out: req.out, meanLuma: 30, clockLuma: 10)
+                case .bench: resp = RenderResponse(ok: true, ready: true, benchMs: 1.1)
+                case .motion:
+                    motionAsked.set()
+                    resp = RuntimeTests.motionResponse(CheckFrame(Int(req.width ?? 0), Int(req.height ?? 0), dpr: req.dpr ?? 1, t: 0)) { c, r in
+                        c < 2 && r < 2 ? 5 : 0
+                    }
+                    resp.out = req.out
+                default: resp = RenderResponse(ok: true, ready: true)
+                }
+                return (try? JSONEncoder().encode(resp)) ?? Data()
+            }
+            let r = try sb.run(["check", pkg.path, "--quick"])
+            try expectEqual(r.status, 1)
+            try expect(r.out.contains("motion       1280x720@0.5: 3 % of the frame changes within 5 s (min 25 %), 3 % within 2 s  ·  moving in 1/9 regions (min 5)"), r.out)
+            try expect(r.out.contains("where 1280x720@0.5 changes within 5 s (# at most sampled moments, + at some, . never):\n                 ##..............\n"), r.out)
+            try expect(r.out.contains("heat map ") && r.out.contains("motion-1280x720@0.5.png (amber = moves most of the time"), r.out)
+            try expect(r.out.contains("1. Too static at 1280x720@0.5: only 3 % of the frame visibly changes within 5 s"), r.out)
+            try expect(motionAsked.isSet, "the check asked for motion")
+            let report = try SceneManifest.decoder().decode(CheckReport.self, from: Data(contentsOf: pkg.appendingPathComponent(".check/report.json")))
+            try expectEqual(report.motion?.first?.size, "1280x720@0.5")
+            try expectEqual(report.motion?.first?.coverage5s, 0.028)
+            try expectEqual(report.motion?.first?.map.first, "##..............")
+            try expect(!report.passed && report.problems.contains { $0.hasPrefix("Too static") }, "\(report.problems)")
+        },
         cliTest("cli.ai-session.render-spool") { sb in
             // With the render socket out of reach (Codex's sandbox), the session's CLI hands its
             // requests to the runner through the spool instead of failing or starting a daemon.

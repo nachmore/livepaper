@@ -33,8 +33,10 @@ enum StillPreviews {
         // `check` rewrites .check/ on every run; start from an empty directory so stale previews never linger.
         try? fm.removeItem(at: dir)
         var written = 0
-        for still in report.stills {
-            let source = still.path.hasPrefix("/") ? URL(fileURLWithPath: still.path) : package.appendingPathComponent(still.path)
+        // The stills, and the motion heat maps (motion-<size>.png).
+        let images = report.stills.map(\.path) + (report.motion ?? []).compactMap(\.heatmap)
+        for path in images {
+            let source = path.hasPrefix("/") ? URL(fileURLWithPath: path) : package.appendingPathComponent(path)
             guard (try? source.resourceValues(forKeys: [.isRegularFileKey]))?.isRegularFile == true else { continue }
             if written == 0 { try? fm.createDirectory(at: dir, withIntermediateDirectories: true) }
             let out = dir.appendingPathComponent(source.deletingPathExtension().lastPathComponent + ".jpg")

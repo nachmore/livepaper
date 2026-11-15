@@ -66,7 +66,8 @@ public struct MotionSummary: Codable, Sendable, Equatable {
     public var rows: Int
     /// The sampled moments (s).
     public var times: [Double]
-    /// Share of the frame (tiles, averaged over the sampled moments) that visibly changes within 2 s.
+    /// Share of the frame (tiles, averaged over the sampled moments) that visibly changes within 2 s
+    /// (compared with the frames 0.5 s and 2 s later, and frame to frame in between).
     public var coverage2s: Double
     /// …within 5 s.
     public var coverage5s: Double
@@ -232,7 +233,7 @@ public enum MotionAnalysis {
                                  heatmap: String? = nil) -> MotionSummary {
         let n = m.cols * m.rows
         let alive = aliveShare(m, budgets: b)
-        let mid = movingShare(m, gap: 2, budgets: b)
+        let mid = movingShare(m, within: 2, budgets: b)
         let coverage5 = n > 0 ? alive.reduce(0, +) / Double(n) : 0
         let still = regionNames.indices.filter { regionShare(alive, region: $0, cols: m.cols, rows: m.rows) < b.regionShare }
         var busy = 0.0, flicker = 0.0, flickerAt: Double?
@@ -260,28 +261,39 @@ public enum MotionAnalysis {
     /// Per tile, the share of sampled moments at which it visibly changed within the longest gap.
     public static func aliveShare(_ m: MotionMeasurement, budgets b: MotionBudgets = MotionBudgets()) -> [Double] {
         let n = m.cols * m.rows
+        let longest = m.samples.flatMap { $0.gaps.map(\.gap) }.max() ?? 0
         var counts = [Double](repeating: 0, count: n)
         var samples = 0
-        for s in m.samples {
-            guard let long = s.gaps.max(by: { $0.gap < $1.gap }), long.tiles.level.count == n else { continue }
+        for s in m.samples where valid(s, n) {
             samples += 1
-            for i in 0..<n where moves(long.tiles, i, b) { counts[i] += 1 }
+            for i in 0..<n where movesWithin(s, longest, i, b) { counts[i] += 1 }
         }
         return samples > 0 ? counts.map { $0 / Double(samples) } : counts
     }
 
-    /// Share of the frame that visibly changes within the gap closest to `gap`, averaged over samples.
-    static func movingShare(_ m: MotionMeasurement, gap: Double, budgets b: MotionBudgets) -> Double {
+    /// Share of the frame that visibly changes within `seconds`, averaged over the samples.
+    static func movingShare(_ m: MotionMeasurement, within seconds: Double, budgets b: MotionBudgets) -> Double {
         let n = m.cols * m.rows
-        let shares = m.samples.compactMap { s -> Double? in
-            guard let g = closest(s.gaps, to: gap), g.tiles.level.count == n, n > 0 else { return nil }
-            return Double((0..<n).filter { moves(g.tiles, $0, b) }.count) / Double(n)
+        let shares = m.samples.filter { valid($0, n) && n > 0 }.map { s in
+            Double((0..<n).filter { movesWithin(s, seconds, $0, b) }.count) / Double(n)
         }
         return shares.isEmpty ? 0 : shares.reduce(0, +) / Double(shares.count)
     }
 
+    /// Whether tile `i` visibly changed within `seconds` of the sample's moment: compared with any
+    /// frame up to that gap, or between successive frames of the flicker burst. ("Within", not "after":
+    /// a sway or a flash whose period divides a gap looks unchanged at exactly that gap.)
+    static func movesWithin(_ s: MotionSample, _ seconds: Double, _ i: Int, _ b: MotionBudgets) -> Bool {
+        s.gaps.contains { $0.gap <= seconds + 1e-6 && moves($0.tiles, i, b) } || moves(s.flicker, i, b)
+    }
+
+    static func valid(_ s: MotionSample, _ n: Int) -> Bool {
+        !s.gaps.isEmpty && s.gaps.allSatisfy { $0.tiles.level.count == n && $0.tiles.area.count == n } &&
+            s.flicker.level.count == n && s.flicker.area.count == n
+    }
+
     static func moves(_ t: MotionTiles, _ i: Int, _ b: MotionBudgets) -> Bool {
-        t.level[i] >= b.tileLevel || (i < t.area.count && t.area[i] >= b.tileArea)
+        t.level[i] >= b.tileLevel || t.area[i] >= b.tileArea
     }
 
     static func closest(_ gaps: [MotionGap], to gap: Double) -> MotionGap? {
