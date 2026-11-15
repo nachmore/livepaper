@@ -1,0 +1,26 @@
+{
+  "clock" : {
+    "position" : "top"
+  },
+  "created" : "2026-11-15T02:34:45Z",
+  "description" : "Deep midnight, violet and teal colour fields drifting behind a thick pane of curved glass, with a flowing ember ribbon inside, faint warm-and-cool fringes on short arcs, a slow refraction wobble, window-like reflections and delicate curved pool caustics drifting below.",
+  "id" : "liquid-glass",
+  "kind" : "web",
+  "name" : "Liquid Glass",
+  "performance" : {
+    "benchMs" : 1.7,
+    "checkedAt" : "2026-11-15T02:57:24Z",
+    "energyMw" : 24
+  },
+  "runtime" : 1,
+  "schema" : 1,
+  "tags" : [
+    "abstract",
+    "glass",
+    "calm",
+    "gradient",
+    "night",
+    "caustics"
+  ],
+  "updated" : "2026-11-15T02:49:11Z"
+}

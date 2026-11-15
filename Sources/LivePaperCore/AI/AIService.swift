@@ -94,7 +94,8 @@ public final class AIService: AIServicing, @unchecked Sendable {
             },
             searchPath: { detector.searchPath() },
             extraArguments: settings.extraArguments[harness.kind.rawValue] ?? [],
-            timeout: timeoutOverride ?? settings.timeout)
+            timeout: timeoutOverride ?? settings.timeout,
+            prepareRenderer: Self.rendererWarmUp(for: checker))
         let chosenModel = model ?? settings.models[harness.kind.rawValue]
         let session = AISession(id: id, workspace: workspace, request: request, harness: harness, model: chosenModel, dependencies: deps)
         log.info("starting AI session \(id, privacy: .public) with \(harness.name, privacy: .public)")
@@ -103,6 +104,14 @@ public final class AIService: AIServicing, @unchecked Sendable {
     }
 
     // MARK: - Internals
+
+    /// Starts the render server the checker talks to (a no-op when the app's embedded server or a
+    /// daemon already listens). Only for the real SceneChecker + RenderClient pair: fakes in tests
+    /// get nothing, and LIVEPAPER_NO_SPAWN=1 still forbids starting a daemon.
+    static func rendererWarmUp(for checker: SceneChecking) -> () -> Void {
+        guard let client = (checker as? SceneChecker)?.render as? RenderClient else { return {} }
+        return { try? client.ensureServer(timeout: 40) }
+    }
 
     /// `20261113T175610Z-3f9a1c`: sortable, unique, file-name safe.
     static func makeSessionID(date: Date = Date()) -> String {

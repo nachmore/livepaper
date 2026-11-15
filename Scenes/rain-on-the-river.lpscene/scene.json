@@ -1,0 +1,26 @@
+{
+  "author" : "LivePaper",
+  "clock" : {
+    "position" : "top"
+  },
+  "created" : "2026-11-15T02:43:45Z",
+  "description" : "A hazy night skyline of varied towers in soft, steady rain, its lights stretched into long, softly rippling columns across a wide black river.",
+  "id" : "rain-on-the-river",
+  "kind" : "web",
+  "name" : "Rain on the River",
+  "performance" : {
+    "benchMs" : 2.0419999999999998,
+    "checkedAt" : "2026-11-15T03:03:08Z",
+    "energyMw" : 56
+  },
+  "runtime" : 1,
+  "schema" : 1,
+  "tags" : [
+    "night",
+    "city",
+    "rain",
+    "river",
+    "calm"
+  ],
+  "updated" : "2026-11-15T02:56:10Z"
+}

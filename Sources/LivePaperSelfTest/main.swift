@@ -21,7 +21,7 @@ func tempDir(_ name: String) throws -> URL {
 }
 
 enum SelfTests {
-    static var all: [TestCase] { contracts + runtime + saver + core + app + helper + cli + wallpaper }
+    static var all: [TestCase] { contracts + runtime + saver + core + app + helper + cli + wallpaper + builtinScenes }
 }
 
 let filter = CommandLine.arguments.dropFirst().first

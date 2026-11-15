@@ -12,6 +12,17 @@ public protocol HarnessStreamParser: AnyObject {
     func finish() -> [AISessionEvent]
     /// The agent's final message, when the format reports one (used as the history summary).
     var finalMessage: String? { get }
+    /// The model the harness says it is running (e.g. Claude Code's `init` event), when the format
+    /// reports one. Recorded in the scene's history, so it is right even when no model was chosen.
+    var reportedModel: String? { get }
+    /// The last error the harness reported in its own stream (a failed turn, an API error). It
+    /// explains a non-zero exit better than stderr, which often ends with unrelated noise.
+    var lastError: String? { get }
+}
+
+extension HarnessStreamParser {
+    public var reportedModel: String? { nil }
+    public var lastError: String? { nil }
 }
 
 // MARK: - Shared helpers
@@ -37,6 +48,16 @@ enum StreamText {
         return text.isEmpty ? nil : .assistantText(text)
     }
 
+    /// API errors often arrive as a JSON document inside the message
+    /// (`{"error":{"code":"request_too_large","message":"Request exceeds …"}}`): "Request exceeds … (request_too_large)".
+    static func errorText(_ s: String) -> String {
+        guard let obj = jsonObject(s) else { return s }
+        let error = obj["error"] as? [String: Any] ?? obj
+        guard let message = (error["message"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !message.isEmpty else { return s }
+        let code = (error["code"] as? String) ?? (error["type"] as? String)
+        return code.map { "\(message) (\($0))" } ?? message
+    }
+
     static func truncate(_ s: String, _ limit: Int = 200) -> String {
         let oneLine = s.replacingOccurrences(of: "\n", with: " ⏎ ")
         return oneLine.count <= limit ? oneLine : String(oneLine.prefix(limit - 1)) + "…"
@@ -55,8 +76,19 @@ enum StreamText {
         // Longest first: "/private/var/…/" must go before "/var/…/" can match inside it.
         for r in roots.sorted(by: { $0.count > $1.count }) {
             out = out.replacingOccurrences(of: "file://" + r + "/", with: "").replacingOccurrences(of: r + "/", with: "")
+            // The workspace itself (`cd /…/ws; ls`), but not a longer path that merely starts with it.
+            out = out.replacingOccurrences(of: NSRegularExpression.escapedPattern(for: r) + #"(?![^\s;&|'")])"#, with: ".",
+                                           options: .regularExpression)
         }
         return out
+    }
+
+    /// `cd . && livepaper check scene` → `livepaper check scene`: agents often prefix commands
+    /// with a cd into the workspace they already run in.
+    static func dropWorkspaceCD(_ command: String) -> String {
+        guard let range = command.range(of: #"^cd (\.|"\."|'\.')\s*(&&|;)\s*"#, options: .regularExpression) else { return command }
+        let rest = command[range.upperBound...]
+        return rest.isEmpty ? command : String(rest)
     }
 
     /// `/bin/zsh -lc 'livepaper check scene'` → `livepaper check scene` (Codex wraps every command
@@ -71,7 +103,10 @@ enum StreamText {
     static func toolDetail(_ input: Any?, root: URL) -> String {
         guard let dict = input as? [String: Any] else { return "" }
         for key in ["command", "file_path", "path", "pattern", "url", "query", "description", "prompt"] {
-            if let v = dict[key] as? String, !v.isEmpty { return truncate(relative(v, to: root)) }
+            if let v = dict[key] as? String, !v.isEmpty {
+                let shown = relative(v, to: root)
+                return truncate(key == "command" ? dropWorkspaceCD(shown) : shown)
+            }
             if let v = dict[key] as? [String], !v.isEmpty { return truncate(relative(v.joined(separator: " "), to: root)) }
         }
         return ""
@@ -85,6 +120,8 @@ enum StreamText {
 public final class ClaudeStreamParser: HarnessStreamParser {
     private let root: URL
     public private(set) var finalMessage: String?
+    public private(set) var reportedModel: String?
+    public private(set) var lastError: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -92,7 +129,8 @@ public final class ClaudeStreamParser: HarnessStreamParser {
         switch obj["type"] as? String {
         case "system":
             guard obj["subtype"] as? String == "init" else { return [] }
-            let model = (obj["model"] as? String).map { " (\($0))" } ?? ""
+            reportedModel = (obj["model"] as? String)?.trimmingCharacters(in: .whitespaces).nilIfEmpty
+            let model = reportedModel.map { " (\($0))" } ?? ""
             return [.status("Claude Code started\(model)")]
         case "assistant":
             let content = (obj["message"] as? [String: Any])?["content"] as? [[String: Any]] ?? []
@@ -115,7 +153,8 @@ public final class ClaudeStreamParser: HarnessStreamParser {
                 finalMessage = result
             }
             guard obj["is_error"] as? Bool == true else { return [] }
-            let detail = (obj["result"] as? String) ?? (obj["subtype"] as? String) ?? "error"
+            let detail = StreamText.errorText((obj["result"] as? String) ?? (obj["subtype"] as? String) ?? "error")
+            lastError = detail
             return [.status("Claude Code stopped: \(StreamText.truncate(detail))")]
         default:
             return []   // "user" (tool results echo), "stream_event", future types
@@ -135,6 +174,7 @@ public final class CodexStreamParser: HarnessStreamParser {
     private let root: URL
     private var startedItems = Set<String>()
     public private(set) var finalMessage: String?
+    public private(set) var lastError: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -153,10 +193,13 @@ public final class CodexStreamParser: HarnessStreamParser {
             if item["type"] as? String == "command_execution", let id = item["id"] as? String, startedItems.contains(id) { return [] }
             return self.item(item)
         case "turn.failed":
-            let message = ((obj["error"] as? [String: Any])?["message"] as? String) ?? "turn failed"
+            let message = StreamText.errorText(((obj["error"] as? [String: Any])?["message"] as? String) ?? "turn failed")
+            lastError = message
             return [.status("Codex stopped: \(StreamText.truncate(message))")]
         case "error":
-            return [.status("Codex: \(StreamText.truncate(obj["message"] as? String ?? "error"))")]
+            let message = StreamText.errorText(obj["message"] as? String ?? "error")
+            lastError = message
+            return [.status("Codex: \(StreamText.truncate(message))")]
         default:
             return []
         }
@@ -172,7 +215,7 @@ public final class CodexStreamParser: HarnessStreamParser {
             return [.status("Thinking…")]
         case "command_execution":
             let command = StreamText.unwrapShell(item["command"] as? String ?? "")
-            return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.relative(command, to: root)))]
+            return [.toolUse(name: "shell", detail: StreamText.truncate(StreamText.dropWorkspaceCD(StreamText.relative(command, to: root))))]
         case "file_change":
             let paths = (item["changes"] as? [[String: Any]] ?? []).compactMap { $0["path"] as? String }
             return [.toolUse(name: "edit", detail: StreamText.truncate(paths.map { StreamText.relative($0, to: root) }.joined(separator: ", ")))]
@@ -182,7 +225,9 @@ public final class CodexStreamParser: HarnessStreamParser {
         case "web_search":
             return [.toolUse(name: "web_search", detail: StreamText.truncate(item["query"] as? String ?? ""))]
         case "error":
-            return [.status("Codex: \(StreamText.truncate(item["message"] as? String ?? "error"))")]
+            let message = StreamText.errorText(item["message"] as? String ?? "error")
+            lastError = message
+            return [.status("Codex: \(StreamText.truncate(message))")]
         default:
             return []
         }
@@ -207,7 +252,9 @@ public final class CodexStreamParser: HarnessStreamParser {
             if let text = msg["last_agent_message"] as? String, !text.isEmpty { finalMessage = text }
             return []
         case "error":
-            return [.status("Codex: \(StreamText.truncate(msg["message"] as? String ?? "error"))")]
+            let message = StreamText.errorText(msg["message"] as? String ?? "error")
+            lastError = message
+            return [.status("Codex: \(StreamText.truncate(message))")]
         default:
             return []
         }
@@ -229,7 +276,14 @@ public final class KiroStreamParser: HarnessStreamParser {
     private var thinking = false
     private var announcedTools = Set<String>()
     private var lastMessage = ""
+    /// Message text since the last tool call: the agent's closing reply. kiro's `finalText` is
+    /// every message of the turn run together ("Too dark. Let me look.\nI've built …"), which
+    /// makes a poor summary.
+    private var replySinceLastTool = ""
     public var finalMessage: String? { lastMessage.isEmpty ? nil : lastMessage }
+    /// The session's `model` config option (`config_option_update`); "auto" when kiro chooses.
+    public private(set) var reportedModel: String?
+    public private(set) var lastError: String?
     public init(workspaceRoot: URL) { root = workspaceRoot }
 
     public func parse(line: String) -> [AISessionEvent] {
@@ -240,10 +294,16 @@ public final class KiroStreamParser: HarnessStreamParser {
         case "runFinished":
             let data = obj["data"] as? [String: Any] ?? [:]
             let events = flush()
-            if let final = (data["finalText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !final.isEmpty { lastMessage = final }
+            let reply = replySinceLastTool.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !reply.isEmpty {
+                lastMessage = reply
+            } else if let final = (data["finalText"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !final.isEmpty {
+                lastMessage = final
+            }
             let status = data["status"] as? String ?? "success"
             guard status != "success" else { return events }
-            let reason = (data["error"] as? String) ?? (data["stopReason"] as? String) ?? status
+            let reason = StreamText.errorText((data["error"] as? String) ?? (data["stopReason"] as? String) ?? status)
+            lastError = reason
             return events + [.status("Kiro CLI stopped: \(StreamText.truncate(reason))")]
         default:
             break
@@ -254,6 +314,7 @@ public final class KiroStreamParser: HarnessStreamParser {
             thinking = false
             guard let chunk = Self.text(of: update["content"]) else { return [] }
             text += chunk
+            replySinceLastTool += chunk
             return drainCompleteParagraphs()
         case "agent_thought_chunk":
             guard !thinking else { return [] }
@@ -261,9 +322,17 @@ public final class KiroStreamParser: HarnessStreamParser {
             return flush() + [.status("Thinking…")]
         case "tool_call":
             thinking = false
+            replySinceLastTool = ""
             let id = update["toolCallId"] as? String ?? UUID().uuidString
             guard announcedTools.insert(id).inserted else { return [] }
             return flush() + [toolEvent(update)]
+        case "config_option_update":
+            let options = update["configOptions"] as? [[String: Any]] ?? []
+            if let model = options.first(where: { $0["id"] as? String == "model" })?["currentValue"] as? String,
+               let value = model.trimmingCharacters(in: .whitespaces).nilIfEmpty {
+                reportedModel = value
+            }
+            return []
         case "tool_call_update":
             // Some agents only fill in the title/input in a later update; announce once.
             guard let id = update["toolCallId"] as? String, !announcedTools.contains(id),

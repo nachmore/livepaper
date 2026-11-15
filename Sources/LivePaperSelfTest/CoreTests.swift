@@ -622,6 +622,19 @@ extension SelfTests {
                 do { _ = try builder.build(.modify(sceneID: "clip", prompt: "x"), sessionID: "s5"); throw TestFailure(description: "video") }
                 catch AIError.unsupported {}
                 try expectLibraryError({ _ = try builder.build(.create(prompt: "x"), sessionID: "s1") }) { if case .exists = $0 { return true }; return false }
+
+                // Pruning: stills go after a day, whole workspaces after a week.
+                for (id, days) in [("fresh", 0.1), ("yesterday", 2.0), ("old", 8.0)] {
+                    let w = try builder.build(.create(prompt: "x"), sessionID: id)
+                    try sb.write("png", to: w.scene.appendingPathComponent(".check/1512x982@2-t0.png"))
+                    try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-days * 86_400)], ofItemAtPath: w.root.path)
+                }
+                builder.pruneWorkspaces()
+                let left = { (id: String) in AIWorkspace(root: sb.workspaces.appendingPathComponent(id)) }
+                try expect(exists(left("fresh").scene.appendingPathComponent(".check/1512x982@2-t0.png")), "a fresh session keeps its stills")
+                try expect(exists(left("yesterday").scene.appendingPathComponent("scene.js")) && exists(left("yesterday").stdoutLog.deletingLastPathComponent()))
+                try expect(!exists(left("yesterday").scene.appendingPathComponent(".check")), "stills of a day-old session are pruned")
+                try expect(!exists(left("old").root), "week-old workspaces are deleted")
             }
         },
         TestCase(name: "core.ai.argv") {
@@ -758,6 +771,9 @@ extension SelfTests {
                 echo "Using tool: fs_write scene/scene.js"
                 command -v livepaper
                 printf 'LivePaper.scene({ draw(lp) { lp.ctx.fillStyle = "#102040"; } });\\n' > scene/scene.js
+                printf 'scratch' > scene/.part_sky.js
+                printf 'notes' > scene/notes.md
+                mkdir -p scene/assets && printf 'x' > scene/assets/palette.json
                 printf '{"id":"untitled","name":"Midnight Lake","kind":"video"}' > scene/scene.json
                 livepaper check scene
                 sleep 2
@@ -780,7 +796,8 @@ extension SelfTests {
                 try expect(!env.contains("CLAUDECODE=") && !env.contains("CLAUDE_CODE_SESSION_ID="), "parent agent variables scrubbed")
                 try expect(env.contains("PATH=\(ws.bin.path):") && env.contains("NO_COLOR=1") && env.contains("LOGIN_ONLY=1"))
                 try expect(read(ws.stdoutLog).contains("Reading the task"), "stdout teed to the log")
-                // The candidate is normalised and carries its provenance.
+                // The candidate is normalised and carries its provenance; the agent's scratch files are gone.
+                try expectEqual(children(ws.scene).filter { $0 != ".check" }, ["assets", "history.jsonl", "scene.js", "scene.json"])
                 let m = try SceneManifest.load(package: ws.scene)
                 try expectEqual(m.id, "midnight-lake"); try expectEqual(m.kind, .web); try expectEqual(m.runtime, 1)
                 let history = SceneHistory.entries(in: ws.scene)
@@ -861,6 +878,80 @@ extension SelfTests {
                 try expectEqual(cancelled.last, .failed("Cancelled."))
                 try expectGroupDead(cancelled, sb)
                 handle.cancel()   // after the end: harmless
+            }
+        },
+        TestCase(name: "core.ai.session.reported-model") {
+            try CoreSandbox.with("session-model") { sb in
+                // A fake `claude` speaking stream-json: the model it reports is what history records.
+                let script = sb.root.appendingPathComponent("agents/claude")
+                try sb.write("""
+                #!/bin/sh
+                cat > /dev/null
+                echo '{"type":"system","subtype":"init","model":"claude-test-9-9"}'
+                printf '// v2\\n' > scene/scene.js
+                echo '{"type":"result","subtype":"success","is_error":false,"result":"Done."}'
+
+                """, to: script)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+                let (ai, _) = try sessionFixture(sb, agent: "true")
+                let claude = AIHarness(kind: .claude, name: "Fake Claude", executable: script.path)
+                let handle = try ai.start(.create(prompt: "x"), harness: claude, model: "opus")
+                let events = try collect(handle)
+                let scene = AIWorkspace(root: handle.workspace).scene
+                try expectEqual(events.last, .finished(package: scene))
+                try expect(events.contains(.status("Claude Code started (claude-test-9-9)")))
+                let entry = SceneHistory.entries(in: scene).first
+                try expectEqual(entry?.model, "claude-test-9-9")
+                try expectEqual(entry?.harness, "claude")
+                try expectEqual(entry?.summary, "Done.")
+            }
+        },
+        TestCase(name: "core.ai.session.harness-error") {
+            try CoreSandbox.with("session-harness-error") { sb in
+                // A fake `codex`: a stale warning on stderr, then the real reason in its JSON stream.
+                let script = sb.root.appendingPathComponent("agents/codex")
+                try sb.write("""
+                #!/bin/sh
+                cat > /dev/null
+                echo 'ERROR codex_core::tools::router: error=apply_patch verification failed' >&2
+                echo '{"type":"thread.started","thread_id":"t"}'
+                echo '{"type":"turn.failed","error":{"message":"Request exceeds the maximum allowed size"}}'
+                exit 1
+
+                """, to: script)
+                try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: script.path)
+                let (ai, _) = try sessionFixture(sb, agent: "true")
+                let codex = AIHarness(kind: .codex, name: "Fake Codex", executable: script.path)
+                let events = try collect(try ai.start(.create(prompt: "x"), harness: codex, model: nil))
+                try expectEqual(events.last, .failed("Fake Codex exited with status 1: Request exceeds the maximum allowed size"))
+            }
+        },
+        TestCase(name: "core.ai.session.renderer-first") {
+            // With the real checker, the session makes sure a render server listens before the agent
+            // starts, so the agent's `livepaper` never has to launch LivePaperRenderd itself.
+            try CoreSandbox.with("session-renderer", extraEnv: ["LIVEPAPER_NO_SPAWN": "1"]) { sb in
+                let socket = URL(fileURLWithPath: "/tmp/lp-test-\(UUID().uuidString.prefix(8)).sock")
+                let marker = sb.root.appendingPathComponent("probed")
+                let listener = try LineSocket.listen(path: socket.path)
+                defer { close(listener); unlink(socket.path) }
+                _ = fcntl(listener, F_SETFL, fcntl(listener, F_GETFL) & ~O_NONBLOCK)   // block in accept()
+                Thread {
+                    while true {
+                        let fd = accept(listener, nil, nil)
+                        if fd < 0 { return }
+                        FileManager.default.createFile(atPath: marker.path, contents: Data())
+                        close(fd)
+                    }
+                }.start()
+                let checker = SceneChecker(render: RenderClient(socket: socket))
+                let (ai, harness) = try sessionFixture(sb, checker: checker, agent: """
+                for i in 1 2 3 4 5 6 7 8 9 10; do [ -f '\(marker.path)' ] && break; sleep 0.2; done
+                [ -f '\(marker.path)' ] && echo 'renderer was probed first'
+                true
+                """)
+                let events = try collect(try ai.start(.create(prompt: "x"), harness: harness, model: nil))
+                try expect(events.contains(.assistantText("renderer was probed first")), "\(events)")
+                try expectEqual(events.last, .failed("Fake agent finished without changing the scene."))
             }
         },
     ] + coreParsers }
@@ -975,12 +1066,19 @@ extension SelfTests {
                 .toolUse(name: "Read", detail: "AGENTS.md"), .toolUse(name: "Edit", detail: "scene/scene.js"),
                 .toolUse(name: "Bash", detail: "livepaper check scene"), .assistantText(final)])
             try expectEqual(parser.finalMessage, final)
+            try expectEqual(parser.reportedModel, "claude-haiku-5-5")
             // Fallbacks: plain text passes through, errors are reported, unknown events ignored.
             try expectEqual(parser.parse(line: "\u{1B}[33mWarning: settings file ignored\u{1B}[0m"), [.assistantText("Warning: settings file ignored")])
             try expectEqual(parser.parse(line: "{not json"), [.assistantText("{not json")])
             try expectEqual(parser.parse(line: #"{"type":"result","subtype":"error_max_turns","is_error":true}"#),
                             [.status("Claude Code stopped: error_max_turns")])
+            try expectEqual(parser.lastError, "error_max_turns")
             try expectEqual(parser.parse(line: #"{"type":"stream_event","event":{}}"#), [])
+            // A leading cd into the workspace is noise; other paths stay as they are.
+            try expectEqual(parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"cd /private/var/folders/lp/T/ws; cat AGENTS.md | head -50"}}]}}"#),
+                            [.toolUse(name: "Bash", detail: "cat AGENTS.md | head -50")])
+            try expectEqual(parser.parse(line: #"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls /var/folders/lp/T/ws2/x /var/folders/lp/T/ws"}}]}}"#),
+                            [.toolUse(name: "Bash", detail: "ls /var/folders/lp/T/ws2/x .")])
             try expectEqual(parser.parse(line: "   "), [])
         },
         TestCase(name: "core.ai.parsers.codex") {
@@ -993,8 +1091,17 @@ extension SelfTests {
                 .toolUse(name: "shell", detail: "livepaper check scene"),
                 .assistantText("Replaced `#000000` with `#102040`; `livepaper check scene` passed.")])
             try expectEqual(parser.finalMessage, "Replaced `#000000` with `#102040`; `livepaper check scene` passed.")
+            try expectEqual(parser.reportedModel, nil)   // codex --json doesn't say
+            try expectEqual(parser.lastError, nil)
             try expectEqual(parser.parse(line: #"{"type":"turn.failed","error":{"message":"rate limited"}}"#), [.status("Codex stopped: rate limited")])
+            try expectEqual(parser.lastError, "rate limited")
+            // Recorded from a failed run: the API error arrives as JSON inside the message.
+            let tooLarge = #"{"type":"error","message":"{\"error\":{\"code\":\"request_too_large\",\"message\":\"Request exceeds the maximum allowed size\",\"param\":null,\"type\":\"invalid_request_error\"}}"}"#
+            try expectEqual(parser.parse(line: tooLarge), [.status("Codex: Request exceeds the maximum allowed size (request_too_large)")])
+            try expectEqual(parser.lastError, "Request exceeds the maximum allowed size (request_too_large)")
             // The pre-0.5 event format.
+            try expectEqual(parser.parse(line: #"{"type":"item.started","item":{"id":"item_9","type":"command_execution","command":"/bin/zsh -lc 'cd /var/folders/lp/T/ws && livepaper check scene'"}}"#),
+                            [.toolUse(name: "shell", detail: "livepaper check scene")])
             try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"exec_command_begin","command":["bash","-lc","ls scene"]}}"#),
                             [.toolUse(name: "shell", detail: "ls scene")])
             try expectEqual(parser.parse(line: #"{"id":"0","msg":{"type":"agent_message","message":"Done."}}"#), [.assistantText("Done.")])
@@ -1010,6 +1117,13 @@ extension SelfTests {
                 .toolUse(name: "Run LivePaper scene check once", detail: "livepaper check scene"),
                 .assistantText(final)])
             try expectEqual(parser.finalMessage, final)
+            try expectEqual(parser.reportedModel, nil)
+            // The session's model option (kiro-cli 3.3 sends it before the first turn, then again).
+            let option = #"{"type":"sessionUpdate","data":{"sessionId":"s","update":{"sessionUpdate":"config_option_update","configOptions":[{"id":"mode","currentValue":"vibe"},{"id":"model","category":"model","currentValue":"MODEL"}]}}}"#
+            try expectEqual(parser.parse(line: option.replacingOccurrences(of: "MODEL", with: "auto")), [])
+            try expectEqual(parser.reportedModel, "auto")
+            try expectEqual(parser.parse(line: option.replacingOccurrences(of: "MODEL", with: "claude-opus-5.5")), [])
+            try expectEqual(parser.reportedModel, "claude-opus-5.5")
             // Bare ACP notifications; text is emitted per paragraph.
             let acp = KiroStreamParser(workspaceRoot: Recorded.workspace)
             try expectEqual(acp.parse(line: #"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"First.\n\nSecond"}}}}"#),
@@ -1017,6 +1131,16 @@ extension SelfTests {
             try expectEqual(acp.finish(), [.assistantText("Second")])
             try expectEqual(acp.parse(line: #"{"type":"runFinished","data":{"status":"error","error":"model unavailable"}}"#),
                             [.status("Kiro CLI stopped: model unavailable")])
+            try expectEqual(acp.lastError, "model unavailable")
+            // The summary is the closing reply, not every message of the turn (finalText) run together.
+            let turn = KiroStreamParser(workspaceRoot: Recorded.workspace)
+            for line in [
+                #"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"Too dark. Let me look."}}}}"#,
+                #"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"tool_call","toolCallId":"t9","title":"Read File","rawInput":{"path":"x.png"}}}}"#,
+                #"{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"I built the scene."}}}}"#,
+                #"{"type":"runFinished","data":{"status":"success","finalText":"Too dark. Let me look.\nI built the scene."}}"#,
+            ] { _ = turn.parse(line: line) }
+            try expectEqual(turn.finalMessage, "I built the scene.")
         },
         TestCase(name: "core.ai.parsers.plain") {
             // kiro-cli text mode / custom harnesses (synthetic: the smoke run used stream-json).

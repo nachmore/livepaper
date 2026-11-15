@@ -29,6 +29,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         var searchPath: () -> [String]
         var extraArguments: [String]
         var timeout: TimeInterval
+        /// Makes sure the render server runs before the harness starts, so the agent's `livepaper`
+        /// calls find it instead of starting LivePaperRenderd from inside the agent's process tree
+        /// (where a sandbox such as Codex's would also confine it). Failures are left to the check.
+        var prepareRenderer: () -> Void = {}
     }
 
     private enum StopReason { case cancelled, timedOut }
@@ -104,6 +108,7 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
             finish(.failed(error.localizedDescription)); return
         }
         sceneBefore = try? Data(contentsOf: sceneScript)
+        deps.prepareRenderer()
         parser = adapter.makeParser(workspaceRoot: ws.root)
         stdoutLog = Self.openLog(ws.stdoutLog)
         stderrLog = Self.openLog(ws.stderrLog)
@@ -226,7 +231,17 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
 
     /// Normalises the candidate's manifest (the agent may have edited fields it was told to keep)
     /// and records the session in its history.jsonl, which the library merges on accept.
+    /// What a web scene candidate may contain at its top level (ARCHITECTURE §4.2). Anything else is
+    /// an agent's scratch work (`.part_ridge.js`, `notes.md`, a backup copy) that would otherwise
+    /// be imported into the library with the scene.
+    static let candidateEntries: Set<String> = [SceneManifest.fileName, SceneCompiler.sceneFile, SceneCompiler.assetsDirectory,
+                                                SceneChecker.checkDirectory]
+
     private func finalizePackage() throws {
+        let fm = FileManager.default
+        for name in (try? fm.contentsOfDirectory(atPath: ws.scene.path)) ?? [] where !Self.candidateEntries.contains(name) {
+            try? fm.removeItem(at: ws.scene.appendingPathComponent(name))
+        }
         var m = try SceneManifest.load(package: ws.scene)
         let now = Date()
         m.schema = SceneManifest.currentSchema
@@ -248,7 +263,10 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
         try m.write(package: ws.scene)
         let summary = parser?.finalMessage ?? (try? String(contentsOf: ws.lastMessageFile, encoding: .utf8))?
             .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
-        try SceneHistory.append(SceneHistoryEntry(date: now, action: action, harness: harness.kind.rawValue, model: model,
+        // What the harness reported running beats what was asked for ("opus" → the full model id),
+        // and covers sessions that used the harness's own default.
+        let usedModel = parser?.reportedModel ?? model
+        try SceneHistory.append(SceneHistoryEntry(date: now, action: action, harness: harness.kind.rawValue, model: usedModel,
                                                   prompt: prompt, summary: summary), to: ws.scene)
     }
 
@@ -312,7 +330,8 @@ public final class AISession: AISessionHandle, @unchecked Sendable {
 
     private func exitFailure(_ status: Int32) -> String {
         let how = status > 128 ? "was stopped by signal \(status - 128)" : "exited with status \(status)"
-        let detail = stderrTail.suffix(3).joined(separator: " ").nilIfEmpty ?? parser?.finalMessage
+        // The harness's own error report first: stderr often ends with unrelated warnings.
+        let detail = parser?.lastError ?? stderrTail.suffix(3).joined(separator: " ").nilIfEmpty ?? parser?.finalMessage
         return "\(harness.name) \(how)" + (detail.map { ": " + StreamText.truncate($0, 400) } ?? ".")
     }
 

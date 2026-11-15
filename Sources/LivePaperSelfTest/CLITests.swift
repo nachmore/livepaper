@@ -67,7 +67,7 @@ extension SelfTests {
         cliTest("cli.help") { sb in
             let r = try sb.run(["help"])
             try expectEqual(r.status, 0)
-            for command in ["check", "still", "bench", "new", "list", "import", "publish", "ai", "doctor", "uninstall", "server"] {
+            for command in ["check", "still", "bench", "thumbnail", "new", "list", "import", "publish", "ai", "doctor", "uninstall", "server"] {
                 try expect(r.out.contains("\n  \(command) "), "help doesn't list \(command)")
             }
             try expect(!r.out.contains("not available"), "help still lists placeholder commands")
@@ -126,6 +126,17 @@ extension SelfTests {
             try expectEqual(r.status, 2)
             r = try sb.run(["import", pkg.path, "--battery"])
             try expectEqual(r.status, 2)
+        },
+        cliTest("cli.thumbnail") { sb in
+            // Argument handling only: no render server runs in the sandbox (LIVEPAPER_NO_SPAWN=1).
+            try expectEqual(try sb.run(["thumbnail"]).status, 2)
+            try expectEqual(try sb.run(["thumbnail", sb.root.appendingPathComponent("missing.lpscene").path]).status, 2)
+            let pkg = sb.root.appendingPathComponent("outside/glow.lpscene")
+            try CLITestSupport.writeWebScene(at: pkg, id: "glow", name: "Glow")
+            try expectEqual(try sb.run(["thumbnail", pkg.path, "--t", "soon"]).status, 2)
+            let r = try sb.run(["thumbnail", pkg.path, "--t", "12"])
+            try expectEqual(r.status, 3)
+            try expect(!FileManager.default.fileExists(atPath: pkg.appendingPathComponent("thumbnail.jpg").path))
         },
         cliTest("cli.publish") { sb in
             _ = try sb.run(["new", "aurora-lake"])
@@ -240,6 +251,25 @@ extension SelfTests {
                 let script = try String(contentsOfFile: ws + "/scene/scene.js", encoding: .utf8)
                 try expect(script.contains("fillRect"), "the agent ran in the workspace")
             }
+
+            // Text output: the stills of one check arrive as one line, relative to the workspace.
+            let painter = sb.root.appendingPathComponent("tools/still-agent")
+            try Data("""
+            #!/bin/sh
+            mkdir -p scene/.check
+            for t in 0 4 12 30 90 600; do printf 'png' > "scene/.check/1512x982@2-t$t.png"; done
+            sleep 2
+            echo "Looked at the stills."
+            echo '// v2' > scene/scene.js
+
+            """.utf8).write(to: painter)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: painter.path)
+            r = try sb.run(["ai", "create", "stills", "--command", painter.path])
+            try expectEqual(r.status, 1)
+            let stillLines = r.out.split(separator: "\n").filter { $0.contains("◻") }
+            try expectEqual(stillLines.count, 1)
+            try expect(stillLines.first?.contains("◻ 6 stills in scene/.check/: 1512x982@2-t0.png, 1512x982@2-t12.png") == true &&
+                       stillLines.first?.hasSuffix(", … (+2)") == true, r.out)
 
             r = try sb.run(["ai", "create", "x", "--command", "/nonexistent/agent {prompt_file}"])
             try expectEqual(r.status, 1)
