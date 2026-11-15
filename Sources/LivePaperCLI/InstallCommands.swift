@@ -124,7 +124,7 @@ enum InstallCommands {
                                                       currentHost: false) as? NSNumber)?.boolValue == true
         add(lock, "lock keys", lockKeys ? .ok : .warning, lockKeys
             ? "on: ⌃⌘Q, Lock Screen and the Touch ID / lock key show the scene (\(InstallService.lockTakeoverDomain) \(InstallService.lockTakeoverKey))"
-            : "off: ⌃⌘Q, Lock Screen and the Touch ID / lock key lock straight to the wallpaper. Turn on \u{201C}Lock keys show the scene\u{201D} in LivePaper's settings.")
+            : "off: ⌃⌘Q, Lock Screen and the Touch ID / lock key lock straight to the wallpaper. Turn it on in LivePaper › Settings › Lock (\u{201C}Use ⌃⌘Q and the lock key for LivePaper lock\u{201D}).")
         add(lock, "idle timeout", .info, "unchanged; macOS starts the screen saver after the idle time set in System Settings › Lock Screen")
         if status.helperRunning {
             add(lock, "helper", .ok, "running (\(LPPaths.helperLabel))")
