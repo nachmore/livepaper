@@ -1,9 +1,13 @@
 // HarnessDetector — finds the AI coding CLIs installed on this Mac.
 //
 // GUI apps started by launchd don't inherit the user's shell environment: their PATH is just
-// /usr/bin:/bin:/usr/sbin:/sbin, so CLIs installed with Homebrew, npm, toolbox, … are invisible.
-// We ask the user's login shell once (`/bin/zsh -lc 'command -v …'`), then also look in the usual
-// install directories (a login shell doesn't read ~/.zshrc, where many installers add PATH entries).
+// /usr/bin:/bin:/usr/sbin:/sbin, so CLIs installed with Homebrew, npm, custom installers, … are
+// invisible. We ask the user's own login shell once, as an INTERACTIVE login shell
+// (`$SHELL -ilc 'command -v …'`, like VS Code resolves the shell environment): a plain login shell
+// (`-lc`) skips ~/.zshrc / ~/.bashrc, which is where many installers add their PATH entries. Output
+// the user's profile prints is ignored (we parse only our own marked lines). Then we also look in a
+// few standard install directories.
+import Darwin
 import Foundation
 
 /// What the user's login shell knows: its environment and where it finds each tool.
@@ -34,11 +38,24 @@ public final class LoginShell: @unchecked Sendable {
 
     /// - Parameter tools: command names to look up (must be plain `[A-Za-z0-9._-]` names; they are
     ///   embedded in the shell script).
-    public init(shell: String = "/bin/zsh", tools: [String] = HarnessDetector.known.map(\.tool),
+    public init(shell: String = LoginShell.userShell(), tools: [String] = HarnessDetector.known.map(\.tool),
                 runner: CommandRunning = SystemCommandRunner()) {
         self.shell = shell
         self.tools = tools.filter { $0.allSatisfy { $0.isLetter || $0.isNumber || "._-".contains($0) } }
         self.runner = runner
+    }
+
+    /// The user's login shell from the user database (launchd-started apps often have no $SHELL),
+    /// when it understands the POSIX script we run; otherwise /bin/zsh (macOS's default).
+    public static func userShell() -> String {
+        let posixShells: Set<String> = ["zsh", "bash", "sh", "ksh", "dash"]
+        if let pw = getpwuid(getuid()), let raw = pw.pointee.pw_shell {
+            let path = String(cString: raw)
+            if posixShells.contains((path as NSString).lastPathComponent), FileManager.default.isExecutableFile(atPath: path) {
+                return path
+            }
+        }
+        return "/bin/zsh"
     }
 
     /// A snapshot that resolved nothing (tests, or when the shell can't be used).
@@ -54,7 +71,8 @@ public final class LoginShell: @unchecked Sendable {
         if let cached { return cached }
         let lookups = tools.map { "p=$(command -v -- '\($0)' 2>/dev/null) && printf 'LPBIN\\t%s\\t%s\\n' '\($0)' \"$p\"" }
         let script = (lookups + ["printf '\(Self.marker)\\n'", "/usr/bin/env -0"]).joined(separator: "; ")
-        let result = try? runner.run(shell, ["-lc", script], environment: nil, timeout: 10)
+        // -i so ~/.zshrc / ~/.bashrc are read (stdin is /dev/null, so nothing can prompt).
+        let result = try? runner.run(shell, ["-ilc", script], environment: nil, timeout: 10)
         let snapshot = result.map { Self.parse($0.stdout) } ?? ShellSnapshot()
         cached = snapshot
         return snapshot
@@ -96,7 +114,7 @@ public struct HarnessDetector: Sendable {
     /// Where installers commonly put these CLIs.
     public static var commonDirectories: [URL] {
         let home = LPPaths.home
-        return [home.appendingPathComponent(".toolbox/bin"), URL(fileURLWithPath: "/opt/homebrew/bin"),
+        return [URL(fileURLWithPath: "/opt/homebrew/bin"),
                 URL(fileURLWithPath: "/usr/local/bin"), home.appendingPathComponent(".local/bin"),
                 home.appendingPathComponent(".claude/local")]
     }

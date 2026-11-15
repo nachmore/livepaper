@@ -794,6 +794,14 @@ extension SelfTests {
             try expect(script.value.contains("command -v -- 'claude'") && !script.value.contains("bad;tool"), script.value)
             try expectEqual(shell.snapshot(), snap)   // cached
 
+            // Regression: `-lc` skips ~/.zshrc, where many installers put their PATH line, so tools were
+            // found only via hard-coded site-specific directories. It must be an interactive login shell.
+            let recorder = RecordingCommandRunner { _, _ in CommandResult(status: 0, stdout: "LPENV\n") }
+            _ = LoginShell(shell: "/bin/zsh", tools: ["claude"], runner: recorder).snapshot()
+            try expectEqual(recorder.commands.first?.dropFirst().first, "-ilc")
+            try expect(!HarnessDetector.commonDirectories.contains { $0.path.contains(".toolbox") }, "no site-specific install dirs")
+            try expect(["zsh", "bash", "sh", "ksh", "dash"].contains((LoginShell.userShell() as NSString).lastPathComponent))
+
             try CoreSandbox.with("detector", extraEnv: ["PATH": "/usr/bin:/bin:/usr/sbin:/sbin"]) { sb in
                 let bin = sb.root.appendingPathComponent("ai-bin")
                 try sb.writeExecutable("#!/bin/sh\necho 'claude 9.8.7 (Claude Code)'", to: bin.appendingPathComponent("claude"))
