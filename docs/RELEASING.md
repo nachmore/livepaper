@@ -6,7 +6,7 @@ a person only decides *when* to release, by pushing a tag.
 | You push | CI builds and tests, then | Release on GitHub | Version shown in the app |
 |---|---|---|---|
 | a pull request, or any branch | uploads the zip and dmg as workflow artifacts | — | `0.1.0` |
-| `main` | replaces the rolling **nightly** pre-release (tag `nightly`, moved to the new commit) | [Nightly](https://github.com/nachmore/livepaper/releases/tag/nightly) | `0.1.0-nightly` |
+| `main` | replaces the rolling **nightly** pre-release (tag `nightly`, re-created at the new commit) | [Nightly](https://github.com/nachmore/livepaper/releases/tag/nightly) | `0.1.0-nightly` |
 | tag `v0.1.0-beta.2` | creates a versioned **pre-release** | `LivePaper 0.1.0-beta.2` | `0.1.0-beta.2` |
 | tag `v0.1.0` | creates the **release**, marked *Latest* | `LivePaper 0.1.0` | `0.1.0` |
 
@@ -156,7 +156,7 @@ may use, and add `environment: <name>` to the publish job.
 * **Actions** must be enabled (*Settings › Actions › General*). The default `GITHUB_TOKEN`
   permissions can stay read-only: the publish job asks for `contents: write` itself.
 * Don't turn on **immutable releases**, and don't protect the `nightly` tag with a ruleset (or let
-  GitHub Actions bypass it): the nightly moves its tag and replaces its assets on every push.
+  GitHub Actions bypass it): every push to `main` deletes and re-creates the nightly release and tag.
 * Forks: the publish job is limited to `nachmore/livepaper`, so a fork's `main` builds but doesn't
   publish. To try releases in a fork, change the `github.repository` condition there.
 
