@@ -1269,6 +1269,11 @@ extension SelfTests {
                 try expect(!service.status().lockKeysChangedByLivePaper, "already on: nothing changed")
                 try install.setLockKeysShowScene(false)
                 try expect(!service.lockKeysShowScene && service.status().lockKeysChangedByLivePaper)
+                // Back to the original value: restored, nothing left to undo…
+                try install.setLockKeysShowScene(true)
+                try expect(service.lockKeysShowScene && !service.status().lockKeysChangedByLivePaper)
+                try install.setLockKeysShowScene(false)
+                // …and uninstall still puts "on" back.
                 let steps = install.performUninstall(removeLibrary: true)
                 try expect(steps.contains(InstallStep(title: InstallService.restoreLockKeysTitle, outcome: .done)), "\(steps)")
                 try expectEqual(prefs.values[key] as? Bool, true)

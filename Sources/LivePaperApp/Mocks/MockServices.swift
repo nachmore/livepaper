@@ -318,18 +318,17 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     func unregisterHelper() throws { mutate { $0.helperRunning = false; $0.helperLoginItem = .notRegistered } }
     func openScreenSaverSettings() { mutate { $0.saverSelected = $0.saverInstalled } }
 
-    /// Same backup semantics as InstallService: the value from before the first change is kept
-    /// until it is restored (turning it off) or uninstall puts it back.
+    /// Same backup semantics as InstallService: the value from before LivePaper's first change is
+    /// kept until the toggle returns to it or uninstall puts it back.
     func setLockKeysShowScene(_ on: Bool) throws {
         mutate { s in
-            if on {
-                guard !s.lockKeysShowScene else { return }   // already on: nothing to restore later
-                if !s.lockKeysChangedByLivePaper { lockKeysBefore = false; s.lockKeysChangedByLivePaper = true }
-                s.lockKeysShowScene = true
+            if s.lockKeysChangedByLivePaper && lockKeysBefore == on {
+                s.lockKeysShowScene = on; s.lockKeysChangedByLivePaper = false
                 return
             }
-            if s.lockKeysChangedByLivePaper { s.lockKeysShowScene = lockKeysBefore; s.lockKeysChangedByLivePaper = false }
-            if s.lockKeysShowScene { lockKeysBefore = true; s.lockKeysChangedByLivePaper = true; s.lockKeysShowScene = false }
+            guard s.lockKeysShowScene != on else { return }
+            if !s.lockKeysChangedByLivePaper { lockKeysBefore = s.lockKeysShowScene; s.lockKeysChangedByLivePaper = true }
+            s.lockKeysShowScene = on
         }
     }
 

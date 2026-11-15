@@ -299,10 +299,11 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   simply don't verify the seal of the installed copy.
 
 ## 7. Helper (`Sources/LivePaperHelper`)
-* **Lock keys (no permissions):** `InstallServicing.setLockKeysShowScene(true)` sets
-  `com.apple.loginwindow immediateLockLaunchesScreenSaver = true`, recording the previous value in
-  `backups/changed-defaults.json` the first time (already on: nothing changes); turning it off
-  restores that value. Uninstall restores it with every other changed preference. ⌃⌘Q, Apple-menu
+* **Lock keys (no permissions):** `InstallServicing.setLockKeysShowScene(_:)` sets
+  `com.apple.loginwindow immediateLockLaunchesScreenSaver`, recording the value from before
+  LivePaper's first change in `backups/changed-defaults.json`; returning to that value restores it
+  and drops the backup, and asking for the current value changes nothing. Uninstall restores it
+  (its own step, then every other changed preference). ⌃⌘Q, Apple-menu
   Lock Screen and the Touch ID / lock key then show the scene. Fails safe: if the saver can't run,
   loginwindow still locks. This is the app's job, not the helper's; an event-tap route
   (Accessibility) is NOT needed and not planned.

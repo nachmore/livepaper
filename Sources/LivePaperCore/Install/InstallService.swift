@@ -382,23 +382,21 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         (preferences.value(domain: Self.lockKeysDomain, key: Self.lockKeysKey, currentHost: false) as? NSNumber)?.boolValue == true
     }
 
-    /// On: sets the preference, remembering the value from before LivePaper's first change for
-    /// uninstall (already on: nothing changes, nothing to restore). Off: restores that value, and
-    /// turns it off explicitly if it was "on" (the backup then keeps "on" so uninstall leaves the
-    /// Mac as LivePaper found it).
+    /// Sets the preference, remembering the value from before LivePaper's first change so
+    /// uninstall can put it back. Going back to that original value restores it and drops the
+    /// backup; asking for the current value changes nothing (and creates no backup).
     public func setLockKeysShowScene(_ on: Bool) throws {
-        if on {
-            if lockKeysShowScene {
-                record("Set \(Self.lockKeysDomain) \(Self.lockKeysKey)", .skipped("already on"))
-                return
-            }
-            try changeSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, to: true)
+        if let backup = loadDefaultsChanges().first(where: Self.isLockKeysChange),
+           ((Self.previousValue(backup) as? NSNumber)?.boolValue ?? false) == on {
+            // An absent key reads as off, which is also loginwindow's default.
+            try restoreSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey)
             return
         }
-        try restoreSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey)
-        if lockKeysShowScene {
-            try changeSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, to: false)
+        if lockKeysShowScene == on {
+            record("Set \(Self.lockKeysDomain) \(Self.lockKeysKey)", .skipped(on ? "already on" : "already off"))
+            return
         }
+        try changeSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, to: on)
     }
 
     /// Title of the uninstall step that puts the lock keys back.
