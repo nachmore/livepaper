@@ -331,7 +331,9 @@ render (render server unavailable). `--quick` renders fewer stills and skips the
 for fast iteration; finish with a full check.
 
 Other commands: `livepaper still <dir> --t 8 --size 1512x982 --dpr 2 --out x.png`, `livepaper bench
-<dir> --t 30`, `livepaper live <dir>` (fps, CPU %, mW), `livepaper compile <dir>`.
+<dir> --t 30`, `livepaper live <dir>` (fps, CPU %, mW), `livepaper compile <dir>`, `livepaper
+thumbnail <dir> [--t 8]` (the 640×400 library thumbnail, `thumbnail.jpg`; the app makes these for
+your own scenes, built-in scenes ship theirs).
 
 Thresholds: frame brightness ≤ 165/255 on average; behind the clock ≤ 120/255; not black at every
 sampled time; not black at t = 600 when earlier stills aren't.
