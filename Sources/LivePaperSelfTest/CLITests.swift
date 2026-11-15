@@ -187,24 +187,19 @@ extension SelfTests {
             _ = try sb.run(["new", "aurora-lake"])
             try sb.installFakeSaver()
             _ = try sb.run(["publish"])
-            // The app's lock-keys backup (LockTakeover): previous value "unset".
-            let backup = sb.support.appendingPathComponent("backups/loginwindow-lock.json")
-            try FileManager.default.createDirectory(at: backup.deletingLastPathComponent(), withIntermediateDirectories: true)
-            try Data(#"{"previous":null,"date":"2026-11-14T00:00:00Z"}"#.utf8).write(to: backup)
-
+            // (Lock-keys backup/restore is covered by core.install.* — it lives in InstallService.)
             // Declined (stdin at EOF) and dry run: nothing changes.
             var r = try sb.run(["uninstall"])
             try expectEqual(r.status, 1)
             try expect(r.out.contains("Nothing was changed"), r.out)
             r = try sb.run(["uninstall", "--dry-run"])
             try expectEqual(r.status, 0)
-            try expect(r.out.contains("Remove \(sb.saver.path)") && r.out.contains("Restore the lock-keys setting"), r.out)
-            try expect(FileManager.default.fileExists(atPath: sb.saver.path) && FileManager.default.fileExists(atPath: backup.path))
+            try expect(r.out.contains("Remove \(sb.saver.path)"), r.out)
+            try expect(FileManager.default.fileExists(atPath: sb.saver.path))
 
             // Answer "y" on stdin, keeping the scenes.
             r = try sb.run(["uninstall", "--keep-scenes"], stdin: "y\n")
             try expectEqual(r.status, 0)
-            try expect(r.out.contains("✓ Restore the lock-keys setting"), r.out)
             try expect(!FileManager.default.fileExists(atPath: sb.saver.path), "saver removed")
             try expect(!FileManager.default.fileExists(atPath: sb.support.appendingPathComponent("backups").path), "backups removed")
             try expect(FileManager.default.fileExists(atPath: sb.library.appendingPathComponent("aurora-lake.lpscene/scene.json").path),

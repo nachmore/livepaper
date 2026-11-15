@@ -180,8 +180,7 @@ enum CLIServices {
         let live = (Self.live.install as? InstallService) ?? InstallService(publisher: Self.live.publish)
         if CLIEnvironment.noSystemCommands {
             return InstallService(paths: live.paths, publisher: Self.live.publish, runner: sandboxRunner,
-                                  loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun,
-                                  accessibility: { false })
+                                  loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun)
         }
         guard dryRun else { return live }
         return InstallService(paths: live.paths, publisher: nil, dryRun: true)

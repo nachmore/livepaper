@@ -223,10 +223,6 @@ enum InstallCommands {
 
     // MARK: - uninstall
 
-    /// The app's lock-keys backup (LivePaperApp's LockTakeover writes it the first time it changes
-    /// `com.apple.loginwindow immediateLockLaunchesScreenSaver`): `{"previous": Bool?, "date": …}`.
-    static var appLockKeysBackup: URL { LPPaths.backups.appendingPathComponent("loginwindow-lock.json") }
-
     static func uninstall(_ argv: [String]) async throws -> Int32 {
         let args = try Arguments(argv, flags: ["yes", "keep-scenes", "dry-run"])
         guard args.positional.isEmpty else { throw UsageError("uninstall takes no arguments") }
@@ -268,15 +264,11 @@ enum InstallCommands {
     static func plan(removeLibrary: Bool) -> [InstallStep] {
         var steps: [InstallStep] = []
         if RenderClient().isServerRunning() { steps.append(InstallStep(title: "Stop the render server", outcome: .planned)) }
-        if FileManager.default.fileExists(atPath: appLockKeysBackup.path) {
-            steps.append(InstallStep(title: "Restore the lock-keys setting (\(InstallService.lockTakeoverKey))", outcome: .planned))
-        }
         return steps + CLIServices.installer(dryRun: true).performUninstall(removeLibrary: removeLibrary)
     }
 
-    /// Runs the uninstall: stop the render server (its socket lives in the data directory), put the
-    /// lock-keys setting back, then InstallService's steps (helper, wallpaper choice, changed
-    /// preferences, saver, data).
+    /// Runs the uninstall: stop the render server (its socket lives in the data directory), then
+    /// InstallService's steps (helper, lock keys, wallpaper choice, changed preferences, saver, data).
     static func perform(removeLibrary: Bool) async -> [InstallStep] {
         var steps: [InstallStep] = []
         let client = RenderClient()
@@ -288,24 +280,7 @@ enum InstallCommands {
                 steps.append(InstallStep(title: "Stop the render server", outcome: .skipped(error.localizedDescription)))
             }
         }
-        if let step = restoreAppLockKeys() { steps.append(step) }
         return steps + CLIServices.installer().performUninstall(removeLibrary: removeLibrary)
-    }
-
-    /// Puts `immediateLockLaunchesScreenSaver` back to its value from before the app changed it.
-    /// (InstallService restores the values *it* changed itself in performUninstall.)
-    static func restoreAppLockKeys() -> InstallStep? {
-        let title = "Restore the lock-keys setting (\(InstallService.lockTakeoverKey))"
-        guard let data = try? Data(contentsOf: appLockKeysBackup) else { return nil }
-        struct Backup: Decodable { var previous: Bool? }
-        guard let backup = try? JSONDecoder().decode(Backup.self, from: data) else {
-            return InstallStep(title: title, outcome: .failed("the backup at \(appLockKeysBackup.path) is unreadable"))
-        }
-        let ok = CLIServices.preferences.set(backup.previous.map { NSNumber(value: $0) }, domain: InstallService.lockTakeoverDomain,
-                                             key: InstallService.lockTakeoverKey, currentHost: false)
-        guard ok else { return InstallStep(title: title, outcome: .failed("macOS didn't accept the change")) }
-        try? FileManager.default.removeItem(at: appLockKeysBackup)
-        return InstallStep(title: title, outcome: .done)
     }
 
     static func printSteps(_ steps: [InstallStep], dryRun: Bool) {
