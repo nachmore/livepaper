@@ -138,17 +138,25 @@ In the app: *Settings › About › Uninstall LivePaper…*, which shows exactly
 From the terminal, either of:
 
 ```sh
-scripts/uninstall-dev.sh [--keep-scenes] [--dry-run]     # everything below, then deletes the app
+scripts/uninstall-dev.sh [--delete-scenes [--yes]] [--dry-run]   # everything below, then deletes the app
 livepaper uninstall [--keep-scenes] [--dry-run] [--yes]
 ```
 
-Uninstalling stops the helper and removes its login item / LaunchAgent, restores your previous
-screen-saver choice and the lock-keys setting (and any other preference LivePaper changed),
-removes `LivePaper.saver`, and deletes `~/Library/Application Support/LivePaper` — or, with
-`--keep-scenes`, everything there except your scene library and preferences. Each step can be
-re-run safely. One difference from the in-app uninstall: only the app can unregister its entry
-in System Settings › General › Login Items, so after a terminal uninstall that entry may stay
-listed (stopped, and inert once the app is deleted) until you remove it there.
+Uninstalling stops the helper and removes its login item / LaunchAgent, switches the screen saver
+back — to your previous choice, or, if LivePaper never recorded one (say you picked LivePaper in
+System Settings yourself), to macOS's Message saver — and restores the lock-keys setting (and any
+other preference LivePaper changed), removes `LivePaper.saver`, and deletes
+`~/Library/Application Support/LivePaper` — or, with `--keep-scenes`, everything there except your
+scene library and preferences. `scripts/uninstall-dev.sh` keeps the scenes unless you pass
+`--delete-scenes` (it asks first, unless `--yes`). LivePaper.saver is only removed once no screen
+saver choice points at it any more: if the screen saver can't be switched back automatically (for
+example after a macOS update changed the settings format), uninstall says so, keeps the saver and
+its backups, and asks you to choose another screen saver in System Settings › Wallpaper › Screen
+Saver and run it again. Each step can be re-run safely. One difference from the in-app uninstall:
+only the app can unregister its entry in System Settings › General › Login Items, so after a
+terminal uninstall that entry may stay listed until you delete the app or remove it there — it
+can't start the helper any more (uninstall leaves a `LivePaper.uninstalled` marker next to the
+data folder; setting LivePaper up again removes it).
 
 ## Development
 
