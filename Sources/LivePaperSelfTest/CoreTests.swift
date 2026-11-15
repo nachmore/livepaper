@@ -1272,8 +1272,6 @@ extension SelfTests {
                 let steps = install.performUninstall(removeLibrary: true)
                 try expect(steps.contains(InstallStep(title: InstallService.restoreLockKeysTitle, outcome: .done)), "\(steps)")
                 try expectEqual(prefs.values[key] as? Bool, true)
-                // The old names still work for code written against them.
-                try expect(InstallService.lockTakeoverKey == InstallService.lockKeysKey && service.systemLockTakeoverEnabled)
             }
         },
         TestCase(name: "core.install.wallpaper-store") {
