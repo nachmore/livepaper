@@ -799,6 +799,20 @@ extension SelfTests {
             let recorder = RecordingCommandRunner { _, _ in CommandResult(status: 0, stdout: "LPENV\n") }
             _ = LoginShell(shell: "/bin/zsh", tools: ["claude"], runner: recorder).snapshot()
             try expectEqual(recorder.commands.first?.dropFirst().first, "-ilc")
+            try expectEqual(recorder.commands.count, 1)   // it got through: no second run
+
+            // Regression: an rc file that execs another program (`exec tmux`, `exec fish`), hangs or is
+            // slow never reaches our script, which lost even ~/.zprofile's PATH (which `-lc` used to
+            // find). Then the plain login shell's answer is used.
+            for broken in [CommandResult(status: 0, stdout: "Welcome!\n"), CommandResult(status: 143, stdout: "", timedOut: true)] {
+                let fallback = RecordingCommandRunner { _, args in
+                    args.first == "-ilc" ? broken : CommandResult(status: 0, stdout: "LPBIN\tclaude\t/zprofile/bin/claude\nLPENV\nPATH=/zprofile/bin:/usr/bin\0")
+                }
+                let snap = LoginShell(shell: "/bin/zsh", tools: ["claude"], runner: fallback).snapshot()
+                try expectEqual(fallback.commands.map { $0.dropFirst().first ?? "" }, ["-ilc", "-lc"])
+                try expectEqual(snap.commands, ["claude": "/zprofile/bin/claude"])
+                try expectEqual(snap.environment["PATH"], "/zprofile/bin:/usr/bin")
+            }
             try expect(!HarnessDetector.commonDirectories.contains { $0.path.contains(".toolbox") }, "no site-specific install dirs")
             try expect(["zsh", "bash", "sh", "ksh", "dash"].contains((LoginShell.userShell() as NSString).lastPathComponent))
 
@@ -815,6 +829,80 @@ extension SelfTests {
                 try expectEqual(found.map(\.version), ["9.8.7", nil, "3.3.0"])
                 try expectEqual(found[0].executable, bin.appendingPathComponent("claude").path)
                 try expectEqual(found[2].id, "kiro:" + bin.appendingPathComponent("kiro-cli").path)
+            }
+        },
+        TestCase(name: "core.ai.detector.no-terminal") {
+            // Regression: from the CLI in a terminal, the interactive shell (in the CLI's session but
+            // its own background group) opened that terminal even with stdin at /dev/null, tried to
+            // take it over and was stopped by SIGTTOU for good: every `livepaper ai …` waited out
+            // the timeout and lost the login environment. The shell must get a session of its own
+            // (no controlling terminal) — and isn't told it is part of the terminal's session.
+            try CoreSandbox.with("detector-session", extraEnv: ["TERM_PROGRAM": "Apple_Terminal", "TERM_SESSION_ID": "w0t0p0:LPTEST"]) { sb in
+                let pidFile = sb.root.appendingPathComponent("shell.pid"), release = sb.root.appendingPathComponent("release")
+                let fakeShell = sb.root.appendingPathComponent("bin/fake-shell")
+                try sb.writeExecutable("""
+                #!/bin/sh
+                echo $$ > '\(pidFile.path)'
+                i=0; while [ ! -e '\(release.path)' ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done
+                printf 'LPENV\\nSAW_TERM=%s\\0SAW_RESOLVING=%s\\0LIVEPAPER_RESOLVING_ENVIRONMENT=1\\0' "${TERM_SESSION_ID:-none}${TERM_PROGRAM:-}" "$LIVEPAPER_RESOLVING_ENVIRONMENT"
+                """, to: fakeShell)
+                let shell = LoginShell(shell: fakeShell.path, tools: [])
+                final class Box: @unchecked Sendable { var snapshot: ShellSnapshot? }
+                let box = Box(), done = DispatchSemaphore(value: 0)
+                Thread { box.snapshot = shell.snapshot(); done.signal() }.start()
+                var pid: pid_t = 0
+                let deadline = Date().addingTimeInterval(10)
+                while pid <= 0 && Date() < deadline {
+                    pid = pid_t(read(pidFile).trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+                    if pid <= 0 { usleep(20_000) }
+                }
+                let session = pid > 0 ? getsid(pid) : -1   // while it waits
+                FileManager.default.createFile(atPath: release.path, contents: nil)
+                try expect(done.wait(timeout: .now() + 15) == .success, "the probe didn't finish")
+                try expect(pid > 0, "the fake shell never ran")
+                try expectEqual(session, pid)   // it leads a session of its own
+                try expect(session != getsid(0), "same session as the caller (and its terminal)")
+                try expectEqual(box.snapshot?.environment["SAW_TERM"], "none")
+                try expectEqual(box.snapshot?.environment["SAW_RESOLVING"], "1")   // rc files can tell
+                try expect(box.snapshot?.environment[LoginShell.resolvingVariable] == nil, "the marker variable isn't part of the snapshot")
+            }
+        },
+        TestCase(name: "core.ai.detector.real-shells") {
+            // The real shells with sandboxed rc files: what a new Terminal window reads is what counts.
+            let zdot = try tempDir("zdotdir")
+            defer { try? FileManager.default.removeItem(at: zdot) }
+            try CoreSandbox.with("detector-zsh", extraEnv: ["ZDOTDIR": zdot.path]) { sb in
+                try sb.write("export PATH=\"/lp-zprofile/bin:$PATH\"\nexport FROM_ZPROFILE=1\n", to: zdot.appendingPathComponent(".zprofile"))
+                try sb.write("""
+                export PATH="/lp-zshrc/bin:$PATH"
+                [ -n "$LIVEPAPER_RESOLVING_ENVIRONMENT" ] && export SAW_RESOLVING=1
+                echo "a chatty zshrc"
+
+                """, to: zdot.appendingPathComponent(".zshrc"))
+                let snap = LoginShell(shell: "/bin/zsh", tools: ["sh"]).snapshot()
+                try expectEqual(snap.commands["sh"], "/bin/sh")
+                try expect(snap.pathDirectories.contains("/lp-zprofile/bin") && snap.pathDirectories.contains("/lp-zshrc/bin"), "\(snap.pathDirectories)")
+                try expectEqual(snap.environment["FROM_ZPROFILE"], "1")
+                try expectEqual(snap.environment["SAW_RESOLVING"], "1")
+
+                // ~/.zshrc hands the shell over to another program: ~/.zprofile still counts.
+                try sb.write("export PATH=\"/lp-zshrc/bin:$PATH\"\nexec /bin/sh\n", to: zdot.appendingPathComponent(".zshrc"))
+                let handedOver = LoginShell(shell: "/bin/zsh", tools: ["sh"]).snapshot()
+                try expectEqual(handedOver.commands["sh"], "/bin/sh")
+                try expect(handedOver.pathDirectories.contains("/lp-zprofile/bin"), "\(handedOver.pathDirectories)")
+                try expectEqual(handedOver.environment["FROM_ZPROFILE"], "1")
+            }
+            // bash as a login shell reads ~/.bash_profile (not ~/.bashrc, unless that sources it), just
+            // like Terminal; a forced -i without a terminal must not get in the way.
+            guard FileManager.default.isExecutableFile(atPath: "/bin/bash") else { print("  (bash part skipped: no /bin/bash)"); return }
+            let home = try tempDir("bash-home")
+            defer { try? FileManager.default.removeItem(at: home) }
+            try CoreSandbox.with("detector-bash", extraEnv: ["HOME": home.path]) { sb in
+                try sb.write("export PATH=\"/lp-bash-profile/bin:$PATH\"\n. \"$HOME/.bashrc\"\n", to: home.appendingPathComponent(".bash_profile"))
+                try sb.write("export PATH=\"/lp-bashrc/bin:$PATH\"\n", to: home.appendingPathComponent(".bashrc"))
+                let snap = LoginShell(shell: "/bin/bash", tools: ["sh"]).snapshot()
+                try expectEqual(snap.commands["sh"], "/bin/sh")
+                try expect(snap.pathDirectories.contains("/lp-bash-profile/bin") && snap.pathDirectories.contains("/lp-bashrc/bin"), "\(snap.pathDirectories)")
             }
         },
         TestCase(name: "core.ai.settings") {
@@ -1026,6 +1114,41 @@ extension SelfTests {
                 try expect(Date().timeIntervalSince(again) < 0.5, "and immediate")
             }
         },
+        TestCase(name: "core.ai.session.stop-during-launch") {
+            // Regression: Ctrl-C (cancel) or quitting (terminateNow) while the launch still waited on a
+            // slow step (the login shell here; also a capability probe or the render server) queued
+            // behind it: terminateNow blocked until the launch was done, and the agent was started
+            // after the user had stopped the session, only to be killed. The session must end at the
+            // next step without starting the agent, and terminateNow must not wait.
+            try CoreSandbox.with("session-early-stop") { sb in
+                for how in ["cancel", "terminateNow"] {
+                    let asked = DispatchSemaphore(value: 0), proceed = DispatchSemaphore(value: 0)
+                    let slowShell = LoginShell(shell: "/bin/zsh", tools: [], runner: RecordingCommandRunner { _, _ in
+                        asked.signal()
+                        _ = proceed.wait(timeout: .now() + 3)
+                        return CommandResult(status: 0, stdout: "LPENV\nPATH=/usr/bin:/bin\0")
+                    })
+                    let started = sb.root.appendingPathComponent("agent-started-\(how)")
+                    let (ai, harness) = try sessionFixture(sb, agent: "touch '\(started.path)'\necho '// v2' > scene/scene.js", shell: slowShell)
+                    let handle = try ai.start(.create(prompt: "x"), harness: harness, model: nil)
+                    try expect(asked.wait(timeout: .now() + 10) == .success, "the launch never asked the login shell")
+                    let began = Date()
+                    if how == "cancel" {
+                        handle.cancel()
+                    } else {
+                        guard let session = handle as? AISessionTerminating else { throw TestFailure(description: "can't stop synchronously") }
+                        try expect(session.terminateNow(grace: 1), "nothing may be left")
+                    }
+                    let took = Date().timeIntervalSince(began)
+                    proceed.signal()
+                    let events = try collect(handle)
+                    try expect(took < 1, "\(how) waited \(took)s for the launch")
+                    try expectEqual(events, [.failed("Cancelled.")])
+                    usleep(200_000)
+                    try expect(!FileManager.default.fileExists(atPath: started.path), "\(how): the agent was started anyway")
+                }
+            }
+        },
         TestCase(name: "core.ai.session.reported-model") {
             try CoreSandbox.with("session-model") { sb in
                 // A fake `claude` speaking stream-json: the model it reports is what history records.
@@ -1206,13 +1329,13 @@ private final class ShellScriptLog: @unchecked Sendable {
 
 /// An AIService whose harness is a /bin/sh script (a custom template) and whose login shell is fixed.
 private func sessionFixture(_ sb: CoreSandbox, library: LibraryService? = nil, checker: SceneChecking = FakeChecker.passing,
-                            agent: String, timeout: TimeInterval = 30) throws -> (AIService, AIHarness) {
+                            agent: String, timeout: TimeInterval = 30, shell: LoginShell? = nil) throws -> (AIService, AIHarness) {
     let script = sb.root.appendingPathComponent("agents/agent-\(UUID().uuidString.prefix(6)).sh")
     try sb.write("set -e\n" + agent + "\n", to: script)
     let lib = library ?? sb.makeLibrary()
     let builder = WorkspaceBuilder(library: lib, runtimeDirectory: sb.runtime, builtinScenesDirectory: sb.builtins,
                                    workspacesDirectory: sb.workspaces, cliPath: sb.fakeCLI)
-    let detector = HarnessDetector(shell: .fixed(ShellSnapshot(environment: ["PATH": "/usr/bin:/bin", "LOGIN_ONLY": "1"])), directories: [])
+    let detector = HarnessDetector(shell: shell ?? .fixed(ShellSnapshot(environment: ["PATH": "/usr/bin:/bin", "LOGIN_ONLY": "1"])), directories: [])
     let ai = AIService(library: lib, checker: checker, workspaceBuilder: builder, detector: detector,
                        runner: RecordingCommandRunner(), settingsURL: sb.support.appendingPathComponent("ai-settings.json"), timeout: timeout)
     return (ai, AIService.customHarness(template: "/bin/sh '\(script.path)'", name: "Fake agent"))

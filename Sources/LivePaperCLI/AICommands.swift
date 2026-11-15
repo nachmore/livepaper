@@ -139,7 +139,8 @@ enum AICommands {
         out.started(session: session, harness: harness, model: model, request: request)
 
         // Ctrl-C cancels the agent (its whole process group); a second Ctrl-C quits at once, and
-        // closing the terminal (SIGHUP) stops the agent synchronously before exiting.
+        // closing the terminal (SIGHUP) stops the agent synchronously before exiting — unless the
+        // CLI was started with that signal ignored (`nohup`), which then stays ignored.
         let interrupt = Interrupts(onInterrupt: { session.cancel() },
                                    onExit: { _ = (session as? AISessionTerminating)?.terminateNow(grace: 0) })
         var candidate: URL?
@@ -332,14 +333,21 @@ final class SessionPrinter {
 
 /// SIGINT/SIGTERM while a session runs: the first one calls `onInterrupt` (cancel the agent and let
 /// the event stream finish); a second one, or SIGHUP (terminal closed), calls `onExit` (stop the
-/// agent's process group synchronously, so nothing is orphaned) and exits.
+/// agent's process group synchronously, so nothing is orphaned) and exits. A signal the process
+/// was started with ignored — SIGHUP under `nohup`, SIGINT in a background job of a script — is
+/// left alone: a dispatch source would fire even for an ignored signal.
 final class Interrupts: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
     private var sources: [DispatchSourceSignal] = []
+    /// What each handled signal did before; `stop()` puts it back.
+    private var previous: [(signal: Int32, action: sigaction)] = []
 
     init(onInterrupt: @escaping @Sendable () -> Void, onExit: @escaping @Sendable () -> Void) {
         for sig in [SIGINT, SIGTERM, SIGHUP] {
+            var old = sigaction()
+            guard sigaction(sig, nil, &old) == 0, !Self.isIgnored(old) else { continue }
+            previous.append((sig, old))
             signal(sig, SIG_IGN)   // handled by the dispatch source below
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .global(qos: .userInitiated))
             source.setEventHandler { [weak self] in
@@ -363,12 +371,22 @@ final class Interrupts: @unchecked Sendable {
 
     var fired: Bool { lock.withLock { count > 0 } }
 
-    /// Back to the default behaviour (e.g. Ctrl-C at the accept prompt quits).
+    /// Back to what the signals did before (normally the default: Ctrl-C at the accept prompt quits;
+    /// under `nohup`, SIGHUP stays ignored).
     func stop() {
         sources.forEach { $0.cancel() }
         sources = []
-        signal(SIGINT, SIG_DFL)
-        signal(SIGTERM, SIG_DFL)
-        signal(SIGHUP, SIG_DFL)
+        for (sig, action) in previous {
+            var action = action
+            _ = sigaction(sig, &action, nil)
+        }
+        previous = []
+    }
+
+    /// SIG_IGN is the handler value 1 (SIG_DFL is 0, i.e. nil); Swift can't compare C function
+    /// pointers, so compare their bits.
+    static func isIgnored(_ action: sigaction) -> Bool {
+        guard let handler = action.__sigaction_u.__sa_handler else { return false }
+        return unsafeBitCast(handler, to: Int.self) == unsafeBitCast(SIG_IGN, to: Int.self)
     }
 }

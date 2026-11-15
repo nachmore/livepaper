@@ -6,8 +6,10 @@
 //   harness exits → LivePaper runs SceneChecker itself (the agent's word is never trusted)
 //     → .checkResult, then .finished(package: scene/) or .failed
 //
-// Cancellation and the timeout kill the harness's whole process group. Everything mutable lives
-// on one serial queue.
+// Cancellation and the timeout kill the harness's whole process group; a stop requested while the
+// launch is still warming up (login shell, capability probe, render server) ends the session before
+// anything is spawned. Everything mutable lives on one serial queue, except the stop request and
+// the harness's group (under `stopLock`, so stopping never waits behind a launch).
 import Darwin
 import Foundation
 import os
@@ -19,8 +21,9 @@ import os
 public protocol AISessionTerminating: AISessionHandle {
     /// Stops the agent's whole process group and returns once nothing in it is left: SIGTERM, up
     /// to `grace` seconds to exit, then SIGKILL. The session then ends as after `cancel()`. Blocks
-    /// for at most `grace` + `AISession.killWait` (plus however long a launch in progress takes to
-    /// spawn); returns false if something in the group was still there at the end. Idempotent.
+    /// for at most `grace` + `AISession.killWait` (a launch still warming up is not waited for: it
+    /// never spawns the agent); returns false if something in the group was still there at the
+    /// end. Idempotent.
     @discardableResult func terminateNow(grace: TimeInterval) -> Bool
 }
 
@@ -69,13 +72,19 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.nachmore.livepaper.ai-session")
     private let log = Logger(subsystem: LPPaths.bundleID, category: "ai")
 
+    // Under `stopLock` (read and written from any thread; the spawn holds it, so a stop either
+    // comes before it — and nothing is spawned — or sees the group):
+    private let stopLock = NSLock()
+    /// cancel() or terminateNow() was called.
+    private var stopRequested = false
+    /// The harness's process group while anything in it may still run: from the spawn until the
+    /// leftovers were stopped after the harness exited (so after that, a recycled pid is never signalled).
+    private var group: pid_t?
+
     // Mutable state: touched only on `queue`.
     private var phase = Phase.idle
     private var stopReason: StopReason?
     private var child: ChildProcess?
-    /// The harness's process group while anything in it may still run: from the spawn until the
-    /// leftovers were stopped after the harness exited (so after that, a recycled pid is never signalled).
-    private var group: pid_t?
     private var parser: HarnessStreamParser?
     private var stdoutLines = LineSplitter()
     private var stderrLines = LineSplitter()
@@ -98,32 +107,33 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     func start() { queue.async { self.launch() } }
 
     /// Stops the harness (SIGTERM to its process group, SIGKILL after a grace period). The stream
-    /// ends with `.failed("Cancelled.")` once the harness is gone. Safe to call at any time.
+    /// ends with `.failed("Cancelled.")` once the harness is gone. Safe to call at any time; during
+    /// the launch, the harness is never started.
     public func cancel() {
-        queue.async { [self] in
-            guard phase != .done else { return }
-            if stopReason == nil { stopReason = .cancelled }
-            switch phase {
-            case .idle, .checking: finish(.failed("Cancelled."))
-            case .running: child?.terminateGroup()
-            case .done: break
-            }
-        }
+        stopLock.withLock { stopRequested = true }
+        queue.async { [self] in stopRequestedOnQueue(terminate: true) }
     }
 
     public func terminateNow(grace: TimeInterval) -> Bool {
-        // Serialised behind a pending launch, so a harness being spawned right now is caught too.
-        let pgid: pid_t? = queue.sync {
-            if phase != .done, stopReason == nil { stopReason = .cancelled }
-            switch phase {
-            case .idle, .checking: finish(.failed("Cancelled."))
-            case .running, .done: break   // running: the harness's exit ends the stream
-            }
-            return group
-        }
+        // Doesn't wait for a launch in progress: it checks the request (under the same lock) before
+        // it spawns, so either nothing is spawned or the group is already known here.
+        let pgid: pid_t? = stopLock.withLock { stopRequested = true; return group }
+        queue.async { [self] in stopRequestedOnQueue(terminate: false) }   // ends the stream
         guard let pgid else { return true }
         log.info("session \(self.id, privacy: .public): stopping process group \(pgid) now")
         return Self.stopGroup(pgid, grace: grace)
+    }
+
+    private var isStopRequested: Bool { stopLock.withLock { stopRequested } }
+
+    private func stopRequestedOnQueue(terminate: Bool) {
+        guard phase != .done else { return }
+        if stopReason == nil { stopReason = .cancelled }
+        switch phase {
+        case .idle, .checking: finish(.failed("Cancelled."))
+        case .running: if terminate { child?.terminateGroup() }   // else terminateNow stops it; its exit ends the stream
+        case .done: break
+        }
     }
 
     /// SIGTERM to process group `pgid`, up to `grace` seconds for it to empty, then SIGKILL for
@@ -150,35 +160,58 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
 
     private func launch() {
         guard phase == .idle else { return }
+        // Each slow step (capability probe, login shell, render server) is followed by a look at
+        // whether the session was stopped meanwhile: then it ends here, without starting the harness.
+        func stopped() -> Bool {
+            guard isStopRequested else { return false }
+            if stopReason == nil { stopReason = .cancelled }
+            finish(.failed("Cancelled."))
+            return true
+        }
+        guard !stopped() else { return }
         guard FileManager.default.isExecutableFile(atPath: harness.executable) || harness.kind == .custom else {
             finish(.failed(AIError.harnessNotFound(harness.executable).localizedDescription)); return
         }
         let adapter = deps.adapter()
+        guard !stopped() else { return }
+        let searchPath = deps.searchPath()
+        guard !stopped() else { return }
         let invocation: HarnessInvocation
         do {
             invocation = try adapter.invocation(for: harness, context: HarnessContext(
-                workspace: ws, model: model, searchPath: deps.searchPath(), extraArguments: deps.extraArguments))
+                workspace: ws, model: model, searchPath: searchPath, extraArguments: deps.extraArguments))
         } catch {
             finish(.failed(error.localizedDescription)); return
         }
         sceneBefore = try? Data(contentsOf: sceneScript)
         deps.prepareRenderer()
+        let environment = deps.environment()
+        guard !stopped() else { return }
         deps.renderRelay?.start()
         parser = adapter.makeParser(workspaceRoot: ws.root)
         stdoutLog = Self.openLog(ws.stdoutLog)
         stderrLog = Self.openLog(ws.stderrLog)
         emit(.status("Running \(harness.name)…"))
 
+        // The last look and the spawn are one step under `stopLock`: a stop either comes first (no
+        // harness) or finds the group to stop.
+        let spawned: Result<ChildProcess, Error>? = stopLock.withLock {
+            guard !stopRequested else { return nil }
+            let result = Result {
+                try ChildProcess.spawn(executable: invocation.executable, arguments: invocation.arguments,
+                                       environment: environment, currentDirectory: invocation.currentDirectory,
+                                       stdinFile: invocation.stdinFile)
+            }
+            if case .success(let process) = result { group = process.pid }
+            return result
+        }
         let process: ChildProcess
-        do {
-            process = try ChildProcess.spawn(executable: invocation.executable, arguments: invocation.arguments,
-                                             environment: deps.environment(), currentDirectory: invocation.currentDirectory,
-                                             stdinFile: invocation.stdinFile)
-        } catch {
-            finish(.failed(error.localizedDescription)); return
+        switch spawned {
+        case nil: _ = stopped(); return
+        case .failure(let error)?: finish(.failed(error.localizedDescription)); return
+        case .success(let p)?: process = p
         }
         child = process
-        group = process.pid
         phase = .running
         log.info("session \(self.id, privacy: .public): started \(invocation.executable, privacy: .public) pid \(process.pid)")
 
@@ -197,7 +230,7 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
             // Whatever the harness left running in its group (MCP servers, watchers) goes too —
             // synchronously, so the group is known to be empty before it's forgotten.
             _ = Self.stopGroup(process.pid, grace: Self.leftoverGrace)
-            self.queue.async { self.group = nil }
+            self.stopLock.withLock { self.group = nil }
             // A grandchild that escaped the group could hold the pipes open; don't wait forever.
             _ = pipes.wait(timeout: .now() + 5)
             self.queue.async { self.harnessExited(status: status) }
@@ -232,6 +265,8 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
 
     private func harnessExited(status: Int32) {
         guard phase == .running else { return }
+        // A stop whose queued half hasn't run yet still counts.
+        if stopReason == nil, isStopRequested { stopReason = .cancelled }
         child = nil
         deps.renderRelay?.stop()
         stopPolling()

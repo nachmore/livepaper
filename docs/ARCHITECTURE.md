@@ -456,6 +456,17 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
   each probed with `--version`). Every harness runs in the workspace (cwd), in its own process
   group, with `bin/` first on PATH; the prompt only ever travels in TASK.md. `[--model M]` comes from
   the session or `AISettings.models[kind]`; `<extra>` from `AISettings.extraArguments[kind]`.
+  * **Login shell** (`LoginShell`, once per process): the user's shell (`pw_shell` if it is a POSIX
+    shell, else /bin/zsh) runs `-ilc '<command -v lookups>; env -0'` like VS Code, so it reads what a
+    new Terminal window reads: zsh ~/.zprofile and ~/.zshrc; bash ~/.bash_profile (or ~/.bash_login
+    or ~/.profile — not ~/.bashrc unless that sources it, as in Terminal). It runs in a session of
+    its own (`POSIX_SPAWN_SETSID`: no controlling terminal — from the CLI in a terminal, an
+    interactive shell in our session would open the terminal and be stopped by SIGTTOU/SIGTTIN),
+    stdin /dev/null, without `TERM_PROGRAM`/`TERM_SESSION_ID` (it isn't that Terminal tab's
+    session) and with `LIVEPAPER_RESOLVING_ENVIRONMENT=1`, so rc files can skip terminal-only lines
+    (`exec tmux`). Only our marked output counts. If that run prints no marker within 10 s (an rc
+    file that execs another program, hangs or is slow), `-lc` is asked the same way (≤ 10 s), so
+    ~/.zprofile's PATH still counts.
   * Claude Code: `claude -p --output-format stream-json --verbose --permission-mode dontAsk
     --allowedTools "Read(./**),Edit(./scene/**),Bash(livepaper check *),…" --disallowedTools
     "WebFetch,WebSearch,Edit(./bin/**),…" [--model M] <extra>`, TASK.md on stdin. `dontAsk` denies
@@ -469,11 +480,14 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
     can't be reached, `RenderClient` writes `<id>.request.json` into `LIVEPAPER_RENDER_SPOOL`
     (`<ws>/.livepaper/render-spool`) and waits for `<id>.response.json`; it never starts a daemon
     itself. `RenderRelay` (in the session runner, outside the sandbox, polling every 0.1 s)
-    claims each request and forwards it only if it is a still/bench/live/thumbnail/ping on a
-    package and outputs inside the workspace (`.png`/`.jpg`); for still/bench/live it compiles the
-    package itself into `<Workspaces>/.render-relay/<session>/`, where the agent can't write, so
-    the server never renders HTML the agent wrote. It touches the spool only through a descriptor
-    whose real path it checked, never through links.
+    claims each request and forwards it only if it is a still/bench/live/motion/thumbnail/ping on a
+    package inside the workspace; for still/bench/live/motion it compiles the package itself into
+    `<Workspaces>/.render-relay/<session>/`, where the agent can't write, so the server never
+    renders HTML the agent wrote. Outputs: still and motion (its heat map) keep an `out` that must
+    be a `.png` inside the workspace, thumbnail one that must be a `.jpg`/`.jpeg` there; bench and
+    live have theirs dropped (the server checks again: RenderOutputPolicy, §8). Motion's times,
+    gaps and grid pass through unchanged. It touches the spool only through a descriptor whose real
+    path it checked, never through links.
   * Kiro CLI: `kiro-cli chat --no-interactive --agent livepaper-session [--trust-workspace]
     --output-format stream-json [--model M] <extra> "<bootstrap>"` (`--wrap never` instead of
     stream-json, and no `--trust-workspace`, for versions whose `chat --help` doesn't offer them).
@@ -511,7 +525,14 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
   and the timeout send SIGTERM to the group and SIGKILL 3 s later; whatever the harness leaves in
   its group when it exits gets 1 s. `AISessionTerminating.terminateNow(grace:)` does the same
   synchronously and returns once the group is empty: quitting the app (`applicationShouldTerminate`
-  → `.terminateLater`, at most 3 s) and uninstalling (before anything is deleted) use it.
+  → `.terminateLater`, at most 3 s) and uninstalling (before anything is deleted) use it. A cancel
+  or terminateNow while the launch is still warming up (login shell, Kiro capability probe, render
+  server) never waits for it: the launch stops at its next step and the harness is never started
+  (the last check and the spawn are atomic). `livepaper ai create|modify`: the first Ctrl-C/SIGTERM
+  cancels (exit 130 once the stream ends); a second one calls `terminateNow(grace: 0)` and exits 130;
+  SIGHUP (terminal closed) does the same and exits 129. A signal the CLI was started with ignored
+  (SIGHUP under `nohup`) stays ignored, and the previous dispositions are restored once the
+  session ends (before the accept prompt).
 * **A session fails when:** the harness can't be found or the template is invalid; it is cancelled
   ("Cancelled."); it runs past the timeout (`AISettings.timeoutMinutes`, default 20, clamped
   1–240; the process group is killed); it exits non-zero (message = exit status/signal + last stderr
