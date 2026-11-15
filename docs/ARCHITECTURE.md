@@ -406,9 +406,15 @@ Budgets (`CheckBudgets`):
   3 example scenes), `scene/` (template for *create*, a copy of the scene for *modify*), `bin/livepaper`
   (shim to the bundled CLI), `.livepaper/` (logs).
 * **Flow:** create/modify → workspace → harness → stdout parsed into events (text, tool calls) and
-  `scene/.check/*.png` reported as stills while the agent iterates → on exit LivePaper runs the
+  `scene/.check/*.png` reported as stills while the agent iterates (again each time a later check
+  rewrites a file; the session view reloads that tile) → on exit LivePaper runs the
   check itself (never trusts the agent's word) → preview → "Add to library" / "Replace" (modify keeps
   history; previous version kept in `history/`).
+* **Stopping:** the harness runs in its own process group, which doesn't die with LivePaper. Cancel
+  and the timeout send SIGTERM to the group and SIGKILL 3 s later; whatever the harness leaves in
+  its group when it exits gets 1 s. `AISessionTerminating.terminateNow(grace:)` does the same
+  synchronously and returns once the group is empty: quitting the app (`applicationShouldTerminate`
+  → `.terminateLater`, at most 3 s) and uninstalling (before anything is deleted) use it.
 * **A session fails when:** the harness can't be found or the template is invalid; it is cancelled
   ("Cancelled."); it runs past the timeout (`AISettings.timeoutMinutes`, default 20, clamped
   1–240; the process group is killed); it exits non-zero (message = exit status/signal + last stderr

@@ -584,7 +584,8 @@ final class AppModel {
         isInstallBusy = true
         defer { isInstallBusy = false }
         let install = services.install
-        for s in sessions where s.isRunning { s.cancel() }
+        // Agents work inside the support directory this deletes: they must be gone first.
+        await stopAllAgents()
         let steps = (try? await offMain { install.performUninstall(removeLibrary: !keepScenes) }) ?? []
         let report = UninstallReport.make(steps)
         await refreshInstallStatus()
@@ -632,6 +633,10 @@ final class AppModel {
     }
 
     var runningSessions: [AISessionModel] { sessions.filter(\.isRunning) }
+
+    /// Stops every AI agent and waits (at most `AgentShutdown.limit`) until their processes are
+    /// gone: before LivePaper quits, and before uninstalling deletes their workspaces.
+    func stopAllAgents() async { await AgentShutdown.stop(sessions) }
 
     func session(id: String) -> AISessionModel? { sessions.first { $0.id == id } }
 

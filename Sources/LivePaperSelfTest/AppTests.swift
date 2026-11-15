@@ -9,6 +9,7 @@
 import CoreGraphics
 import Foundation
 import LivePaperCore
+import os
 
 extension SelfTests {
     static var app: [TestCase] { appLogic + appModel }
@@ -797,7 +798,109 @@ extension SelfTests {
                 try expectEqual(finished, 1)
             }
         },
+        TestCase(name: "app.model.quit-stops-agents") {
+            // Quitting (and uninstalling) waits until every agent's process group is gone. These
+            // agents — and the tool each started — ignore SIGTERM; once LivePaper has exited,
+            // nothing would ever kill them. One is still running, the user stopped the other a
+            // moment ago (its SIGKILL was only scheduled).
+            try withScratchPaths("quit-agents") { root in
+                let (ai, harness) = try scriptedAIService(root: root, agent: """
+                trap '' TERM
+                echo $$ > .livepaper/agent.pid
+                sh -c 'while :; do sleep 1; done' &
+                echo $! > .livepaper/grandchild.pid
+                echo started
+                while :; do sleep 1; done
+                """)
+                let mock = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let services = LivePaperServices(library: mock.library, publish: mock.publish, ai: ai, install: mock.install,
+                                                 render: mock.render, checker: mock.checker, compiler: mock.compiler)
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    let running = try unwrap(model.startSession(.create(prompt: "An agent that ignores SIGTERM"), harness: harness, model: nil))
+                    let stopped = try unwrap(model.startSession(.create(prompt: "Another one, stopped just now"), harness: harness, model: nil))
+                    for s in [running, stopped] { try awaitMain(until: { s.state.entries.contains { $0.kind == .text("started") } }) }
+                    stopped.cancel()
+                    try expectEqual(model.runningSessions.map(\.id), [running.id])
+                    let pids = try [running, stopped].flatMap { s in
+                        try ["agent.pid", "grandchild.pid"].map { name in
+                            try unwrap(Int32(String(decoding: try Data(contentsOf: AIWorkspace(root: s.workspace).internalDirectory
+                                .appendingPathComponent(name)), as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)))
+                        }
+                    }
+                    let began = Date()
+                    try awaitMain { await model.stopAllAgents() }
+                    let took = Date().timeIntervalSince(began)
+                    // Checked the moment it returns: the app exits right after.
+                    try expectEqual(pids.filter { kill($0, 0) == 0 }, [])
+                    try expectEqual([pids[0], pids[2]].filter { killpg($0, 0) == 0 }, [])
+                    try expect(took < AgentShutdown.limit, "bounded: \(took)s")
+                    try expectEqual(running.state.phase, .cancelled)
+                    try expect(model.runningSessions.isEmpty)
+                }
+            }
+        },
+        TestCase(name: "app.model.quit-wait-is-bounded") {
+            // An agent that can't be stopped in time never holds up quitting past the limit.
+            try MainActor.assumeIsolated {
+                let began = Date()
+                try awaitMain { await AgentShutdown.stop([]) }
+                try expect(Date().timeIntervalSince(began) < 0.2, "nothing to stop: immediate")
+                let stuck = StuckHandle()
+                defer { stuck.release.signal() }
+                let session = AISessionModel(handle: stuck, request: .create(prompt: "x"),
+                                             harness: AIService.customHarness(template: "/usr/bin/true"), model: nil, timeout: 600)
+                let start = Date()
+                try awaitMain { await AgentShutdown.stop([session], grace: 0.1, limit: 0.4) }
+                let took = Date().timeIntervalSince(start)
+                try expect(took >= 0.35 && took < 2, "waited \(took)s")
+                try expect(stuck.asked.withLock { $0 } == 1, "asked to stop once")
+                try expectEqual(session.state.phase, .cancelled)
+            }
+        },
     ] }
+
+    /// A session whose agent doesn't stop until released.
+    final class StuckHandle: AISessionTerminating, @unchecked Sendable {
+        let id = "stuck"
+        let workspace = URL(fileURLWithPath: "/tmp")
+        let events = AsyncStream<AISessionEvent> { _ in }
+        let release = DispatchSemaphore(value: 0)
+        let asked = OSAllocatedUnfairLock(initialState: 0)
+        func cancel() {}
+        func terminateNow(grace: TimeInterval) -> Bool {
+            asked.withLock { $0 += 1 }
+            _ = release.wait(timeout: .now() + 30)
+            return false
+        }
+    }
+
+    /// Never asked: the scripted agents in these tests don't finish.
+    final class UnusedChecker: SceneChecking, @unchecked Sendable {
+        func check(package: URL, options: CheckOptions) async throws -> CheckReport { CheckReport(passed: false) }
+    }
+
+    /// A real AIService over `root` whose harness is the /bin/sh script `agent` (a custom template).
+    static func scriptedAIService(root: URL, agent: String) throws -> (AIService, AIHarness) {
+        let fm = FileManager.default
+        let runtime = root.appendingPathComponent("Runtime"), builtins = root.appendingPathComponent("Builtin")
+        let template = runtime.appendingPathComponent("templates/web")
+        try fm.createDirectory(at: template, withIntermediateDirectories: true)
+        try fm.createDirectory(at: builtins, withIntermediateDirectories: true)
+        try Data("# Agent guide\n".utf8).write(to: runtime.appendingPathComponent("AGENTS.md"))
+        try SceneManifest(id: "untitled", name: "Untitled", kind: .web).write(package: template)
+        try Data("LivePaper.scene({ draw(lp) {} });\n".utf8).write(to: template.appendingPathComponent("scene.js"))
+        let script = root.appendingPathComponent("agent.sh")
+        try Data((agent + "\n").utf8).write(to: script)
+        let library = LibraryService(libraryDirectory: root.appendingPathComponent("Library"), builtinDirectory: builtins,
+                                     templateDirectory: template)
+        let builder = WorkspaceBuilder(library: library, runtimeDirectory: runtime, builtinScenesDirectory: builtins,
+                                       workspacesDirectory: root.appendingPathComponent("Workspaces"), cliPath: URL(fileURLWithPath: "/usr/bin/false"))
+        let detector = HarnessDetector(shell: .fixed(ShellSnapshot(environment: ["PATH": "/usr/bin:/bin"])), directories: [])
+        let ai = AIService(library: library, checker: UnusedChecker(), workspaceBuilder: builder, detector: detector,
+                           runner: RecordingCommandRunner(), settingsURL: root.appendingPathComponent("ai-settings.json"))
+        return (ai, AIService.customHarness(template: "/bin/sh '\(script.path)'", name: "Scripted agent"))
+    }
 
     // MARK: - Helpers
 

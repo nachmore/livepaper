@@ -93,6 +93,14 @@ final class AISessionModel: Identifiable {
         finishedAt = Date()
     }
 
+    /// Stops the agent's process group synchronously (SIGTERM, up to `grace` seconds, SIGKILL) and
+    /// returns once it is gone — for quitting, when `cancel()`'s timer-based SIGKILL would never run.
+    /// Blocks, so call it off the main thread (AgentShutdown does). Call `cancel()` first for the UI.
+    nonisolated func terminateAgent(grace: TimeInterval) -> Bool {
+        guard let stoppable = handle as? AISessionTerminating else { handle.cancel(); return true }
+        return stoppable.terminateNow(grace: grace)
+    }
+
     /// Seconds since start (frozen once finished).
     func elapsed(now: Date = Date()) -> TimeInterval { (finishedAt ?? now).timeIntervalSince(startedAt) }
 
