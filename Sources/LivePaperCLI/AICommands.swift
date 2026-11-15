@@ -155,6 +155,7 @@ enum AICommands {
             default: break
             }
         }
+        interrupt.waitIfExiting()
         interrupt.stop()
         if interrupt.fired {
             out.note("cancelled; the workspace is kept in \(displayPath(session.workspace))")
@@ -339,6 +340,9 @@ final class SessionPrinter {
 final class Interrupts: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
+    /// Set (with `count`) when a handler starts stopping the agent to exit with this status.
+    private var exitStatus: Int32?
+    private enum Step { case cancel, exit(Int32), ignore }
     private var sources: [DispatchSourceSignal] = []
     /// What each handled signal did before; `stop()` puts it back.
     private var previous: [(signal: Int32, action: sigaction)] = []
@@ -352,16 +356,23 @@ final class Interrupts: @unchecked Sendable {
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .global(qos: .userInitiated))
             source.setEventHandler { [weak self] in
                 guard let self else { return }
-                let n = self.lock.withLock { () -> Int in self.count += 1; return self.count }
-                if sig == SIGHUP {
-                    onExit()
-                    exit(129)
-                } else if n == 1 {
+                let step = self.lock.withLock { () -> Step in
+                    self.count += 1
+                    guard self.exitStatus == nil else { return .ignore }   // another handler is exiting
+                    guard sig == SIGHUP || self.count > 1 else { return .cancel }
+                    let status: Int32 = sig == SIGHUP ? 129 : 130
+                    self.exitStatus = status
+                    return .exit(status)
+                }
+                switch step {
+                case .cancel:
                     FileHandle.standardError.write(Data("\n… cancelling (press Ctrl-C again to quit at once)\n".utf8))
                     onInterrupt()
-                } else {
+                case .exit(let status):
                     onExit()
-                    exit(130)
+                    exit(status)
+                case .ignore:
+                    break
                 }
             }
             source.resume()
@@ -370,6 +381,15 @@ final class Interrupts: @unchecked Sendable {
     }
 
     var fired: Bool { lock.withLock { count > 0 } }
+
+    /// For when the session's events have ended. If a handler is exiting (SIGHUP, a second Ctrl-C),
+    /// never returns: that handler exits once the agent's group is gone. Stopping the group lets the
+    /// stream end first (the agent's exit ends it), and returning then would exit with the wrong
+    /// status, or before the group is known to be empty.
+    func waitIfExiting() {
+        guard lock.withLock({ exitStatus }) != nil else { return }
+        while true { pause() }
+    }
 
     /// Back to what the signals did before (normally the default: Ctrl-C at the accept prompt quits;
     /// under `nohup`, SIGHUP stays ignored).
