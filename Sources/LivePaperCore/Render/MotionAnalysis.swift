@@ -98,8 +98,10 @@ public struct MotionSummary: Codable, Sendable, Equatable {
     public var movingRegions: Int { MotionAnalysis.regionNames.count - stillRegions.count }
 }
 
-/// Thresholds of the motion check (part of `CheckBudgets`). Calibrated on the built-in scenes; see
-/// docs/ARCHITECTURE.md §9.
+/// Thresholds of the motion check (part of `CheckBudgets`), calibrated on the built-in scenes
+/// (docs/ARCHITECTURE.md §9): the two the user found too static measure 2–12 % within 5 s in 0–2
+/// regions; the others 30–100 % in 6–9 regions. Real scenes' busy/flicker levels (90th percentile
+/// of tiles ≤ 3.4, falling rain included) stay far below their limits; strobing and fast pans hit 100 %.
 public struct MotionBudgets: Sendable, Equatable {
     /// A tile visibly changes when its `level` reaches this…
     public var tileLevel: Double = 0.5
@@ -115,11 +117,11 @@ public struct MotionBudgets: Sendable, Equatable {
     public var goodCoverage5s: Double = 0.5
     public var goodCoverage2s: Double = 0.25
     /// Too busy: tiles whose change within 0.5 s reaches `busyLevel` cover more than `maxBusy` of the frame.
-    public var busyLevel: Double = 24
+    public var busyLevel: Double = 16
     public var maxBusy: Double = 0.5
     /// Flicker: tiles whose largest frame-to-frame change reaches `flickerLevel` cover more than
     /// `maxFlicker` of the frame.
-    public var flickerLevel: Double = 12
+    public var flickerLevel: Double = 10
     public var maxFlicker: Double = 0.3
     public init() {}
 }
@@ -359,8 +361,9 @@ extension MotionAnalysis {
                                 "motion visible within 1–2 s wherever you look (see \(guide)).")
             }
             if let s = summaries.max(by: { $0.stillRegions.count < $1.stillRegions.count }), !s.stillRegions.isEmpty {
+                let clock = s.stillRegions.contains("top") ? " Behind the clock (top centre) keep it dark and low-contrast." : ""
                 warnings.append("Nothing moves in the \(list(s.stillRegions)) of the frame at \(s.size): give \(s.stillRegions.count == 1 ? "it" : "them") " +
-                                "gentle motion too (drifting mist or light, shimmer, sway, a few slow particles) so the whole frame feels alive.")
+                                "gentle motion too (drifting mist or light, shimmer, sway, a few slow particles) so the whole frame feels alive.\(clock)")
             }
         }
         return (problems, warnings)

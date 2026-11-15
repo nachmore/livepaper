@@ -56,11 +56,12 @@ struct Bitmap {
                 let c = colOf[x], tile = r * cols + c, i = (y * width + x) * 4
                 let colEdge = x == 0 || colOf[x - 1] != c, colEdge2 = colEdge || x == 1 || (x > 1 && colOf[x - 2] != c)
                 let luma = 0.2126 * Double(pixels[i]) + 0.7152 * Double(pixels[i + 1]) + 0.0722 * Double(pixels[i + 2])
-                let grey = 24 + 0.45 * luma
+                // Lifted and stretched so even a dark scene stays recognisable under the tint.
+                let grey = 40 + 0.8 * luma
                 var rgb = (grey, grey, grey)
                 let a = tile < alive.count ? alive[tile] : 0
                 if a > 0 {
-                    let (tint, k): ((Double, Double, Double), Double) = a >= 0.5 ? ((255, 170, 40), 0.3 + 0.3 * a) : ((70, 150, 255), 0.4)
+                    let (tint, k): ((Double, Double, Double), Double) = a >= 0.5 ? ((255, 165, 30), 0.22 + 0.2 * a) : ((70, 150, 255), 0.3)
                     rgb = (rgb.0 + (tint.0 - rgb.0) * k, rgb.1 + (tint.1 - rgb.1) * k, rgb.2 + (tint.2 - rgb.2) * k)
                 }
                 if tile < flicker.count, flicker[tile], rowEdge2 || colEdge2 {
