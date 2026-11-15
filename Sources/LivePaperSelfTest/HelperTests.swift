@@ -337,6 +337,21 @@ extension SelfTests {
             s.sessionLocked = true
             guard case .skip = HelperLockPolicy.decide(s) else { throw TestFailure(description: "locked first") }
         },
+        TestCase(name: "helper.launch.exits-after-uninstall") {
+            let root = try tempDir("helper-uninstalled")
+            defer { remove(root) }
+            let marker = root.appendingPathComponent("LivePaper.uninstalled")
+            try expectEqual(HelperLaunchPolicy.decide(uninstallMarker: marker), .run)
+            try Data().write(to: marker)
+            try expectEqual(HelperLaunchPolicy.decide(uninstallMarker: marker), .exitUninstalled)
+            // Deciding creates nothing (the support folder must stay deleted).
+            try expectEqual(try FileManager.default.contentsOfDirectory(atPath: root.path), ["LivePaper.uninstalled"])
+            // The marker lives outside the support folder that uninstall deletes.
+            try expect(!LPPaths.uninstallMarker.path.hasPrefix(LPPaths.supportRoot.path + "/"), LPPaths.uninstallMarker.path)
+            var asked: [String] = []
+            _ = HelperLaunchPolicy.decide(uninstallMarker: marker) { asked.append($0); return false }
+            try expectEqual(asked, [marker.path])
+        },
         TestCase(name: "helper.hotkey.registration-plan") {
             let l = LPHotkey.controlCommandL
             let k = LPHotkey(keyCode: 40, modifiers: [.control, .command])

@@ -32,6 +32,9 @@
 // order is always "start the saver first; the saver locks", and the helper doesn't observe the lock
 // notifications at all.
 //
+// Uninstall: when LPPaths.uninstallMarker exists the agent exits 0 at launch, before it creates
+// anything (HelperLaunchPolicy). A clean exit isn't restarted by launchd's KeepAlive.
+//
 // Modes: no arguments runs the agent. `--print-config` (JSON, see HelperReport) and `--self-check`
 // print the resolved configuration and exit without connecting to the window server, registering
 // hotkeys or launching anything; `livepaper doctor` and tests use them.
@@ -64,6 +67,11 @@ func selfCheck() -> Int32 {
 
 switch HelperCommand.parse(Array(CommandLine.arguments.dropFirst())) {
 case .agent:
+    // Before anything else: after an uninstall the agent must not create files or register keys.
+    if HelperLaunchPolicy.decide(uninstallMarker: LPPaths.uninstallMarker) == .exitUninstalled {
+        HelperLog.main.notice("LivePaper was uninstalled (\(LPPaths.uninstallMarker.path, privacy: .public) exists); exiting")
+        exit(0)
+    }
     MainActor.assumeIsolated { HelperAgent.run() }
 case .printConfig:
     exit(printConfig())

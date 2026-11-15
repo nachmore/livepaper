@@ -119,6 +119,28 @@ struct HelperRequestGate: Sendable {
     }
 }
 
+// MARK: - Launch
+
+/// Whether the agent may start at all.
+enum HelperLaunchDecision: Equatable, Sendable {
+    case run
+    /// LivePaper was uninstalled (`LPPaths.uninstallMarker` exists). The agent exits 0 before it
+    /// creates anything: a login item that is still registered (a terminal uninstall can't
+    /// unregister it) must not recreate LivePaper's data folder or register the default shortcut.
+    /// launchd's KeepAlive {SuccessfulExit: false} restarts the job only after a crash, so a clean
+    /// exit keeps it stopped until the next login, where the same check stops it again.
+    case exitUninstalled
+}
+
+enum HelperLaunchPolicy {
+    /// Checked first thing in agent mode, before the single-instance file (which would create the
+    /// support folder). Reads one path; creates nothing.
+    static func decide(uninstallMarker: URL,
+                       fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> HelperLaunchDecision {
+        fileExists(uninstallMarker.path) ? .exitUninstalled : .run
+    }
+}
+
 // MARK: - Command line
 
 enum HelperCommand: Equatable, Sendable {
