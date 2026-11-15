@@ -73,7 +73,10 @@ public struct MotionSummary: Codable, Sendable, Equatable {
     public var coverage5s: Double
     /// Share of the nine regions (thirds of the width × thirds of the height) with motion within 5 s.
     public var spread: Double
-    /// Names of the regions without motion ("top-left", "top", …, "centre", …, "bottom-right").
+    /// Per region ("top-left", "top", …, "centre", …, "bottom-right"): the share of its tiles that
+    /// move within 5 s, averaged over the sampled moments.
+    public var regions: [String: Double]
+    /// The regions without motion (share below `MotionBudgets.regionShare`), in reading order.
     public var stillRegions: [String]
     /// Largest share of the frame, over the sampled moments, that changes strongly within 0.5 s.
     public var busy: Double
@@ -88,9 +91,10 @@ public struct MotionSummary: Codable, Sendable, Equatable {
     public var heatmap: String?
 
     public init(size: String, cols: Int, rows: Int, times: [Double], coverage2s: Double, coverage5s: Double, spread: Double,
-                stillRegions: [String], busy: Double, flicker: Double, flickerAt: Double? = nil, map: [String], heatmap: String? = nil) {
+                regions: [String: Double] = [:], stillRegions: [String], busy: Double, flicker: Double, flickerAt: Double? = nil,
+                map: [String], heatmap: String? = nil) {
         self.size = size; self.cols = cols; self.rows = rows; self.times = times; self.coverage2s = coverage2s
-        self.coverage5s = coverage5s; self.spread = spread; self.stillRegions = stillRegions; self.busy = busy
+        self.coverage5s = coverage5s; self.spread = spread; self.regions = regions; self.stillRegions = stillRegions; self.busy = busy
         self.flicker = flicker; self.flickerAt = flickerAt; self.map = map; self.heatmap = heatmap
     }
 
@@ -237,7 +241,8 @@ public enum MotionAnalysis {
         let alive = aliveShare(m, budgets: b)
         let mid = movingShare(m, within: 2, budgets: b)
         let coverage5 = n > 0 ? alive.reduce(0, +) / Double(n) : 0
-        let still = regionNames.indices.filter { regionShare(alive, region: $0, cols: m.cols, rows: m.rows) < b.regionShare }
+        let shares = regionNames.indices.map { regionShare(alive, region: $0, cols: m.cols, rows: m.rows) }
+        let still = regionNames.indices.filter { shares[$0] < b.regionShare }
         var busy = 0.0, flicker = 0.0, flickerAt: Double?
         for s in m.samples {
             if let short = closest(s.gaps, to: 0.5), n > 0 {
@@ -256,6 +261,7 @@ public enum MotionAnalysis {
         }
         return MotionSummary(size: size, cols: m.cols, rows: m.rows, times: m.samples.map(\.t), coverage2s: round(mid, 3),
                              coverage5s: round(coverage5, 3), spread: round(Double(regionNames.count - still.count) / Double(regionNames.count), 3),
+                             regions: Dictionary(uniqueKeysWithValues: zip(regionNames, shares.map { round($0, 3) })),
                              stillRegions: still.map { regionNames[$0] }, busy: round(busy, 3), flicker: round(flicker, 3),
                              flickerAt: flicker > 0 ? flickerAt : nil, map: map, heatmap: heatmap)
     }
@@ -376,10 +382,15 @@ extension MotionAnalysis {
         if s.coverage5s == 0 {
             head = "Too static at \(s.size): nothing in the frame changes within 5 s at any sampled moment (\(timeList(s.times)))."
         } else if lowCoverage && fewRegions {
-            let place = moving.isEmpty ? "in a few small, scattered spots" : "almost all of it in the \(list(moving))"
+            // Concentrated (a sun, one moon) or thinly scattered (a few small movers everywhere)?
+            let total = s.regions.values.reduce(0, +), inMoving = moving.compactMap { s.regions[$0] }.reduce(0, +)
+            let concentrated = !moving.isEmpty && (total == 0 || inMoving >= 0.7 * total)
             head = "Too static at \(s.size): only \(percent(s.coverage5s)) of the frame visibly changes within 5 s (needs at least " +
-                   "\(percent(b.minCoverage5s))), \(place)" +
-                   (moving.isEmpty ? "." : " — the other \(s.stillRegions.count) of 9 regions (\(s.stillRegions.joined(separator: ", "))) stay still.")
+                   "\(percent(b.minCoverage5s))), " +
+                   (concentrated ? "almost all of it in the \(list(moving)) — the other \(s.stillRegions.count) of 9 regions " +
+                                   "(\(s.stillRegions.joined(separator: ", "))) stay still."
+                                 : "in small, scattered spots: \(s.stillRegions.count) of 9 regions (\(s.stillRegions.joined(separator: ", "))) " +
+                                   "are still or nearly so.")
         } else if lowCoverage {
             head = "Too static at \(s.size): only \(percent(s.coverage5s)) of the frame visibly changes within 5 s (needs at least " +
                    "\(percent(b.minCoverage5s))); the motion reaches most of the frame but is sparse (small, isolated movers)."

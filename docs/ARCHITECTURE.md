@@ -360,9 +360,20 @@ connection; the server renders strictly one request at a time on the main thread
 → {"op":"bench","html":…,"width":5120,"height":1440,"dpr":1,"t":14,"frames":120}
 → {"op":"live","html":…,"width":1512,"height":982,"dpr":2,"fps":30,"scale":0.75,"seconds":12,"warmup":3}
 → {"op":"thumbnail","scene":"/abs/x.lpscene","out":"/abs/thumbnail.jpg"}
+→ {"op":"motion","html":…,"width":1280,"height":720,"dpr":0.5,"times":[3,17,41,120],"gaps":[0.5,2,5],"grid":[16,9],
+   "out":"/abs/.check/motion-1280x720@0.5.png"}
 → {"op":"ping"}  |  {"op":"shutdown"}                     (answered without queuing)
-← {"ok":true,"ready":true,"errors":[],"bench_ms":1.4,"out":"…","fps":30,"cpu_mW":61,"mean_luma":…,"clock_luma":…}
+← {"ok":true,"ready":true,"errors":[],"bench_ms":1.4,"out":"…","fps":30,"cpu_mW":61,"mean_luma":…,"clock_luma":…,
+   "motion":{"width":640,"height":360,"cols":16,"rows":9,"samples":[{"t":3,"gaps":[{"gap":0.5,"tiles":{"level":[…],"area":[…]}},…],
+             "flicker":{"level":[…],"area":[…]}},…]}}
 ```
+* **`motion`** (`MotionAnalysis.swift` in Core): one page per sampled moment in manual mode (the
+  runtime steps to t in 1/30 s steps exactly like a still, clock overlay hidden, clock time fixed),
+  snapshots at 0, 1, 3, 7, 15 frames and every gap later, and per tile of the grid compares the
+  frame at t with each gap (`level`: mean of max(0, d − 2), d = largest channel difference;
+  `area`: share of pixels with d ≥ 8) and successive burst frames (`flicker`: the largest step).
+  `out` (optional) gets a heat map PNG. The verdict (coverage, regions, busy, flicker) is computed
+  by the client from these maps (`MotionAnalysis.summarize`/`verdict`).
 * **Who serves:** the process holding `render-server.lock` (flock; dies with its process). The app
   starts an embedded server at launch; if `LivePaperRenderd` serves, the app asks it to `shutdown`
   and takes over when it exits. Clients start at most one daemon (`renderd-launch.lock`) and retry
@@ -383,7 +394,7 @@ connection; the server renders strictly one request at a time on the main thread
   JavaScript error ("the scene tried to navigate to …"), so check fails the scene.
 * `devicePixelRatio` is emulated per request; App Nap is disabled while serving (else fps caps at 30).
 * **Outputs are confined** (`RenderOutputPolicy`): the server runs outside any agent's sandbox, so it
-  writes a still only as a `.png` into the `.check` folder holding the request's html, a thumbnail
+  writes a still (or motion heat map) only as a `.png` into the `.check` folder holding the request's html, a thumbnail
   only as a `.jpg` into the scene package it renders, or either into `<support>/Workspaces` or a
   temporary folder. Symlinks are resolved at write time (the parent folder is opened and its real
   path checked, the file is created and renamed relative to it); an existing destination must be a
@@ -403,11 +414,15 @@ livepaper new <id> [--from <scene-id>] | list | publish | doctor                
 ```
 `check` = compile → stills at 1512×982@2 for t = 0, 4, 12, 30, 90, 240, 600, plus 32:9 (2560×720
 @1, t = 12/90/600), 5:4 (1280×1024 @1, t = 12/90) and thumbnail size (320×200 @2, t = 12) →
-JS-error check → short probe benches (30 frames) at every sampled time but the last, to find the
-heaviest phase → full benches (120 frames) at that time at 1512×982@2 and 5120×1440@1 →
-luminance checks → optional live energy run (`--power`, battery profile: 30 fps, 75 %) → writes
-`.check/report.json` + PNGs, prints a short summary for humans and agents; exit 0 only if it passes.
-`--quick`: three stills + one 32:9, one 60-frame bench at 1512×982@2, no ultra-wide bench.
+JS-error check → motion at 1280×720@0.5 and 1024×820@0.5 (t = 3, 17, 41, 120; gaps 0.5/2/5 s;
+16 tiles across; heat maps `.check/motion-<size>.png`) → short probe benches (30 frames) at every
+sampled time but the last, to find the heaviest phase → full benches (120 frames) at that time at
+1512×982@2 and 5120×1440@1 → luminance checks → optional live energy run (`--power`, battery
+profile: 30 fps, 75 %) → writes `.check/report.json` (+ `motion[]`: coverage, regions, busy,
+flicker, map per size) + PNGs, prints a short summary for humans and agents (with the motion map
+when motion needs attention); exit 0 only if it passes.
+`--quick`: three stills + one 32:9, motion at 16:9 only, one 60-frame bench at 1512×982@2, no
+ultra-wide bench.
 
 Budgets (`CheckBudgets`):
 
@@ -420,6 +435,17 @@ Budgets (`CheckBudgets`):
 | Mean luma behind the clock | > 120 | spread across times > 50 (busy) |
 | Black frames | every still < 2, or black at t = 600 when earlier stills aren't | |
 | CPU energy, battery profile (`--power`) | > 300 mW | > 150 mW, or live fps < 85 % of 30 |
+| Motion within 5 s (`MotionBudgets`; a tile moves at level ≥ 0.5 or area ≥ 3 %) | < 25 % of the frame, or motion in < 5 of the 9 regions (thirds × thirds) | < 50 % within 5 s or < 25 % within 2 s; any still region |
+| Busy: tiles with level ≥ 16 within 0.5 s | > 50 % of the frame | |
+| Flicker: tiles with a frame-to-frame step ≥ 10 | > 30 % of the frame | |
+| Motion not measured (render server too old) | | always |
+
+Motion calibration (2026-11, the built-ins at 16:9 / 5:4): Ringed Giant 7 / 9 % in 2 / 1 regions
+and Ink and Ember 2 / 2 % in 0 / 0 regions (both judged too static by a person) fail; Abyssal
+Lanterns 30 / 41 % (6 / 6), Liquid Glass 47 / 45 % (7 / 7) and Rain on the River 100 % (9) pass.
+Busy and flicker stay at 0–1 % for all five (falling rain included); strobing and fast pans
+measure 100 %. `LIVEPAPER_SELFTEST_E2E=1 swift run LivePaperSelfTest runtime.e2e.motionBuiltins`
+prints these numbers again (`LIVEPAPER_MOTION_DUMP=<dir>` saves the raw maps).
 
 `report.json` `benchMs` keys are `"<w>x<h>@<dpr> t=<t>"`; probe benches carry the suffix `" probe"`
 (`"1512x982@2 t=30 probe"`) so consumers can tell them from the full benches.
