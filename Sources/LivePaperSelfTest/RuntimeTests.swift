@@ -243,7 +243,7 @@ enum RuntimeTests {
                         motion motionFor: (CheckFrame) -> RenderResponse = { aliveMotion($0) }) -> CheckResults {
         var r = CheckResults()
         r.stills = plan.stills.map { ($0, "/tmp/\($0.fileName)", still($0)) }
-        r.motion = plan.motionSizes.map { ($0, "/tmp/" + SceneChecker.motionFileName($0), motionFor($0)) }
+        r.motion = plan.motionSizes.map { ($0, motionFor($0)) }
         r.probes = plan.probeTimes.map { t in var f = CheckPlan.primary; f.t = t; return (f, benchFor(f)) }
         r.benches = plan.benchSizes.map { var f = $0; f.t = 30; return (f, benchFor(f)) }
         return r

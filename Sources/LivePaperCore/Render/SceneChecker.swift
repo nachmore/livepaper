@@ -79,7 +79,7 @@ public struct CheckPlan: Sendable, Equatable {
                          benchSizes: [primary, ultraWide], benchFrames: 120, power: power, motionSizes: [motionWide, motionSquare])
     }
 
-    /// A fast loop for iterating: three stills, one bench, no ultra-wide bench.
+    /// A fast loop for iterating: three stills (+ one 32:9), motion at 16:9 only, one bench, no ultra-wide bench.
     public static func quick(power: Bool) -> CheckPlan {
         let times: [Double] = [4, 30, 600]
         let stills = times.map { CheckFrame(1512, 982, dpr: 2, t: $0) } + [CheckFrame(2560, 720, dpr: 1, t: 30)]
@@ -96,8 +96,8 @@ public struct CheckResults: Sendable {
     public var stills: [(frame: CheckFrame, path: String, response: RenderResponse)] = []
     public var probes: [(frame: CheckFrame, response: RenderResponse)] = []
     public var benches: [(frame: CheckFrame, response: RenderResponse)] = []
-    /// One `motion` request per motion size; `heatmap` is the PNG it was asked to write.
-    public var motion: [(frame: CheckFrame, heatmap: String?, response: RenderResponse)] = []
+    /// One `motion` request per motion size (`frame.t` unused).
+    public var motion: [(frame: CheckFrame, response: RenderResponse)] = []
     public var live: RenderResponse?
     public init() {}
 }
@@ -175,7 +175,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             let r = try await send(RenderRequest(op: .motion, html: html.path, width: Double(size.width), height: Double(size.height),
                                                  dpr: size.dpr, out: out, clock: true, times: plan.motionTimes, gaps: plan.motionGaps,
                                                  grid: [grid.cols, grid.rows]))
-            results.motion.append((size, out, r))
+            results.motion.append((size, r))
         }
         for (i, t) in plan.probeTimes.enumerated() {
             var frame = CheckPlan.primary
@@ -291,7 +291,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         // Motion: is the scene gently alive everywhere, without being busy or flickering?
         var motion: [MotionSummary] = []
         var motionUnsupported: String?
-        for (frame, _, r) in results.motion {
+        for (frame, r) in results.motion {
             collectErrors(r)
             guard r.ok else {
                 // A render server from before the motion op can't even decode the request.
@@ -365,7 +365,8 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         if jsErrors.count > 5 { errorProblems.append("…and \(jsErrors.count - 5) more JavaScript errors (see jsErrors in report.json).") }
         problems = errorProblems + problems
         if quick {
-            warnings.append("Quick check: fewer stills and no ultra-wide benchmark. Run the full `livepaper check` before you finish.")
+            warnings.append("Quick check: fewer stills, motion at 16:9 only and no ultra-wide benchmark. Run the full `livepaper check` " +
+                            "before you finish.")
         }
         return CheckReport(passed: problems.isEmpty, problems: problems, warnings: warnings, jsErrors: jsErrors, stills: stills,
                            benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion)
