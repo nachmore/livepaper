@@ -8,7 +8,8 @@
 //   * still:     a .png in the `.check` folder that holds the request's html (where `livepaper
 //                check`/`still` put them), in LivePaper's AI workspaces, or in a temporary directory;
 //   * thumbnail: a .jpg/.jpeg in the scene package being rendered (or its .check), the AI
-//                workspaces or a temporary directory.
+//                workspaces or a temporary directory;
+//   * motion:    (the heat map) like still.
 //
 // Symbolic links are resolved when the file is written, not before: the parent folder is opened,
 // the opened folder's real path (F_GETPATH) is checked against the allowed roots, and the file is
@@ -26,7 +27,7 @@ public struct RenderOutputError: Error, LocalizedError, Sendable, Equatable {
 
 public struct RenderOutputPolicy: Sendable {
     /// Explains the rule in refusals (clients show it to people and agents).
-    public static let rule = "the render server only writes PNG stills into the scene's .check folder and JPEG thumbnails into the " +
+    public static let rule = "the render server only writes PNG stills and motion maps into the scene's .check folder and JPEG thumbnails into the " +
         "scene package, LivePaper's AI workspaces or a temporary folder"
 
     public let supportRoot: URL
@@ -41,7 +42,7 @@ public struct RenderOutputPolicy: Sendable {
     /// File extensions `op` may write, or nil if it writes nothing.
     static func extensions(for op: RenderRequest.Op) -> Set<String>? {
         switch op {
-        case .still: return ["png"]
+        case .still, .motion: return ["png"]
         case .thumbnail: return ["jpg", "jpeg"]
         default: return nil
         }
@@ -51,7 +52,7 @@ public struct RenderOutputPolicy: Sendable {
     public func allowedRoots(for request: RenderRequest) -> [String] {
         var roots = [supportRoot.appendingPathComponent("Workspaces")] + temporaryDirectories
         switch request.op {
-        case .still:
+        case .still, .motion:
             if let html = request.html, let real = Self.realPath(html) {
                 let dir = URL(fileURLWithPath: real).deletingLastPathComponent()
                 if dir.lastPathComponent == SceneChecker.checkDirectory { roots.append(dir) }

@@ -3,7 +3,7 @@
 import Foundation
 
 public struct RenderRequest: Codable, Sendable {
-    public enum Op: String, Codable, Sendable { case still, bench, live, thumbnail, ping, shutdown }
+    public enum Op: String, Codable, Sendable { case still, bench, live, thumbnail, motion, ping, shutdown }
     public var op: Op
     /// Absolute path of a compiled, self-contained scene HTML file (still/bench/live).
     public var html: String?
@@ -21,13 +21,21 @@ public struct RenderRequest: Codable, Sendable {
     public var seconds: Double?
     public var warmup: Double?
     public var timeout: Double?
+    /// motion: the sampled moments (s; default MotionAnalysis.defaultTimes), the gaps compared with
+    /// each of them (s; default 0.5, 2, 5) and the tile grid [cols, rows] (default ~16 across).
+    /// `out` (optional) receives the heat map PNG.
+    public var times: [Double]?
+    public var gaps: [Double]?
+    public var grid: [Int]?
 
     public init(op: Op, html: String? = nil, scene: String? = nil, width: Double? = nil, height: Double? = nil,
                 dpr: Double? = nil, t: Double? = nil, out: String? = nil, frames: Int? = nil, clock: Bool? = nil,
-                fps: Double? = nil, scale: Double? = nil, seconds: Double? = nil, warmup: Double? = nil, timeout: Double? = nil) {
+                fps: Double? = nil, scale: Double? = nil, seconds: Double? = nil, warmup: Double? = nil, timeout: Double? = nil,
+                times: [Double]? = nil, gaps: [Double]? = nil, grid: [Int]? = nil) {
         self.op = op; self.html = html; self.scene = scene; self.width = width; self.height = height; self.dpr = dpr
         self.t = t; self.out = out; self.frames = frames; self.clock = clock; self.fps = fps; self.scale = scale
         self.seconds = seconds; self.warmup = warmup; self.timeout = timeout
+        self.times = times; self.gaps = gaps; self.grid = grid
     }
 }
 
@@ -47,16 +55,19 @@ public struct RenderResponse: Codable, Sendable {
     /// still: mean luminance (0–255) of the whole frame and of the clock rect, for budget checks.
     public var meanLuma: Double?
     public var clockLuma: Double?
+    /// motion: per-tile change maps (MotionAnalysis.swift).
+    public var motion: MotionMeasurement?
 
     public init(ok: Bool, ready: Bool = false, errors: [String] = [], note: String? = nil, out: String? = nil,
                 benchMs: Double? = nil, fps: Double? = nil, cpuPct: Double? = nil, cpuMW: Double? = nil,
-                seconds: Double? = nil, meanLuma: Double? = nil, clockLuma: Double? = nil) {
+                seconds: Double? = nil, meanLuma: Double? = nil, clockLuma: Double? = nil, motion: MotionMeasurement? = nil) {
         self.ok = ok; self.ready = ready; self.errors = errors; self.note = note; self.out = out; self.benchMs = benchMs
         self.fps = fps; self.cpuPct = cpuPct; self.cpuMW = cpuMW; self.seconds = seconds; self.meanLuma = meanLuma; self.clockLuma = clockLuma
+        self.motion = motion
     }
 
     enum CodingKeys: String, CodingKey {
-        case ok, ready, errors, note, out, fps, seconds
+        case ok, ready, errors, note, out, fps, seconds, motion
         case benchMs = "bench_ms", cpuPct = "cpu_pct", cpuMW = "cpu_mW", meanLuma = "mean_luma", clockLuma = "clock_luma"
     }
 }

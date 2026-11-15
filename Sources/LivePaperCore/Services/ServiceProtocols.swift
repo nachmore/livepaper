@@ -134,10 +134,12 @@ public struct CheckReport: Codable, Sendable, Equatable {
     public var benchMs: [String: Double]
     public var energyMw: Double?
     public var checkedAt: Date
+    /// How alive the scene is, per analysed size (MotionAnalysis); nil when motion wasn't measured.
+    public var motion: [MotionSummary]?
     public init(passed: Bool, problems: [String] = [], warnings: [String] = [], jsErrors: [String] = [], stills: [Still] = [],
-                benchMs: [String: Double] = [:], energyMw: Double? = nil, checkedAt: Date = Date()) {
+                benchMs: [String: Double] = [:], energyMw: Double? = nil, checkedAt: Date = Date(), motion: [MotionSummary]? = nil) {
         self.passed = passed; self.problems = problems; self.warnings = warnings; self.jsErrors = jsErrors; self.stills = stills
-        self.benchMs = benchMs; self.energyMw = energyMw; self.checkedAt = checkedAt
+        self.benchMs = benchMs; self.energyMw = energyMw; self.checkedAt = checkedAt; self.motion = motion
     }
 }
 

@@ -9,7 +9,9 @@
  * Everything is a pure function of lp.t: creature paths, asymmetric bell pulses (contract
  * narrower/taller, relax wider), tentacles (which sample the creature's own path and pulse a few
  * seconds in the past, so they lag and curl), marine snow and the plankton waves (scheduled per
- * 30 s slot). Static layers (water, dither, shaft sprite) are built in resize().
+ * 30 s slot). Static layers (water, dither, shaft sprite, surface caustic nets) are built in
+ * resize(), as are each creature's body sprites (a few pulse frames, cross-faded per frame) and its
+ * tentacle gradient, so a creature costs a handful of draw calls.
  */
 const U = LivePaper.util;
 const TAU = Math.PI * 2;
@@ -33,6 +35,7 @@ const LX = new Float32Array(NS + 1), LY = new Float32Array(NS + 1), LP = new Flo
 const LC = new Float32Array(NS + 1);
 const tmpA = { x: 0, y: 0, u: 0 };
 let clockBox = null;   // clock rect expanded by a margin; creatures inside it dim to ~25 %
+let farSnow = [], caustics = [], veils = [], sparks = [], flecks = [];
 
 LivePaper.scene({
   context: '2d',
@@ -43,29 +46,271 @@ LivePaper.scene({
     shafts = buildShafts(lp);
     creatures = buildCreatures(lp);
     snow = buildSnow(lp);
+    farSnow = [buildFarSnow(lp, 31, 1 / 1000, [0.55, 1.2], 0.52)];
+    caustics = [buildCaustics(lp, 3), buildCaustics(lp, 9)];
+    veils = [buildVeil(lp, 5, ['#245f86', '#2d4f9e'])];
+    sparks = buildSparks(lp);
+    flecks = buildFlecks(lp);
   },
 
   draw(lp) {
     const ctx = lp.ctx;
     const t = lp.env.reducedMotion ? lp.t * 0.5 : lp.t;
+    // Slow camera sway shared by the depth layers (scaled by depth: parallax).
+    const cam = lp.w * 0.012 * (0.6 * Math.sin(t * TAU / 97) + 0.4 * Math.sin(t * TAU / 151 + 1.3));
 
     ctx.drawImage(water.canvas, 0, 0, lp.w, lp.h);
 
     ctx.globalCompositeOperation = 'lighter';
+    drawVeils(ctx, lp, t);
     drawShafts(ctx, lp, t);
-    drawSnow(ctx, lp, t, 0);
+    drawCaustics(ctx, lp, t);
+    drawFarSnow(ctx, lp, t, cam);
     let i = 0;
     for (; i < creatures.length && !creatures[i].soft; i++) {
       if (creatures[i].z > 0.6) drawCreature(ctx, lp, creatures[i], t);
     }
-    drawSnow(ctx, lp, t, 1);
+    drawSparks(ctx, lp, t, cam * 0.4);
+    drawSnow(ctx, lp, t, 0, cam * 0.6);
     for (let j = 0; j < i; j++) if (creatures[j].z <= 0.6) drawCreature(ctx, lp, creatures[j], t);
     drawPlankton(ctx, lp, t);
     for (let j = i; j < creatures.length; j++) drawCreature(ctx, lp, creatures[j], t);
-    drawSnow(ctx, lp, t, 2);
+    drawFlecks(ctx, lp, t, cam);
     ctx.globalCompositeOperation = 'source-over';
   }
 });
+
+function kW(lp) { return lp.w / 1512; }    // speeds are given for a 1512-px-wide screen
+
+// In the (expanded) clock box? Particles there are drawn much dimmer.
+function inClock(x, y) {
+  const cb = clockBox;
+  return x > cb.x0 && x < cb.x1 && y > cb.y0 && y < cb.y1;
+}
+
+// ------------------------------------------------------------------------------ far snow
+// Dense, tiny, dim specks painted once into a tall seamless texture (at ≤ 1x density: far is soft)
+// and scrolled downwards; two textures at different speeds and wander phases give depth.
+
+function buildFarSnow(lp, seed, density, size, alpha) {
+  const pad = Math.ceil(lp.w * 0.03 + 4);
+  const L = U.layer(lp.w + pad * 2, lp.h, Math.min(lp.dpr, 1));
+  L.pad = pad;
+  const g = L.ctx, rnd = U.mulberry32(seed);
+  const n = Math.round(L.w * lp.h * density);
+  const sk = Math.max(0.8, Math.sqrt(lp.min / 900));
+  const paths = [new Path2D(), new Path2D(), new Path2D()];
+  for (let i = 0; i < n; i++) {
+    const x = rnd() * L.w, y = rnd() * lp.h, s = U.lerp(size[0], size[1], rnd()) * sk;
+    const p = paths[Math.min(2, (rnd() * 3) | 0)];
+    for (const dy of [0, -lp.h, lp.h]) {
+      const yy = y + dy;
+      if (yy < -4 || yy > lp.h + 4) continue;
+      p.moveTo(x + s, yy); p.arc(x, yy, s, 0, TAU);
+    }
+  }
+  const cols = ['rgba(150,180,210,', 'rgba(170,200,222,', 'rgba(130,165,205,'];
+  for (let j = 0; j < 3; j++) {
+    g.fillStyle = cols[j] + (alpha * (0.6 + 0.2 * j)) + ')';
+    g.fill(paths[j]);
+  }
+  return L;
+}
+
+function drawFarSnow(ctx, lp, t, cam) {
+  const k = kW(lp);
+  const specs = [[1.7, 0.3, 61, 0.0], [2.8, 0.45, 43, 2.1]];   // fall px/s, parallax, sway period, phase
+  for (let i = 0; i < farSnow.length; i++) {
+    const L = farSnow[i], sp = specs[i];
+    const x = -L.pad + cam * sp[1] + L.pad * 0.6 * Math.sin(t * TAU / sp[2] + sp[3]);
+    const y = (t * sp[0] * k) % lp.h;
+    ctx.drawImage(L.canvas, x, y - lp.h, L.w, lp.h);
+    ctx.drawImage(L.canvas, x, y, L.w, lp.h);
+  }
+}
+
+// ------------------------------------------------------------------------------ caustics
+// Soft, slowly shifting web of light just under the surface: two low-res ridge-noise textures,
+// faded downwards and kept faint around the clock, sliding against each other.
+
+// A fine net of light (the bright edges between warped Voronoi cells, foreshortened: wider than
+// tall, and finer towards the surface), painted once per layer at about half resolution. It fades
+// out within the top ~16 % of the screen and is held much darker behind the clock. Two such nets
+// slide and breathe against each other, so their crossings ripple like light through a moving surface.
+function buildCaustics(lp, seed) {
+  const A = lp.w * 0.03;
+  const fw = lp.w + 2 * A, bandH = lp.h * 0.2;
+  const res = Math.min(0.6, 1100 / fw);                          // texture px per CSS px
+  const CW = Math.max(64, Math.round(fw * res)), CH = Math.max(16, Math.round(bandH * res));
+  const c = document.createElement('canvas');
+  c.width = CW; c.height = CH;
+  const g = c.getContext('2d'), img = g.createImageData(CW, CH), D = img.data;
+  const cell = lp.min * (0.034 + 0.006 * (seed % 2));           // cell width, CSS px
+  const cx0 = lp.clockRect ? lp.clockRect.x + lp.clockRect.w * 0.5 + A : fw * 0.5;
+  const cwid = lp.clockRect ? lp.clockRect.w * 0.55 + lp.min * 0.07 : fw * 0.17;
+  const so = seed * 7.31;
+  for (let y = 0; y < CH; y++) {
+    const v = y / (CH - 1);
+    const m = Math.pow(1 - v, 2.2) * U.smoothstep(0, 0.1, v);
+    const Y = v * bandH;
+    // Foreshortening: rows of cells are flatter and finer near the surface.
+    const gy0 = Y / (cell * 0.5) * (0.75 + 0.25 * v);
+    const cellK = 1.25 - 0.3 * v;
+    for (let x = 0; x < CW; x++) {
+      const X = x / (CW - 1) * fw;
+      const d = (X - cx0) / cwid;
+      const cm = 1 - 0.85 * Math.exp(-d * d);
+      let gx = X / cell * cellK, gy = gy0;
+      gx += 0.6 * (U.noise2(gx * 0.23 + so, gy * 0.23) - 0.5);
+      gy += 0.6 * (U.noise2(gx * 0.23, gy * 0.23 + so) - 0.5);
+      const wq = U.noise2(gx * 1.1 + so, gy * 1.1 - so);         // finer warp: curved, rippled edges
+      gx += 0.22 * (wq - 0.5); gy += 0.22 * (U.noise2(gx * 1.1 - so, gy * 1.1 + 3.1) - 0.5);
+      const vary = 0.45 + 0.75 * U.noise2(gx * 0.35 + 9, gy * 0.35 + so);
+      const ix = Math.floor(gx), iy = Math.floor(gy);
+      let d1 = 9, d2 = 9;
+      for (let j = -1; j <= 1; j++) {
+        for (let i = -1; i <= 1; i++) {
+          const cxk = ix + i, cyk = iy + j;
+          const fx = cxk + 0.15 + 0.7 * U.hash2(cxk + seed * 131, cyk), fy = cyk + 0.15 + 0.7 * U.hash2(cxk, cyk + seed * 71);
+          const ex = fx - gx, ey = fy - gy, dd = ex * ex + ey * ey;
+          if (dd < d1) { d2 = d1; d1 = dd; } else if (dd < d2) d2 = dd;
+        }
+      }
+      const e = (Math.sqrt(d2) - Math.sqrt(d1)) / 0.075;
+      const line = Math.exp(-e * e);
+      const a = (0.8 * line * vary + 0.05) * m * cm;
+      const o = (y * CW + x) * 4;
+      D[o] = 165; D[o + 1] = 205; D[o + 2] = 240;
+      D[o + 3] = Math.round(U.clamp(a, 0, 1) * 255);
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return { canvas: c, A, fw, bandH };
+}
+
+function drawCaustics(ctx, lp, t) {
+  const specs = [[43, 0, 0.2, 23, 29], [59, 2.4, 0.17, 31, 37]];   // slide period, phase, alpha, breathe, stretch
+  for (let i = 0; i < 2; i++) {
+    const C = caustics[i], s = specs[i];
+    const x = -C.A + C.A * Math.sin(t * TAU / s[0] + s[1]);
+    const st = 1 + 0.05 * Math.sin(t * TAU / s[4] + i * 1.7);
+    const y = -lp.h * 0.006 + lp.h * 0.004 * Math.sin(t * TAU / 37 + i * 2);
+    ctx.globalAlpha = s[2] * (0.75 + 0.25 * Math.sin(t * TAU / s[3] + i));
+    ctx.drawImage(C.canvas, x, y, C.fw, C.bandH * st);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ------------------------------------------------------------------------------ haze veils
+// A large, very soft band of plankton-glow veils through the mid and lower water, two screens
+// wide and seamless, drifting slowly sideways and bobbing up and down.
+
+function buildVeil(lp, seed, cols) {
+  const VW = lp.w * 2, VH = lp.h * 0.75;
+  const L = U.layer(VW, VH, 0.3);
+  const rnd = U.mulberry32(seed);
+  for (let i = 0; i < 22; i++) {
+    const x = (i + rnd() * 0.6) / 22 * VW, y = VH * (0.2 + 0.6 * rnd());
+    const r = lp.h * (0.13 + 0.12 * rnd()), a = 0.07 + 0.08 * rnd();
+    for (const dx of [-VW, 0, VW]) U.glow(L.ctx, x + dx, y, r, cols[i & 1], a);
+  }
+  return L;
+}
+
+function drawVeils(ctx, lp, t) {
+  const k = kW(lp);
+  const specs = [[0.28, -4.5, 0.85]];
+  for (let i = 0; i < veils.length; i++) {
+    const L = veils[i], s = specs[i];
+    let x = (t * s[1] * k) % L.w;
+    if (x > 0) x -= L.w;
+    const y = lp.h * s[0] + lp.h * 0.03 * Math.sin(t * TAU / (67 + i * 22) + i);
+    ctx.globalAlpha = s[2];
+    ctx.drawImage(L.canvas, x, y, L.w, L.h);
+    ctx.drawImage(L.canvas, x + L.w, y, L.w, L.h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+// ------------------------------------------------------------------------------ sparks
+// Tiny distant bioluminescent specks at the edges and bottom right: each slowly brightens and
+// fades over a few seconds, then reappears elsewhere in its zone (scheduled per cycle from lp.t).
+
+function buildSparks(lp) {
+  const rnd = U.mulberry32(909);
+  const zones = [
+    [0.015, 0.17, 0.22, 0.96], [0.83, 0.985, 0.12, 0.96], [0.58, 0.96, 0.68, 0.97],
+    [0.17, 0.42, 0.6, 0.96], [0.62, 0.84, 0.08, 0.3],
+  ];
+  const per = [5, 5, 4, 2, 2];
+  const list = [];
+  zones.forEach((z, zi) => {
+    for (let j = 0; j < per[zi]; j++) {
+      list.push({
+        z, id: list.length + 1,
+        per: 6 + rnd() * 5, dur: 3 + rnd() * 1.6, off: rnd() * 20,
+        core: mixHex(PALETTE[(zi * 2 + j) % PALETTE.length], '#ffffff', 0.4),
+        r: lp.min * (0.010 + 0.006 * rnd()),
+        vx: (rnd() - 0.5) * 4, vy: -1 - rnd() * 2,
+      });
+    }
+  });
+  return list;
+}
+
+function drawSparks(ctx, lp, t, cam) {
+  const k = kW(lp);
+  const n = Math.ceil(sparks.length * lp.quality);
+  for (let i = 0; i < n; i++) {
+    const s = sparks[i];
+    const tt = t + s.off, c = Math.floor(tt / s.per), f = tt - c * s.per;
+    if (f > s.dur) continue;
+    const e0 = Math.sin(Math.PI * f / s.dur), e = e0 * e0;
+    const z = s.z;
+    const x = lp.w * U.lerp(z[0], z[1], U.hash2(c, s.id * 3 + 1)) + f * s.vx * k + cam;
+    const y = lp.h * U.lerp(z[2], z[3], U.hash2(c, s.id * 3 + 2)) + f * s.vy * k;
+    const dim = inClock(x, y) ? 0.25 : 1;
+    U.glow(ctx, x, y, s.r * 2, s.core, 0.6 * e * dim);
+  }
+}
+
+// ------------------------------------------------------------------------------ near flecks
+// A few soft, out-of-focus flecks drifting past close to the viewer.
+
+function buildFlecks(lp) {
+  const rnd = U.mulberry32(4242);
+  const area = U.clamp((lp.w * lp.h) / (1512 * 982), 0.35, 2.6);
+  const n = Math.round(24 * area);
+  const sk = Math.max(0.7, lp.min / 982);
+  const k = kW(lp);
+  const list = [];
+  for (let i = 0; i < n; i++) {
+    list.push({
+      x0: rnd(), y0: rnd(),
+      v: (9 + rnd() * 6) * Math.max(0.5, k), dr: (rnd() - 0.3) * 3 * k,
+      sa: (10 + rnd() * 18) * sk, sw: TAU / (11 + rnd() * 9), sp: rnd() * TAU,
+      sa2: (4 + rnd() * 6) * sk, sw2: TAU / (5 + rnd() * 4), sp2: rnd() * TAU,
+      r: (5 + rnd() * 7) * sk, a: 0.12 + rnd() * 0.12,
+      bw: TAU / (7 + rnd() * 6), bp: rnd() * TAU,
+      col: rnd() < 0.7 ? '#cfe6f2' : '#9fe8ff',
+    });
+  }
+  return list;
+}
+
+function drawFlecks(ctx, lp, t, cam) {
+  const n = Math.floor(flecks.length * lp.quality);
+  const H = lp.h + 60, W = lp.w + 60;
+  for (let i = 0; i < n; i++) {
+    const f = flecks[i];
+    const y = (f.y0 * H + t * f.v) % H - 30;
+    let x = (f.x0 * W + t * f.dr + cam) % W;
+    if (x < 0) x += W;
+    x += f.sa * Math.sin(t * f.sw + f.sp) + f.sa2 * Math.sin(t * f.sw2 + f.sp2) - 30;
+    const a = f.a * (0.65 + 0.35 * Math.sin(t * f.bw + f.bp)) * (inClock(x, y) ? 0.25 : 1);
+    U.glow(ctx, x, y, f.r, f.col, a);
+  }
+}
 
 // ------------------------------------------------------------------------------ background
 
@@ -83,8 +328,8 @@ function buildWater(lp) {
   for (const fx of [0.12, 0.88]) {
     const rr = Math.max(lp.w * 0.28, lp.min * 0.7);
     const rg = g.createRadialGradient(lp.w * fx, -lp.h * 0.05, 0, lp.w * fx, -lp.h * 0.05, rr);
-    rg.addColorStop(0, 'rgba(40,110,130,0.16)');
-    rg.addColorStop(0.5, 'rgba(30,80,110,0.06)');
+    rg.addColorStop(0, 'rgba(36,92,138,0.15)');
+    rg.addColorStop(0.5, 'rgba(28,66,112,0.055)');
     rg.addColorStop(1, 'rgba(20,50,90,0)');
     g.fillStyle = rg;
     g.fillRect(0, 0, lp.w, lp.h);
@@ -168,10 +413,13 @@ function buildShafts(lp) {
         width: lp.min * (0.10 + 0.08 * rnd()),
         len: lp.h * (0.36 + 0.12 * rnd()),
         alpha: 0.09 + 0.05 * rnd(),
-        sw: TAU / (40 + rnd() * 40),
+        sw: TAU / (20 + rnd() * 20),
         ph: rnd() * TAU,
-        bw: TAU / (25 + rnd() * 30),
+        bw: TAU / (17 + rnd() * 20),
         bph: rnd() * TAU,
+        dw: TAU / (45 + rnd() * 40),
+        dph: rnd() * TAU,
+        dA: lp.w * (0.012 + 0.012 * rnd()),
       });
     }
   }
@@ -181,10 +429,10 @@ function buildShafts(lp) {
 function drawShafts(ctx, lp, t) {
   for (let i = 0; i < shafts.length; i++) {
     const s = shafts[i];
-    const a = s.angle + 0.035 * Math.sin(t * s.sw + s.ph);
-    const alpha = s.alpha * (0.7 + 0.3 * Math.sin(t * s.bw + s.bph));
+    const a = s.angle + 0.055 * Math.sin(t * s.sw + s.ph);
+    const alpha = s.alpha * 1.15 * (0.72 + 0.28 * Math.sin(t * s.bw + s.bph));
     ctx.save();
-    ctx.translate(s.x, -lp.h * 0.03);
+    ctx.translate(s.x + s.dA * Math.sin(t * s.dw + s.dph), -lp.h * 0.03);
     ctx.rotate(a);
     ctx.globalAlpha = alpha;
     ctx.drawImage(shaftSprite, -s.width * 0.5, 0, s.width, s.len);
@@ -195,58 +443,61 @@ function drawShafts(ctx, lp, t) {
 
 // ------------------------------------------------------------------------------ marine snow
 
+// Middle layer: per-particle drift (sink + two-sine sideways wander on a gentle current), batched
+// into a few Path2D fills by brightness band; the far layer is a scrolled texture (above), the
+// near layer soft glow flecks.
 function buildSnow(lp) {
   const area = U.clamp((lp.w * lp.h) / (1512 * 982), 0.35, 2.6);
-  const k = lp.min / 1000;
+  const k = Math.max(0.5, kW(lp));
+  const sk = Math.max(0.8, Math.sqrt(lp.min / 982));
   const defs = [
-    { n: 240, size: [0.5, 0.9], speed: [2.5, 4.5], sway: [2, 5], drift: 0.6, alpha: 0.30, color: [150, 175, 205] },
-    { n: 120, size: [0.9, 1.4], speed: [6, 10], sway: [4, 9], drift: 1.2, alpha: 0.42, color: [175, 200, 220] },
-    { n: 45, size: [1.4, 2.3], speed: [12, 18], sway: [7, 14], drift: 2.4, alpha: 0.5, color: [205, 228, 238] },
+    { n: 150, size: [1.5, 2.4], speed: [3.5, 7.5], sway: [4, 10], drift: 1.4, alpha: 0.55, color: [180, 205, 225] },
   ];
   const rnd = U.mulberry32(123);
   return defs.map((d) => {
     const n = Math.round(d.n * area);
-    const P = new Float32Array(n * 7);
+    const P = new Float32Array(n * 10);
     for (let i = 0; i < n; i++) {
-      const o = i * 7;
+      const o = i * 10;
       P[o] = rnd();                                         // x fraction
       P[o + 1] = rnd();                                     // y fraction
-      P[o + 2] = U.lerp(d.speed[0], d.speed[1], rnd()) * Math.max(0.5, k * 1.0); // px/s
-      P[o + 3] = U.lerp(d.sway[0], d.sway[1], rnd()) * Math.max(0.5, k);
-      P[o + 4] = TAU / (8 + rnd() * 10);                    // sway freq
+      P[o + 2] = U.lerp(d.speed[0], d.speed[1], rnd()) * k; // px/s
+      P[o + 3] = U.lerp(d.sway[0], d.sway[1], rnd()) * sk;
+      P[o + 4] = TAU / (9 + rnd() * 10);                    // sway freq
       P[o + 5] = rnd() * TAU;
-      P[o + 6] = U.lerp(d.size[0], d.size[1], rnd()) * Math.max(0.7, Math.sqrt(k));
+      P[o + 6] = U.lerp(d.size[0], d.size[1], rnd()) * sk;
+      P[o + 7] = U.lerp(d.sway[0], d.sway[1], rnd()) * sk * 0.4;
+      P[o + 8] = TAU / (4 + rnd() * 3);
+      P[o + 9] = rnd() * TAU;
     }
-    return { n, P, drift: d.drift, alpha: d.alpha, color: d.color };
+    return { n, P, drift: d.drift * k, alpha: d.alpha, color: d.color };
   });
 }
 
-function drawSnow(ctx, lp, t, li) {
+function drawSnow(ctx, lp, t, li, cam) {
   const L = snow[li];
   const n = Math.floor(L.n * lp.quality);
   const H = lp.h + 8, W = lp.w + 8;
-  const p0 = new Path2D(), p1 = new Path2D(), p2 = new Path2D();
+  const p0 = new Path2D(), p1 = new Path2D(), p2 = new Path2D(), pc = new Path2D();
   const P = L.P;
   for (let i = 0; i < n; i++) {
-    const o = i * 7;
+    const o = i * 10;
     let y = (P[o + 1] * H + t * P[o + 2]) % H;
-    let x = (P[o] * W + t * L.drift) % W;
-    x += P[o + 3] * Math.sin(t * P[o + 4] + P[o + 5]);
+    let x = (P[o] * W + t * L.drift + cam) % W;
+    if (x < 0) x += W;
+    x += P[o + 3] * Math.sin(t * P[o + 4] + P[o + 5]) + P[o + 7] * Math.sin(t * P[o + 8] + P[o + 9]);
     x -= 4; y -= 4;
     if (x < -4) x += W; else if (x > lp.w + 4) x -= W;
     const yf = y / lp.h;
-    const path = yf < 0.38 ? p0 : (yf < 0.7 ? p1 : p2);
+    const path = inClock(x, y) ? pc : (yf < 0.38 ? p0 : (yf < 0.7 ? p1 : p2));
     const s = P[o + 6];
-    if (s < 1.2) path.rect(x - s * 0.5, y - s * 0.5, s, s);
-    else { path.moveTo(x + s * 0.5, y); path.arc(x, y, s * 0.5, 0, TAU); }
+    path.rect(x - s * 0.45, y - s * 0.45, s * 0.9, s * 0.9);    // a 2-px disc and square look alike
   }
-  const c = L.color;
-  ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${L.alpha})`;
-  ctx.fill(p0);
-  ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${L.alpha * 0.7})`;
-  ctx.fill(p1);
-  ctx.fillStyle = `rgba(${c[0]},${c[1]},${c[2]},${L.alpha * 0.42})`;
-  ctx.fill(p2);
+  const c = L.color, pre = `rgba(${c[0]},${c[1]},${c[2]},`;
+  ctx.fillStyle = pre + L.alpha + ')'; ctx.fill(p0);
+  ctx.fillStyle = pre + L.alpha * 0.85 + ')'; ctx.fill(p1);
+  ctx.fillStyle = pre + L.alpha * 0.7 + ')'; ctx.fill(p2);
+  ctx.fillStyle = pre + L.alpha * 0.3 + ')'; ctx.fill(pc);
 }
 
 // ------------------------------------------------------------------------------ creatures
@@ -372,6 +623,8 @@ function buildCreatures(lp) {
       rg.addColorStop(1, U.rgba(c.col, 0.46));
     }
     c.grad = rg;
+    c.spr = buildBodySprites(lp, c);
+    c.tgrad = buildTentacleGrad(lp, c);
     list.push(c);
   }
   // Far ones first; soft near ones last (they go into their own layer).
@@ -505,7 +758,9 @@ function drawCreature(ctx, lp, c, t) {
 
   // ---- tentacles / fringe
   const segs = Math.max(4, Math.round(c.segs * (lp.quality < 1 ? 0.7 : 1)));
-  const pa = new Path2D(), pb = new Path2D(), pc = new Path2D();
+  // All tentacles of a creature go into one path in the creature's own (rotated) frame, so a
+  // gradient cached at resize() can fade them from rim to tip in a single stroke.
+  const tp = new Path2D();
   const nf = c.nf;
   const W0 = T.rimW;
   for (let f = 0; f < nf; f++) {
@@ -519,7 +774,6 @@ function drawCreature(ctx, lp, c, t) {
       if (c.type === 'disc') ay0 = -T.H * 0.5 * 0.5 * (1 - u * u) * 0.9;
       len = c.flen * (0.75 + 0.25 * Math.cos(u * 2.1 + c.seed + f * (c.type === 'disc' ? 2.3 : 0)));
     }
-    let prevX = 0, prevY = 0, prevBand = -1;
     for (let k = 0; k <= segs; k++) {
       const s = k / segs;
       const fi = s * NS, i0 = Math.min(NS - 1, fi | 0), fr = fi - i0;
@@ -540,37 +794,28 @@ function drawCreature(ctx, lp, c, t) {
           + pcurl * Math.sin(s * 5.2 + ph) * 0.45 * s * s;
         ly = ay0 + s * len * (1 - 0.14 * pd);
       }
-      lx *= r; ly *= r;
-      const wx = px + ca * lx - sa * ly;
-      const wy = py + sa * lx + ca * ly;
-      if (k > 0) {
-        const band = s <= 0.34 ? 0 : (s <= 0.68 ? 1 : 2);
-        const path = band === 0 ? pa : (band === 1 ? pb : pc);
-        if (band !== prevBand) { path.moveTo(prevX, prevY); prevBand = band; }
-        path.lineTo(wx, wy);
-      }
-      prevX = wx; prevY = wy;
+      // Local frame: lagged path offset rotated back by -ang, plus the tentacle's own shape.
+      const dx = px - x, dy = py - y;
+      const qx = ca * dx + sa * dy + lx * r, qy = -sa * dx + ca * dy + ly * r;
+      if (k === 0) tp.moveTo(qx, qy); else tp.lineTo(qx, qy);
     }
   }
-  ctx.strokeStyle = c.fil;
+  const dpr = lp.dpr;
+  ctx.setTransform(dpr * ca, dpr * sa, -dpr * sa, dpr * ca, dpr * x, dpr * y);
+  ctx.strokeStyle = c.tgrad;
   ctx.lineCap = 'butt';
   const fine = c.type === 'disc' ? 0.012 : 0.022;
-  ctx.lineWidth = Math.max(0.45, r * fine);
+  const lw = Math.max(0.45, r * fine);
   const ta = c.type === 'disc' ? 0.8 : (isComb ? 0.45 : 1);
   if (c.soft) {
-    // Near and out of focus: a wide faint stroke under a softened thin one.
-    const lw = ctx.lineWidth;
-    ctx.lineWidth = lw * 2.6;
-    ctx.globalAlpha = 0.06 * A * bright * ta; ctx.stroke(pa); ctx.stroke(pb);
-    ctx.lineWidth = lw * 1.2;
-    ctx.globalAlpha = 0.28 * A * bright * ta; ctx.stroke(pa);
-    ctx.globalAlpha = 0.16 * A * bright * ta; ctx.stroke(pb);
-    ctx.globalAlpha = 0.08 * A * bright * ta; ctx.stroke(pc);
+    // Near and out of focus: one wider, softer stroke.
+    ctx.lineWidth = lw * 1.7;
+    ctx.globalAlpha = 0.3 * A * bright * ta; ctx.stroke(tp);
   } else {
-    ctx.globalAlpha = 0.44 * A * bright * ta; ctx.stroke(pa);
-    ctx.globalAlpha = 0.25 * A * bright * ta; ctx.stroke(pb);
-    ctx.globalAlpha = 0.11 * A * bright * ta; ctx.stroke(pc);
+    ctx.lineWidth = lw;
+    ctx.globalAlpha = 0.44 * A * bright * ta; ctx.stroke(tp);
   }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   // ---- oral arms (bell, disc) / ribbon arms
   if (T.arms && !far) {
@@ -590,43 +835,84 @@ function drawCreature(ctx, lp, c, t) {
     ctx.lineWidth = Math.max(0.8, r * 0.07);
     ctx.globalAlpha = 0.17 * A * bright; ctx.stroke(arms);
   }
-  if (c.type === 'ribbon') drawRibbonArms(ctx, c, t, ca, sa, A * bright, far ? 18 : 34);
+  if (c.type === 'ribbon') drawRibbonArms(ctx, c, t, ca, sa, A * bright, Math.round((far ? 12 : 26) * lp.quality));
 
-  // ---- body
-  ctx.save();
-  ctx.translate(x, y);
-  ctx.rotate(ang);
-  ctx.scale(r, r);
-  const body = bodyPath(c, p);
-  ctx.fillStyle = c.grad;
-  ctx.globalAlpha = A * (0.82 + 0.18 * p);
-  ctx.fill(body);
-  ctx.strokeStyle = c.rimCol;
-  if (!far) {
-    ctx.lineWidth = c.soft ? 0.12 : 0.14;                // soft wide rim glow
-    ctx.globalAlpha = 0.10 * A * bright;
-    ctx.stroke(body);
-    if (c.soft) { ctx.lineWidth = 0.05; ctx.globalAlpha = 0.16 * A * bright; ctx.stroke(body); }
-  }
-  ctx.lineWidth = c.soft ? 0.02 : Math.max(0.6 / r, 0.03);
-  ctx.globalAlpha = (c.soft ? 0.3 : 0.55) * A * bright;
-  ctx.stroke(body);
-  if (!far && !isComb) {
-    ctx.strokeStyle = c.fil;
-    ctx.lineWidth = c.soft ? 0.05 : Math.max(0.5 / r, 0.022);
-    ctx.globalAlpha = (c.soft ? 0.1 : 0.18) * A;
-    ctx.stroke(innerPath(c, p));
-  }
-  ctx.restore();
+  // ---- body, rim strokes, core and rim glows: pre-rendered pulse frames, cross-faded. Everything
+  // is additive ('lighter'), so the cross-fade equals the exact blend of the two neighbouring frames.
+  const S = c.spr, fi = p * (S.K - 1), i0 = Math.min(S.K - 2, fi | 0), fr = fi - i0;
+  ctx.setTransform(dpr * ca, dpr * sa, -dpr * sa, dpr * ca, dpr * x, dpr * y);
+  if (fr < 0.995) { ctx.globalAlpha = A * (1 - fr); ctx.drawImage(S.frames[i0], -S.ox, -S.oy, S.w, S.h); }
+  if (fr > 0.005) { ctx.globalAlpha = A * fr; ctx.drawImage(S.frames[i0 + 1], -S.ox, -S.oy, S.w, S.h); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
   if (isComb) drawCombRows(ctx, c, t, x, y, ca, sa, A, p, far);
-
-  // ---- core glow + rim glow + nucleus
-  const cxp = x - sa * coreLy * r, cyp = y + ca * coreLy * r;
-  U.glow(ctx, cxp, cyp, r * (isComb ? 1.4 : 1.2), c.col, 0.5 * A * bright);
-  U.glow(ctx, cxp, cyp, r * 0.42, c.core, 0.5 * A * bright);
-  if (!far && !isComb) U.glow(ctx, x, y, r * W0 * 1.5, c.col, 0.16 * A * bright);
   ctx.globalAlpha = 1;
+}
+
+// Pulse frames of a creature's body (fill, rim strokes, inner line, core/nucleus/rim glows) in its
+// own frame, origin at the rim centre, with the pulse-dependent brightness baked in. The soft near
+// ones are rendered at half resolution (a free blur, and a quarter of the memory).
+function buildBodySprites(lp, c) {
+  const T = c.T, r = c.r, isComb = c.type === 'comb', far = c.role === 'far';
+  const K = isComb ? 2 : 6;
+  const Hmax = T.H * (1 + T.kH);
+  const coreR = isComb ? 1.4 : 1.2, rimG = (!far && !isComb) ? T.rimW * 1.5 : 0;
+  const xr = Math.max(T.rimW * 1.4 + 0.12, coreR, rimG) + 0.05;
+  const yt = isComb ? -Math.max(T.H + 0.12, coreR) - 0.05 : -Math.max(Hmax + 0.14, Hmax * 0.52 + coreR, rimG) - 0.05;
+  const yb = isComb ? Math.max(T.H + 0.12, coreR) + 0.05 : Math.max(0.25, rimG) + 0.05;
+  const w = 2 * xr * r, h = (yb - yt) * r;
+  const sdpr = Math.min(lp.dpr, 2) * (c.soft ? 0.5 : 1);
+  const frames = [];
+  for (let i = 0; i < K; i++) {
+    const p = i / (K - 1), bright = 0.62 + 0.38 * p;
+    const L = U.layer(w, h, sdpr), g = L.ctx;
+    g.globalCompositeOperation = 'lighter';
+    g.translate(xr * r, -yt * r);
+    // Glows (CSS px around the origin).
+    const H = T.H * (1 + T.kH * p), coreLy = isComb ? 0 : -H * 0.52;
+    U.glow(g, 0, coreLy * r, r * coreR, c.col, 0.5 * bright);
+    U.glow(g, 0, coreLy * r, r * 0.42, c.core, 0.5 * bright);
+    if (rimG) U.glow(g, 0, 0, r * rimG, c.col, 0.16 * bright);
+    g.globalCompositeOperation = 'lighter';
+    // Body in unit space.
+    g.scale(r, r);
+    const body = bodyPath(c, p);
+    g.fillStyle = c.grad;
+    g.globalAlpha = 0.82 + 0.18 * p;
+    g.fill(body);
+    g.strokeStyle = c.rimCol;
+    if (!far) {
+      g.lineWidth = c.soft ? 0.12 : 0.14;
+      g.globalAlpha = 0.10 * bright;
+      g.stroke(body);
+      if (c.soft) { g.lineWidth = 0.05; g.globalAlpha = 0.16 * bright; g.stroke(body); }
+    }
+    g.lineWidth = c.soft ? 0.02 : Math.max(0.6 / r, 0.03);
+    g.globalAlpha = (c.soft ? 0.3 : 0.55) * bright;
+    g.stroke(body);
+    if (!far && !isComb) {
+      g.strokeStyle = c.fil;
+      g.lineWidth = c.soft ? 0.05 : Math.max(0.5 / r, 0.022);
+      g.globalAlpha = c.soft ? 0.1 : 0.18;
+      g.stroke(innerPath(c, p));
+    }
+    frames.push(L.canvas);
+  }
+  return { frames, K, ox: xr * r, oy: -yt * r, w, h };
+}
+
+// Rim-to-tip fade of a creature's tentacles, in its own frame (relative to the 0.44/0.25/0.11 bands
+// of thinner strokes it replaces: one stroke instead of three).
+function buildTentacleGrad(lp, c) {
+  const T = c.T, r = c.r;
+  const y0 = (c.type === 'comb' ? T.H * 0.85 : 0) * r, y1 = y0 + c.flen * r * 1.05;
+  const g = lp.ctx.createLinearGradient(0, y0, 0, y1);
+  const fil = mixHex(c.col, '#ffffff', 0.18);
+  g.addColorStop(0, U.rgba(fil, 1));
+  g.addColorStop(0.3, U.rgba(fil, 0.85));
+  g.addColorStop(0.62, U.rgba(fil, 0.45));
+  g.addColorStop(1, U.rgba(fil, 0.14));
+  return g;
 }
 
 // Two long, frilly ribbon arms: a soft spine plus two ruffled edges.
@@ -693,15 +979,14 @@ function drawCombRows(ctx, c, t, x, y, ca, sa, A, p, far) {
 
 // ------------------------------------------------------------------------------ plankton waves
 
-// One wave per 30 s slot, starting 22–27 s into the slot, so a front is on screen around each
-// multiple of 30 s.
-const SLOT = 30, TRAVEL = 5.5, FADE = 6.5;
+// One wave per 20 s slot, starting 12–17 s into the slot.
+const SLOT = 20, TRAVEL = 5.5, FADE = 6.5;
 
 function drawPlankton(ctx, lp, t) {
   const K = Math.floor(t / SLOT);
   for (let k = K - 1; k <= K; k++) {
     if (k < 0) continue;
-    const start = k * SLOT + 22 + U.hash2(k, 1) * 5;
+    const start = k * SLOT + 12 + U.hash2(k, 1) * 5;
     const age = t - start;
     if (age <= 0 || age > TRAVEL + FADE + 3) continue;
     drawWave(ctx, lp, k, age);
@@ -738,8 +1023,7 @@ function drawWave(ctx, lp, k, age) {
     const y = my + sx * lx + cx * ly - drift * 0.3;
     const s = (0.6 + 0.9 * U.hash2(i, k + 5)) * sz;
     const path = b > 0.4 ? p0 : (b > 0.2 ? p1 : p2);
-    path.moveTo(x + s, y);
-    path.arc(x, y, s, 0, TAU);
+    path.rect(x - s * 0.9, y - s * 0.9, s * 1.8, s * 1.8);
     if (b > 0.35 && (i & 7) === 0) { gx += x; gy += y; gn++; }
   }
   ctx.fillStyle = 'rgba(120,255,225,0.85)'; ctx.fill(p0);

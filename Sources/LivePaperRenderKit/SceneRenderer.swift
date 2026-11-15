@@ -48,6 +48,7 @@ final class SceneRenderer {
             case .bench: return try await bench(request, deadline: deadline)
             case .live: return try await live(request, deadline: deadline)
             case .thumbnail: return try await thumbnail(request, deadline: deadline)
+            case .motion: return try await motion(request, deadline: deadline)
             case .ping, .shutdown: return RenderResponse(ok: true, ready: true)
             }
         } catch let failure as PageFailure {
@@ -61,6 +62,7 @@ final class SceneRenderer {
         switch r.op {
         case .live: return (r.seconds ?? 12) + (r.warmup ?? 3) + 30
         case .bench: return 90
+        case .motion: return 150
         default: return 60
         }
     }
@@ -157,6 +159,73 @@ final class SceneRenderer {
         }
     }
 
+    /// Renders the scene at each sampled moment t and 1, 3, 7, 15 frames and every gap later (one page
+    /// per moment, in manual mode: the same 1/30 s replay of update() as stills), and compares the
+    /// frames tile by tile (MotionAnalysis). With `out`, also writes the heat map PNG.
+    private func motion(_ r: RenderRequest, deadline: Date) async throws -> RenderResponse {
+        let (size, dpr) = try Self.geometry(r)
+        if r.out != nil { try validateOutput(r) }
+        let html = try Self.readHTML(r)
+        let times = r.times ?? MotionAnalysis.defaultTimes, gaps = r.gaps ?? MotionAnalysis.defaultGaps
+        guard (1...8).contains(times.count), times.allSatisfy({ $0.isFinite && (0...3600).contains($0) }) else {
+            throw RenderFailure("motion needs 1–8 \"times\" between 0 and 3600 s")
+        }
+        guard (1...6).contains(gaps.count), gaps.allSatisfy({ $0.isFinite && (0.03...30).contains($0) }) else {
+            throw RenderFailure("motion needs 1–6 \"gaps\" between 0.03 and 30 s")
+        }
+        let pw = Int((Double(size.width) * dpr).rounded()), ph = Int((Double(size.height) * dpr).rounded())
+        let fallback = MotionAnalysis.grid(width: pw, height: ph)
+        let grid = r.grid ?? [fallback.cols, fallback.rows]
+        guard grid.count == 2, (1...64).contains(grid[0]), (1...64).contains(grid[1]), grid[0] <= pw, grid[1] <= ph else {
+            throw RenderFailure("motion \"grid\" must be [cols, rows], each 1–64 and at most the frame's pixels")
+        }
+        let (cols, rows) = (grid[0], grid[1])
+        let offsets = MotionAnalysis.offsets(gaps: gaps)
+        let clock = r.clock ?? true
+        var samples: [MotionSample] = [], errors: [String] = []
+        var first: Bitmap?
+        for t in times {
+            // Manual mode steps to t exactly like a still; advance(1/30) then replays the same steps.
+            // A fixed clock time keeps scenes that draw their own clock from "moving" when a minute turns.
+            let config: [String: Any] = ["manual": true, "t": t, "clock": clock, "debug": false, "dprMax": max(2, dpr), "seed": 1,
+                                         "clockTime": Self.fixedClockTime]
+            let (sample, base, seen) = try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, _ in
+                if clock { _ = try await page.evaluate("LivePaper.debug.overlay(false)", deadline: deadline) }
+                var frames: [Int: [UInt8]] = [:], base: Bitmap?, at = 0
+                for offset in offsets {
+                    if offset > at {
+                        _ = try await page.evaluate("(function (n) { for (var i = 0; i < n; i++) LivePaper.host.advance(1 / 30); return n; })(\(offset - at))",
+                                                    deadline: deadline)
+                        at = offset
+                    }
+                    try await page.nextFrames(deadline: deadline)
+                    let frame = try await page.snapshot(deadline: deadline)
+                    if offset == 0 { base = frame }
+                    frames[offset] = frame.pixels
+                }
+                let sample = MotionAnalysis.sample(t: t, gaps: gaps, frames: frames, width: pw, height: ph, cols: cols, rows: rows)
+                return (sample, base, page.errors)
+            }
+            samples.append(sample)
+            if first == nil { first = base }
+            for e in seen where !errors.contains(e) { errors.append(e) }
+        }
+        let measurement = MotionMeasurement(width: pw, height: ph, cols: cols, rows: rows, samples: samples)
+        var resp = RenderResponse(ok: true, ready: true, errors: errors, motion: measurement)
+        resp.note = "\(times.count) moments × \(offsets.count) frames at \(Int(size.width))x\(Int(size.height))@\(Self.format(dpr))"
+        if let out = r.out, let first {
+            let budgets = MotionBudgets()
+            let flickers = (0..<(cols * rows)).map { i in samples.contains { $0.flicker.level.indices.contains(i) && $0.flicker.level[i] >= budgets.flickerLevel } }
+            try first.motionHeatmap(alive: MotionAnalysis.aliveShare(measurement, budgets: budgets), flicker: flickers, cols: cols, rows: rows)
+                .write(for: r, as: .png, policy: outputs)
+            resp.out = out
+        }
+        return resp
+    }
+
+    /// The clock time motion pages show (any fixed moment works).
+    static let fixedClockTime = "2026-01-01T09:41:00"
+
     private func thumbnail(_ r: RenderRequest, deadline: Date) async throws -> RenderResponse {
         guard let scenePath = r.scene, let out = r.out else { throw RenderFailure("thumbnail needs \"scene\" and \"out\"") }
         let package = URL(fileURLWithPath: scenePath)
@@ -198,8 +267,8 @@ final class SceneRenderer {
     }
 
     /// Loads a page, waits for the runtime's 'ready', runs `body`, and always tears the page down.
-    private func withPage(html: String, size: CGSize, dpr: Double, config: [String: Any], deadline: Date,
-                          _ body: (RenderPage, [String: Any]) async throws -> RenderResponse) async throws -> RenderResponse {
+    private func withPage<T>(html: String, size: CGSize, dpr: Double, config: [String: Any], deadline: Date,
+                             _ body: (RenderPage, [String: Any]) async throws -> T) async throws -> T {
         let page = try RenderPage(html: html, size: size, dpr: dpr, config: config, window: window)
         defer {
             page.close()

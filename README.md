@@ -105,7 +105,7 @@ is limited to editing the scene and running those commands (details in
 
 | Command | What it does |
 |---|---|
-| `check <dir.lpscene> [--quick] [--power] [--json]` | compile and validate a scene: stills at several sizes and times, JavaScript errors, frame time, brightness (and energy with `--power`); exit 0 only if it passes |
+| `check <dir.lpscene> [--quick] [--power] [--json]` | compile and validate a scene: stills at several sizes and times, JavaScript errors, frame time, brightness, motion (alive everywhere, not busy, no flicker) (and energy with `--power`); exit 0 only if it passes |
 | `still`, `bench`, `live`, `compile` | one frame to a PNG · frame time at one moment · fps/CPU/energy while running live · the self-contained HTML |
 | `new <name> [--from <id>]` | scaffold a web scene in the library, or clone one |
 | `list [--json]` | the library (yours first, then built-in), with frame times and playlist membership |
@@ -130,7 +130,8 @@ livepaper publish
 ## Performance and battery
 
 * Every scene must pass `livepaper check`: at most 4 ms per frame at 1512×982@2x (6 ms on a
-  5120×1440 ultra-wide), no JavaScript errors, not too bright overall, and calm behind the clock.
+  5120×1440 ultra-wide), no JavaScript errors, not too bright overall, calm behind the clock, and
+  gently alive across the whole frame without being busy or flickering.
   `--power` also measures energy in the battery profile.
 * The *Automatic* profile runs 60 fps at full resolution on power and 30 fps at 75 % on battery or
   in Low Power Mode; *Best*, *Balanced* and *Battery* fix it. Scenes step their render scale down

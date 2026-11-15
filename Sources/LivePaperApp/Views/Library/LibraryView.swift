@@ -19,6 +19,8 @@ struct LibraryScreen: View {
 
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
+    /// The card with keyboard focus: Space shows it full screen (as in Quick Look), Return opens it.
+    @FocusState private var focusedCard: String?
 
     private let columns = [GridItem(.adaptive(minimum: 220, maximum: 340), spacing: 20, alignment: .top)]
 
@@ -95,9 +97,17 @@ struct LibraryView: View {
             .accessibilityElement(children: .combine)
             .accessibilityAddTraits(.isHeader)
             LazyVGrid(columns: columns, alignment: .leading, spacing: 22) {
-                ForEach(entries) { SceneCard(entry: $0) }
+                ForEach(entries) { SceneCard(entry: $0, focus: $focusedCard, onMove: moveFocus) }
             }
         }
+    }
+
+    /// ← → move the focus between cards in the grid's order (across both sections).
+    private func moveFocus(from id: String, by delta: Int) {
+        let ids = model.visibleEntries.map(\.id)
+        guard let i = ids.firstIndex(of: id) else { return }
+        let next = i + delta
+        if ids.indices.contains(next) { focusedCard = ids[next] }
     }
 }
 
@@ -105,6 +115,9 @@ struct LibraryView: View {
 
 struct SceneCard: View {
     let entry: LibraryEntry
+    /// The grid's focused card (Space previews it full screen, Return opens it, ← → move).
+    var focus: FocusState<String?>.Binding
+    var onMove: (String, Int) -> Void = { _, _ in }
     @Environment(AppModel.self) private var model
     @State private var hovering = false
     @State private var showLive = false
@@ -113,26 +126,37 @@ struct SceneCard: View {
     /// grid doesn't spin up a web view per card.
     private static let hoverDelay: UInt64 = 450_000_000
 
+    private var isFocused: Bool { focus.wrappedValue == entry.id }
+    /// Hover and keyboard focus look the same.
+    private var highlighted: Bool { hovering || isFocused }
+
+    // Not a Button: the card holds its own full-screen button, and a click anywhere else opens it.
     var body: some View {
-        Button {
-            model.libraryPath.append(entry.id)
-        } label: {
-            VStack(alignment: .leading, spacing: 8) {
-                artwork
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(entry.manifest.name)
-                        .font(.headline)
-                        .lineLimit(1)
-                    Text(entry.manifest.description.isEmpty ? " " : entry.manifest.description)
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 2)
+        VStack(alignment: .leading, spacing: 8) {
+            artwork
+            VStack(alignment: .leading, spacing: 2) {
+                Text(entry.manifest.name)
+                    .font(.headline)
+                    .lineLimit(1)
+                Text(entry.manifest.description.isEmpty ? " " : entry.manifest.description)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            .contentShape(Rectangle())
+            .padding(.horizontal, 2)
         }
-        .buttonStyle(.plain)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: open)
+        .focusable()
+        .focused(focus, equals: entry.id)
+        .focusEffectDisabled()
+        .onKeyPress(.space) { previewFullScreen(); return .handled }
+        .onKeyPress(.return) { open(); return .handled }
+        .onKeyPress(.leftArrow) { onMove(entry.id, -1); return .handled }
+        .onKeyPress(.rightArrow) { onMove(entry.id, 1); return .handled }
+        .focusedValue(\.fullScreenPreview, FullScreenPreviewAction { [model, id = entry.id] in
+            FullScreenPreviewLauncher.previewScene(id, model: model)
+        })
         .onHover { hovering = $0 }
         .task(id: hovering) {
             guard hovering else { showLive = false; return }
@@ -143,8 +167,32 @@ struct SceneCard: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(entry.manifest.name)
         .accessibilityValue(accessibilityValue)
-        .accessibilityHint("Opens the scene. More actions are in the context menu.")
+        .accessibilityHint("Opens the scene. Space previews it full screen. More actions are in the context menu.")
         .accessibilityAddTraits(.isButton)
+        .accessibilityAction(.default, open)
+        .accessibilityAction(named: "Preview Full Screen", previewFullScreen)
+    }
+
+    private func open() { model.libraryPath.append(entry.id) }
+
+    private func previewFullScreen() { FullScreenPreviewLauncher.previewScene(entry.id, model: model) }
+
+    /// Shown while the card is hovered or focused.
+    private var fullScreenButton: some View {
+        Button(action: previewFullScreen) {
+            Image(systemName: FullScreenPreviewSymbol.name)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 28, height: 28)
+                .background(.black.opacity(0.5), in: Circle())
+                .overlay(Circle().strokeBorder(.white.opacity(0.18)))
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("Preview Full Screen (Space)")
+        .accessibilityLabel("Preview Full Screen")
+        .padding(8)
+        .transition(.opacity)
     }
 
     private var artwork: some View {
@@ -171,6 +219,9 @@ struct SceneCard: View {
                 }
                 .padding(8)
             }
+            .overlay(alignment: .bottomLeading) {
+                if highlighted { fullScreenButton }
+            }
             .overlay(alignment: .bottomTrailing) {
                 // When every scene plays, a per-card marker would carry no information.
                 if model.isInPlaylist(entry.id) && !PlaylistDraft(model.playlist).includesAllScenes {
@@ -185,11 +236,11 @@ struct SceneCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .overlay {
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(hovering ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: hovering ? 2 : 1)
+                    .strokeBorder(highlighted ? Color.accentColor : Color.primary.opacity(0.1), lineWidth: highlighted ? 2 : 1)
             }
-            .shadow(color: .black.opacity(hovering ? 0.25 : 0.12), radius: hovering ? 12 : 5, y: hovering ? 6 : 2)
-            .scaleEffect(hovering ? 1.015 : 1)
-            .animation(.snappy(duration: 0.2), value: hovering)
+            .shadow(color: .black.opacity(highlighted ? 0.25 : 0.12), radius: highlighted ? 12 : 5, y: highlighted ? 6 : 2)
+            .scaleEffect(highlighted ? 1.015 : 1)
+            .animation(.snappy(duration: 0.2), value: highlighted)
     }
 
     private var accessibilityValue: String {
@@ -209,8 +260,9 @@ struct SceneMenuItems: View {
     var body: some View {
         if includePreview {
             Button("Preview") { model.showScene(entry.id) }
-            Divider()
         }
+        Button("Preview Full Screen") { FullScreenPreviewLauncher.previewScene(entry.id, model: model) }
+        Divider()
         Button("Use as Screen Saver") { Task { await model.useAsScreenSaver(entry.id) } }
         Button("Add to Playlist") { Task { await model.addToPlaylist(entry.id) } }
             .disabled(model.isInPlaylist(entry.id) && model.playlist.mode != .single)
