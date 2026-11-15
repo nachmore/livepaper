@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LivePaperHelper login agent, registered by the app with SMAppService.agent(plistName:).
+  scripts/build.sh copies this file to LivePaper.app/Contents/Library/LaunchAgents/, where
+  SMAppService requires it. BundleProgram is relative to the app bundle, so the job follows the app
+  wherever it is installed. Keep the job semantics in sync with the ~/Library/LaunchAgents fallback
+  (LaunchAgentPlist in Sources/LivePaperCore/Install/HelperRegistration.swift).
+-->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.nachmore.livepaper.helper</string>
+	<key>BundleProgram</key>
+	<string>Contents/Helpers/LivePaperHelper</string>
+	<!-- Start at login. -->
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Restart after a crash, but not after a clean exit (e.g. the user quit it). -->
+	<key>KeepAlive</key>
+	<dict>
+		<key>SuccessfulExit</key>
+		<false/>
+	</dict>
+	<!-- Hotkeys and the lock flow must react immediately: no background throttling. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
+	<!-- Only in the user's GUI session. -->
+	<key>LimitLoadToSessionType</key>
+	<string>Aqua</string>
+	<!-- System Settings › General › Login Items shows the job under LivePaper's name and icon. -->
+	<key>AssociatedBundleIdentifiers</key>
+	<array>
+		<string>com.nachmore.livepaper</string>
+	</array>
+</dict>
+</plist>
