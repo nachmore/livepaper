@@ -72,6 +72,8 @@ private final class FullScreenPreviewSession {
 
     private let model: AppModel
     private var sequence: FullScreenPreviewSequence
+    /// AI results (not in the library) and per-scene labels, from the request.
+    private let request: FullScreenPreviewRequest
     private let performance: LPPerformanceProfile
     /// Playlist previews move on by themselves, like the saver (nil: only ← →).
     private let autoAdvance: TimeInterval?
@@ -107,6 +109,7 @@ private final class FullScreenPreviewSession {
     init(request: FullScreenPreviewRequest, model: AppModel, screen: NSScreen) {
         self.model = model
         sequence = request.sequence
+        self.request = request
         performance = request.performance
         autoAdvance = request.autoAdvanceInterval
         clockOn = request.showClock
@@ -256,19 +259,27 @@ private final class FullScreenPreviewSession {
 
     // MARK: scenes
 
+    /// What ← → may show: the library's scenes and the request's AI results.
+    private var availableIDs: Set<String> { request.available(library: model.availableSceneIDs) }
+
+    /// The scene a sequence id stands for: an AI result from the request, else a library scene.
+    private func item(for id: String) -> SceneItem? {
+        request.candidate(for: id)?.item ?? model.entry(id: id)?.item
+    }
+
     private func showCurrent() {
         loadGeneration += 1
         let generation = loadGeneration
-        guard sequence.retain(available: Set(model.availableSceneIDs)), let entry = model.entry(id: sequence.current) else {
+        guard sequence.retain(available: availableIDs), let item = item(for: sequence.current) else {
             removeHost()
             state.sceneName = ""
             state.position = nil
             state.message = "This scene is no longer in the library."
             return
         }
-        let manifest = entry.manifest
+        let manifest = item.manifest
         state.sceneName = manifest.name
-        state.position = sequence.positionText
+        state.position = request.caption(for: sequence.current, in: sequence)
         state.message = nil
         refreshHint()
         scheduleAutoAdvance()
@@ -281,11 +292,10 @@ private final class FullScreenPreviewSession {
             }
             let clock = manifest.clock.position
             shown = (.video, clock)
-            install(.video(entry.item.packageURL.appendingPathComponent(file), fit: manifest.video?.fit ?? .fill,
+            install(.video(item.packageURL.appendingPathComponent(file), fit: manifest.video?.fit ?? .fill,
                            clock: clock == .none ? nil : clock,
                            clockVisible: FullScreenSceneConfig.nativeClockVisible(showClock: clockOn, lockUI: lockPreview)))
         case .web:
-            let item = entry.item
             Task { [weak self, model] in
                 do {
                     let url = try await model.previewHTML(for: item)
@@ -348,7 +358,7 @@ private final class FullScreenPreviewSession {
         advanceTimer = Self.oneShot(at: Date().addingTimeInterval(interval)) { [weak self] in
             guard let self, self.phase == .open else { return }
             self.advanceTimer = nil
-            if self.sequence.retain(available: Set(self.model.availableSceneIDs)), self.sequence.step(1) {
+            if self.sequence.retain(available: self.availableIDs), self.sequence.step(1) {
                 self.seed = FullScreenSceneConfig.randomSeed()
                 self.showCurrent()
             }
@@ -356,7 +366,7 @@ private final class FullScreenPreviewSession {
     }
 
     private func step(_ delta: Int) {
-        guard sequence.retain(available: Set(model.availableSceneIDs)), sequence.step(delta) else {
+        guard sequence.retain(available: availableIDs), sequence.step(delta) else {
             showHint()
             return
         }
@@ -424,7 +434,8 @@ private final class FullScreenPreviewSession {
     // MARK: hint bar and pointer
 
     private func refreshHint() {
-        state.hintItems = FullScreenHint.items(canStep: sequence.canStep, clockOn: clockOn, lockPreview: lockPreview)
+        state.hintItems = FullScreenHint.items(canStep: sequence.canStep, clockOn: clockOn, lockPreview: lockPreview,
+                                               source: sequence.source)
     }
 
     private func showHint() {

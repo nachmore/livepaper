@@ -15,6 +15,19 @@ enum FullScreenPreviewSource: Equatable, Sendable {
     case library
     /// The Screen Saver (playlist) screen or the menu bar: the playlist's order.
     case playlist
+    /// An AI session's result before it is accepted: the new scene alone, or (modify) the new
+    /// version first and the library's current version second, so ← → compare them.
+    case candidate
+}
+
+/// A scene the preview shows that isn't (yet) in the library: an AI session's result, which lives
+/// in the session's workspace until the user accepts it.
+struct FullScreenPreviewCandidate: Equatable, Sendable {
+    /// The id the sequence uses for it (never a library id, so it can't be confused with one).
+    var key: String
+    var item: SceneItem
+    /// Shown next to the scene's name ("New version", "Not in your library yet").
+    var label: String
 }
 
 /// The scenes a full-screen preview steps through and the one it shows; ← → wrap around.
@@ -83,6 +96,22 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
     /// A playlist preview changes scene on the playlist's own cadence ("Change scene"), like the
     /// saver; 0 = only with ← →.
     var cycleMinutes = 0
+    /// Scenes from outside the library, by `FullScreenPreviewCandidate.key` (AI results).
+    var candidates: [FullScreenPreviewCandidate] = []
+    /// Labels for library scenes in the sequence (the current version when comparing), by id.
+    var labels: [String: String] = [:]
+
+    /// The candidate a sequence id stands for (nil: a library scene).
+    func candidate(for id: String) -> FullScreenPreviewCandidate? { candidates.first { $0.key == id } }
+
+    /// The ids that can be shown: the library's plus the candidates'.
+    func available(library: [String]) -> Set<String> { Set(library).union(candidates.map(\.key)) }
+
+    /// The label shown next to the current scene's name, with its position ("New version · 1 of 2").
+    func caption(for id: String, in sequence: FullScreenPreviewSequence) -> String? {
+        let parts = [candidate(for: id)?.label ?? labels[id], sequence.positionText].compactMap { $0 }
+        return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    }
 
     /// How long a scene stays before the preview moves on by itself (nil: it doesn't).
     var autoAdvanceInterval: TimeInterval? {
@@ -106,6 +135,25 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
         return FullScreenPreviewRequest(sequence: sequence, showClock: settings.showClock, performance: settings.performance,
                                         cycleMinutes: settings.mode == .single ? 0 : settings.cycleMinutes)
     }
+
+    /// An AI session's result before it is accepted, with the saved playlist's clock and performance
+    /// settings. Modifying a scene that is still in the library adds its current version, so ← →
+    /// compare the two (the new one shows first).
+    static func candidate(_ item: SceneItem, session: String, replacing current: String?, available: [String],
+                          playlist: PlaylistSettings) -> FullScreenPreviewRequest? {
+        let key = candidateKey(session: session)
+        let compare = current.flatMap { available.contains($0) ? $0 : nil }
+        let label = compare == nil ? "Not in your library yet" : "New version"
+        guard let sequence = FullScreenPreviewSequence(ids: [key] + (compare.map { [$0] } ?? []), start: key, source: .candidate)
+        else { return nil }
+        return FullScreenPreviewRequest(sequence: sequence, showClock: playlist.showClock, performance: playlist.performance,
+                                        candidates: [FullScreenPreviewCandidate(key: key, item: item, label: label)],
+                                        labels: compare.map { [$0: "Current version"] } ?? [:])
+    }
+
+    /// The sequence id of a session's candidate. Scene ids are slugs (letters, digits, dashes), so
+    /// one with a colon can't collide with a library scene.
+    static func candidateKey(session: String) -> String { "ai-candidate:" + session }
 }
 
 // MARK: - Hint bar and pointer
@@ -183,10 +231,11 @@ enum FullScreenHint {
         var id: String { keys.joined() }
     }
 
-    /// ← → only when there is somewhere to go; C and L name their state once changed.
-    static func items(canStep: Bool, clockOn: Bool, lockPreview: Bool) -> [Item] {
+    /// ← → only when there is somewhere to go ("compare" when they switch between an AI result and
+    /// the current version); C and L name their state once changed.
+    static func items(canStep: Bool, clockOn: Bool, lockPreview: Bool, source: FullScreenPreviewSource = .library) -> [Item] {
         var items: [Item] = []
-        if canStep { items.append(Item(keys: ["\u{2190}", "\u{2192}"], label: "scenes")) }
+        if canStep { items.append(Item(keys: ["\u{2190}", "\u{2192}"], label: source == .candidate ? "compare" : "scenes")) }
         items.append(Item(keys: ["C"], label: clockOn ? "clock" : "clock off"))
         items.append(Item(keys: ["L"], label: lockPreview ? "lock-screen preview on" : "lock-screen preview", isActive: lockPreview))
         items.append(Item(keys: ["Esc"], label: "close"))

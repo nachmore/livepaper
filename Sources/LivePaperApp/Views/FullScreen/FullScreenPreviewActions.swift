@@ -1,6 +1,7 @@
 // FullScreenPreviewActions — the ways into the full-screen preview: a library scene (detail button,
 // card context menu and hover button, Space on a focused card), the playlist (Screen Saver screen,
-// menu-bar extra), and ⇧⌘F, which runs whatever the focused view publishes as its preview action.
+// menu-bar extra), an AI session's result before it is accepted (the session's result panel), and
+// ⇧⌘F, which runs whatever the focused view publishes as its preview action.
 import AppKit
 import LivePaperCore
 import SwiftUI
@@ -19,6 +20,20 @@ enum FullScreenPreviewLauncher {
     static func previewPlaylist(_ settings: PlaylistSettings, model: AppModel, start: String? = nil, fromMenuBar: Bool = false) {
         guard let request = FullScreenPreviewRequest.playlist(settings, available: model.availableSceneIDs, start: start) else { return }
         FullScreenPreviewController.shared.present(request, model: model, origin: fromMenuBar ? .pointer : .window(currentWindowFrame))
+    }
+
+    /// An AI session's result before it is accepted (it still lives in the session's workspace).
+    /// Modifying a library scene: ← → switch between the new version and the current one. Once the
+    /// result is accepted it is a library scene and previews like one.
+    static func previewCandidate(_ item: SceneItem, session: AISessionModel, model: AppModel) {
+        if case .accepted(let id) = session.resolution {
+            previewScene(id, model: model)
+            return
+        }
+        guard let request = FullScreenPreviewRequest.candidate(item, session: session.id, replacing: session.targetSceneID,
+                                                               available: model.availableSceneIDs, playlist: model.playlist)
+        else { return }
+        FullScreenPreviewController.shared.present(request, model: model, origin: .window(currentWindowFrame))
     }
 
     /// Whether a playlist has anything to preview.

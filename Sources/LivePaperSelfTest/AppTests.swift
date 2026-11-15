@@ -569,6 +569,49 @@ extension SelfTests {
             try expectEqual(toggled.filter(\.isActive).map(\.id), ["L"])
             try expectEqual(Set(toggled.map(\.id)).count, toggled.count)   // stable, unique ids for ForEach
         },
+        TestCase(name: "app.fullscreen.ai-candidate") {
+            var settings = PlaylistSettings()
+            settings.showClock = false
+            settings.performance = .balanced
+            let candidate = SceneItem(manifest: SceneManifest(id: "aurora", name: "Aurora", kind: .web),
+                                      packageURL: URL(fileURLWithPath: "/tmp/ws/aurora.lpscene"), isBuiltin: false)
+            let key = FullScreenPreviewRequest.candidateKey(session: "s1")
+            try expect(key.contains(":"), "never a scene id (slugs have no colon)")
+            // Create: the new scene alone, labelled as not in the library, with the playlist's settings.
+            let create = try unwrap(FullScreenPreviewRequest.candidate(candidate, session: "s1", replacing: nil,
+                                                                       available: ["a", "aurora"], playlist: settings))
+            try expectEqual(create.sequence.source, .candidate)
+            try expectEqual(create.sequence.ids, [key])
+            try expectEqual(create.candidate(for: key)?.item, candidate)
+            try expect(create.candidate(for: "aurora") == nil, "a library scene with the same id stays a library scene")
+            try expectEqual(create.caption(for: key, in: create.sequence), "Not in your library yet")
+            try expectEqual(create.showClock, false)
+            try expectEqual(create.performance, .balanced)
+            try expectEqual(create.autoAdvanceInterval, nil)
+            try expectEqual(create.available(library: ["a"]), ["a", key])
+            // Modify: the new version first, then the current one; ← → compare them.
+            var modify = try unwrap(FullScreenPreviewRequest.candidate(candidate, session: "s1", replacing: "aurora",
+                                                                       available: ["a", "aurora"], playlist: settings))
+            try expectEqual(modify.sequence.ids, [key, "aurora"])
+            try expectEqual(modify.sequence.current, key)
+            try expectEqual(modify.caption(for: key, in: modify.sequence), "New version \u{00B7} 1 of 2")
+            var stepped = modify.sequence
+            stepped.step(1)
+            try expectEqual(modify.caption(for: stepped.current, in: stepped), "Current version \u{00B7} 2 of 2")
+            try expectEqual(FullScreenHint.text(FullScreenHint.items(canStep: true, clockOn: true, lockPreview: false, source: .candidate)),
+                            "\u{2190} \u{2192} compare \u{00B7} C clock \u{00B7} L lock-screen preview \u{00B7} Esc close")
+            // The scene being modified was deleted meanwhile: the candidate alone, as for create.
+            modify = try unwrap(FullScreenPreviewRequest.candidate(candidate, session: "s1", replacing: "aurora",
+                                                                   available: ["a"], playlist: settings))
+            try expectEqual(modify.sequence.ids, [key])
+            try expectEqual(modify.caption(for: key, in: modify.sequence), "Not in your library yet")
+            // Deleting the current version while comparing leaves the candidate.
+            var sequence = try unwrap(FullScreenPreviewRequest.candidate(candidate, session: "s1", replacing: "aurora",
+                                                                         available: ["aurora"], playlist: settings)).sequence
+            sequence.step(1)
+            try expect(sequence.retain(available: create.available(library: [])), "the candidate is still there")
+            try expectEqual(sequence.current, key)
+        },
         TestCase(name: "app.fullscreen.screen-choice") {
             // Primary 1512×982 at the origin, a 2560×1440 display to its right, one above-left.
             let primary = CGRect(x: 0, y: 0, width: 1512, height: 982)
