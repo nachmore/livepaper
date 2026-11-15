@@ -291,31 +291,61 @@ extension SelfTests {
             try expectEqual(cancelled.phase, .cancelled)
         },
         TestCase(name: "app.setup.checklist") {
-            var st = InstallStatus()
-            try expectEqual(SetupChecklist.firstIncompleteStep(status: st), .screenSaver)
-            try expectEqual(SetupChecklist.saverSummary(st), "Not installed")
-            st.saverInstalled = true; st.saverUpToDate = true
-            try expectEqual(SetupChecklist.checks(for: .screenSaver, status: st).map(\.state), [.done, .needed])
-            try expectEqual(SetupChecklist.saverSummary(st), "Installed, not selected")
-            st.saverSelected = true
-            try expectEqual(SetupChecklist.firstIncompleteStep(status: st), .lock)
-            st.helperRunning = true; st.managedByMDM = true
-            try expectEqual(SetupChecklist.checks(for: .lock, status: st).map(\.state), [.done, .managed])
-            try expect(SetupChecklist.isComplete(.lock, status: st), "managed never blocks")
-            try expectEqual(SetupChecklist.firstIncompleteStep(status: st), .firstScene)
-            try expectEqual(SetupChecklist.checks(for: .lockKeys, status: st).map(\.state), [.optional])
-            st.saverUpToDate = false
-            try expectEqual(SetupChecklist.saverSummary(st), "Selected \u{2014} update available")
+            var st = SetupState()
+            try expectEqual(SetupChecklist.firstIncompleteStep(state: st), .screenSaver)
+            try expectEqual(SetupChecklist.saverSummary(st.install), "Not installed")
+            st.install.saverInstalled = true; st.install.saverUpToDate = true
+            try expectEqual(SetupChecklist.checks(for: .screenSaver, state: st).map(\.state), [.done, .needed])
+            try expectEqual(SetupChecklist.saverSummary(st.install), "Installed, not selected")
+            st.install.saverSelected = true
+            try expectEqual(SetupChecklist.firstIncompleteStep(state: st), .lock)
+            try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.id), [.lockKeys, .password, .helper])
+            st.install.helperRunning = true; st.install.managedByMDM = true
+            try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.state), [.needed, .managed, .done])
+            try expect(!SetupChecklist.isComplete(.lock, state: st), "lock keys still off")
+            st.lockKeysShowScene = true
+            try expect(SetupChecklist.isComplete(.lock, state: st), "managed never blocks")
+            try expectEqual(SetupChecklist.firstIncompleteStep(state: st), .firstScene)
+            try expect(SetupChecklist.checks(for: .welcome, state: st).isEmpty)
+            st.install.saverUpToDate = false
+            try expectEqual(SetupChecklist.saverSummary(st.install), "Selected \u{2014} update available")
+        },
+        TestCase(name: "app.setup.lock-takeover") {
+            let dir = try tempDir("lock-takeover")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let backup = dir.appendingPathComponent("backups/loginwindow-lock.json")
+            // Key absent before LivePaper: restore removes it again.
+            let absent = InMemoryBoolPreference()
+            let lock = LockTakeover(preference: absent, backupURL: backup)
+            try expect(!lock.isEnabled && !lock.hasBackup)
+            try lock.restore() // no backup: no-op
+            try lock.setEnabled(true)
+            try expect(lock.isEnabled && lock.hasBackup)
+            try lock.setEnabled(false)
+            try lock.setEnabled(true) // the backup keeps the value from before the first change
+            try lock.restore()
+            try expectEqual(absent.read(), nil)
+            try expect(!lock.hasBackup)
+            // Already on before LivePaper: nothing changes, nothing to restore.
+            let on = InMemoryBoolPreference(true)
+            let lock2 = LockTakeover(preference: on, backupURL: backup)
+            try lock2.setEnabled(true)
+            try expect(!lock2.hasBackup)
+            try lock2.setEnabled(false)
+            try lock2.restore()
+            try expectEqual(on.read(), true)
         },
         TestCase(name: "app.setup.uninstall-plan") {
             try withScratchPaths("plan") { root in
                 let home = root.path
-                let keep = UninstallPlan.make(keepScenes: true, userSceneCount: 1, appBundlePath: home + "/Applications/LivePaper.app", home: home)
-                try expectEqual(keep.items.map(\.id), ["helper", "saver", "restore", "library", "app"])
+                let keep = UninstallPlan.make(keepScenes: true, userSceneCount: 1, restoresLockKeys: true,
+                                              appBundlePath: home + "/Applications/LivePaper.app", home: home)
+                try expectEqual(keep.items.map(\.id), ["helper", "saver", "restore", "lock-keys", "library", "app"])
                 try expectEqual(keep.items.first { $0.id == "library" }?.action, .keep)
                 try expect(keep.items.first { $0.id == "library" }?.title.contains("1 scene)") == true)
                 try expectEqual(keep.items.last?.detail, "~/Applications/LivePaper.app")
-                let wipe = UninstallPlan.make(keepScenes: false, userSceneCount: 3, appBundlePath: nil, home: home)
+                let wipe = UninstallPlan.make(keepScenes: false, userSceneCount: 3, restoresLockKeys: false, appBundlePath: nil, home: home)
+                try expect(!wipe.items.contains { $0.id == "lock-keys" }, "nothing to restore")
                 try expectEqual(wipe.items.first { $0.id == "library" }?.action, .remove)
                 try expect(!wipe.items.contains { $0.id == "app" }, "no app bundle when not running from one")
                 try expect(wipe.items.allSatisfy { !$0.detail.contains(home + "/") }, "paths are ~-abbreviated")
@@ -418,11 +448,22 @@ extension SelfTests {
             try withModel("lock") { model, fx in
                 let saved = fx.saved
                 model.updateLock { $0.hotkey = LPHotkey(keyCode: 37, modifiers: [.option, .command]) }
-                model.updateLock { $0.takeOverSystemLock = true }
-                model.updateLock { $0.takeOverSystemLock = true } // unchanged: not saved again
-                try expectEqual(saved.count, 2)
-                try expectEqual(saved.last?.lock.takeOverSystemLock, true)
+                model.updateLock { $0.hotkey = LPHotkey(keyCode: 37, modifiers: [.option, .command]) } // unchanged: not saved
+                try expectEqual(saved.count, 1)
                 try expectEqual(model.sharedState.lock.hotkey?.modifiers, [.option, .command])
+                // The lock keys: the system preference changes and state.json mirrors it.
+                try expect(!model.lockKeysShowScene)
+                model.setLockKeysShowScene(true)
+                try expect(model.lockKeysShowScene)
+                try expectEqual(fx.lockPreference.read(), true)
+                try expectEqual(saved.last?.lock.takeOverSystemLock, true)
+                try expectEqual(saved.last?.lock.takeOverLockKey, true)
+                try expect(model.uninstallPlan(keepScenes: true).items.contains { $0.id == "lock-keys" })
+                var ok = false
+                try awaitMain { ok = await model.uninstall(keepScenes: true) }
+                try expect(ok)
+                try expectEqual(fx.lockPreference.read(), nil) // restored: the key didn't exist before
+                try expect(!model.lockKeysShowScene)
             }
         },
         TestCase(name: "app.model.onboarding-install") {
@@ -436,7 +477,9 @@ extension SelfTests {
                 try expect(model.installStatus.saverSelected)
                 try awaitMain { await model.registerHelper() }
                 try expect(model.installStatus.helperRunning)
-                try expectEqual(SetupChecklist.firstIncompleteStep(status: model.installStatus), .firstScene)
+                try expectEqual(SetupChecklist.firstIncompleteStep(state: model.setupState), .lock)
+                model.setLockKeysShowScene(true)
+                try expectEqual(SetupChecklist.firstIncompleteStep(state: model.setupState), .firstScene)
                 model.completeOnboarding()
                 try expect(model.hasCompletedOnboarding && !model.showOnboarding)
                 var ok = false
@@ -571,6 +614,8 @@ extension SelfTests {
     struct ModelFixture {
         let services: LivePaperServices
         let saved: SavedStates
+        /// Stands in for `com.apple.loginwindow immediateLockLaunchesScreenSaver`.
+        let lockPreference: InMemoryBoolPreference
     }
 
     /// A started AppModel over fresh mock services (zero delays) in a scratch directory.
@@ -578,15 +623,17 @@ extension SelfTests {
         try withScratchPaths(name) { root in
             let services = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
             let saved = SavedStates()
+            let fx = ModelFixture(services: services, saved: saved, lockPreference: InMemoryBoolPreference())
             try MainActor.assumeIsolated {
-                let env = AppEnvironment(isMock: true, defaults: InMemoryPreferences(),
+                let lock = LockTakeover(preference: fx.lockPreference, backupURL: root.appendingPathComponent("Support/backups/loginwindow-lock.json"))
+                let env = AppEnvironment(isMock: true, defaults: InMemoryPreferences(), lockTakeover: lock,
                                          stateURL: root.appendingPathComponent("Support/state.json"),
                                          saveState: { saved.all.append($0) },
                                          previewCacheDirectory: root.appendingPathComponent("Previews"),
                                          appVersion: "0.0.0-test", appBundlePath: nil)
                 let model = AppModel(services: services, environment: env)
                 try awaitMain { await model.start() }
-                try body(model, ModelFixture(services: services, saved: saved))
+                try body(model, fx)
                 for s in model.runningSessions { s.cancel() }
             }
         }

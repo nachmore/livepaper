@@ -13,6 +13,8 @@ import LivePaperCore
 struct AppEnvironment {
     var isMock: Bool
     var defaults: PreferenceStore
+    /// ⌃⌘Q / lock-key takeover (the real loginwindow preference, or an in-memory one).
+    var lockTakeover: LockTakeover
     var stateURL: URL
     /// Persists state.json (the live implementation also notifies the helper).
     var saveState: (LPSharedState) throws -> Void
@@ -100,6 +102,8 @@ final class AppModel {
     private(set) var lastPublished: LPPlaylist?
     private(set) var sharedState: LPSharedState
     private(set) var installStatus = InstallStatus()
+    /// ⌃⌘Q, Apple menu › Lock Screen and the lock key start the scene before locking.
+    private(set) var lockKeysShowScene: Bool
     private(set) var isInstallBusy = false
 
     // AI
@@ -115,6 +119,7 @@ final class AppModel {
         self.services = services
         self.environment = environment
         self.sharedState = LPSharedState.load(from: environment.stateURL)
+        self.lockKeysShowScene = environment.lockTakeover.isEnabled
         self.aiPreferences = AIPreferences.load(from: environment.defaults)
         self.showOnboarding = !environment.defaults.bool(forKey: AppEnvironment.onboardingCompletedKey)
     }
@@ -431,11 +436,28 @@ final class AppModel {
         }
     }
 
+    /// Turns the lock-key takeover on or off (backing up the system's previous value the first
+    /// time) and mirrors it into state.json for the helper.
+    func setLockKeysShowScene(_ on: Bool) {
+        do {
+            try environment.lockTakeover.setEnabled(on)
+            lockKeysShowScene = on
+            updateLock { $0.takeOverSystemLock = on; $0.takeOverLockKey = on }
+        } catch {
+            banners.error("Couldn't change what the lock keys do", error) { [weak self] in self?.setLockKeysShowScene(on) }
+        }
+    }
+
     // MARK: - Install / system integration
+
+    /// Everything setup and Settings show status for.
+    var setupState: SetupState { SetupState(install: installStatus, lockKeysShowScene: lockKeysShowScene) }
 
     func refreshInstallStatus() async {
         let install = services.install
         if let s = try? await offMain({ install.status() }) { installStatus = s }
+        // The user may have changed it with `defaults` or another tool meanwhile.
+        lockKeysShowScene = environment.lockTakeover.isEnabled
     }
 
     /// Installs (if needed) and selects the saver. Returns false when macOS needs the user to pick
@@ -467,7 +489,6 @@ final class AppModel {
     }
 
     func openScreenSaverSettings() { services.install.openScreenSaverSettings() }
-    func openAccessibilitySettings() { services.install.openAccessibilitySettings() }
 
     private func runInstallStep(_ failure: String, _ step: @escaping @Sendable (InstallServicing) throws -> Void) async {
         isInstallBusy = true
@@ -495,6 +516,9 @@ final class AppModel {
         let install = services.install
         for s in sessions where s.isRunning { s.cancel() }
         do {
+            // LivePaper changed the lock keys itself, so it restores them itself.
+            try environment.lockTakeover.restore()
+            lockKeysShowScene = environment.lockTakeover.isEnabled
             try await offMain { try install.uninstall(removeLibrary: !keepScenes) }
             environment.defaults.removeObject(forKey: AppEnvironment.onboardingCompletedKey)
             return true
@@ -508,7 +532,8 @@ final class AppModel {
     }
 
     func uninstallPlan(keepScenes: Bool) -> UninstallPlan {
-        UninstallPlan.make(keepScenes: keepScenes, userSceneCount: userEntries.count, appBundlePath: environment.appBundlePath)
+        UninstallPlan.make(keepScenes: keepScenes, userSceneCount: userEntries.count,
+                           restoresLockKeys: environment.lockTakeover.hasBackup, appBundlePath: environment.appBundlePath)
     }
 
     // MARK: - AI sessions

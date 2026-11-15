@@ -65,7 +65,7 @@ enum SnapshotHarness {
         wait { await model.refreshInstallStatus() }
         shoot("onboarding-saver-dark", sheet, dark: true, OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
         shoot("onboarding-lock-light", sheet, dark: false, OnboardingView(initialStep: .lock))
-        shoot("onboarding-lockkeys-dark", sheet, dark: true, OnboardingView(initialStep: .lockKeys))
+        shoot("onboarding-lock-dark", sheet, dark: true, OnboardingView(initialStep: .lock))
         shoot("onboarding-scene-light", sheet, dark: false, OnboardingView(initialStep: .firstScene))
 
         // Library: banners, both appearances, a narrow window and an empty search.

@@ -1,14 +1,28 @@
-// SetupPlans — onboarding checklist and uninstall plan, derived purely from InstallStatus and paths
+// SetupPlans — onboarding checklist and uninstall plan, derived purely from setup state and paths
 // (Foundation-only; also compiled into LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
 import Foundation
 import LivePaperCore
 
 // MARK: - Onboarding
 
-/// The five onboarding pages. Every page is idempotent: it shows live status and only offers the
+/// What setup looks at: InstallServicing's status plus the lock-key takeover, which the app manages
+/// itself (see LockTakeover.swift).
+struct SetupState: Equatable, Sendable {
+    var install: InstallStatus
+    /// `immediateLockLaunchesScreenSaver` is on: ⌃⌘Q, Apple menu › Lock Screen and the lock key
+    /// start the scene before locking.
+    var lockKeysShowScene: Bool
+
+    init(install: InstallStatus = InstallStatus(), lockKeysShowScene: Bool = false) {
+        self.install = install
+        self.lockKeysShowScene = lockKeysShowScene
+    }
+}
+
+/// The onboarding pages. Every page is idempotent: it shows live status and only offers the
 /// actions that are still needed, so re-running onboarding from Settings is always safe.
 enum OnboardingStep: Int, CaseIterable, Identifiable, Sendable {
-    case welcome, screenSaver, lock, lockKeys, firstScene
+    case welcome, screenSaver, lock, firstScene
     var id: Int { rawValue }
 
     var title: String {
@@ -16,7 +30,6 @@ enum OnboardingStep: Int, CaseIterable, Identifiable, Sendable {
         case .welcome: return "Welcome"
         case .screenSaver: return "Screen saver"
         case .lock: return "Locking"
-        case .lockKeys: return "Lock keys"
         case .firstScene: return "First scene"
         }
     }
@@ -26,7 +39,6 @@ enum OnboardingStep: Int, CaseIterable, Identifiable, Sendable {
         case .welcome: return "hand.wave"
         case .screenSaver: return "sparkles.tv"
         case .lock: return "lock"
-        case .lockKeys: return "keyboard"
         case .firstScene: return "photo.on.rectangle"
         }
     }
@@ -43,7 +55,7 @@ struct SetupCheck: Identifiable, Equatable, Sendable {
         case managed
     }
     enum ID: String, Sendable {
-        case saverInstalled, saverSelected, helper, password, accessibility
+        case saverInstalled, saverSelected, lockKeys, password, helper
     }
     let id: ID
     let title: String
@@ -52,7 +64,8 @@ struct SetupCheck: Identifiable, Equatable, Sendable {
 }
 
 enum SetupChecklist {
-    static func checks(for step: OnboardingStep, status s: InstallStatus) -> [SetupCheck] {
+    static func checks(for step: OnboardingStep, state: SetupState) -> [SetupCheck] {
+        let s = state.install
         switch step {
         case .welcome, .firstScene:
             return []
@@ -77,31 +90,28 @@ enum SetupChecklist {
             default: passwordDetail = "In System Settings \u{203A} Lock Screen, set \u{201C}Require password after screen saver begins\u{201D} to Immediately."
             }
             return [
-                SetupCheck(id: .helper, title: "LivePaper helper running",
-                           detail: s.helperRunning ? "Provides the lock shortcut. It uses no CPU while idle."
-                                                   : "A small login item that provides the lock shortcut.",
-                           state: s.helperRunning ? .done : .needed),
+                SetupCheck(id: .lockKeys, title: "Your lock keys show the scene",
+                           detail: state.lockKeysShowScene
+                               ? "\u{2303}\u{2318}Q, Apple menu \u{203A} Lock Screen and the lock key start your scene, then lock."
+                               : "Makes \u{2303}\u{2318}Q, Apple menu \u{203A} Lock Screen and the lock key start your scene before locking. No permissions needed.",
+                           state: state.lockKeysShowScene ? .done : .needed),
                 SetupCheck(id: .password, title: "Password required immediately", detail: passwordDetail, state: passwordState),
-            ]
-        case .lockKeys:
-            return [
-                SetupCheck(id: .accessibility, title: "Accessibility access (optional)",
-                           detail: s.accessibilityTrusted
-                               ? "LivePaper can take over \u{2303}\u{2318}Q and the lock key if you turn that on."
-                               : "Only needed if you want \u{2303}\u{2318}Q or the lock key to show your scene.",
-                           state: s.accessibilityTrusted ? .done : .optional),
+                SetupCheck(id: .helper, title: "LivePaper helper running",
+                           detail: s.helperRunning ? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle."
+                                                   : "A small login item for your own lock shortcut and the screen saver's \u{201C}Open LivePaper\u{201D} button.",
+                           state: s.helperRunning ? .done : .needed),
             ]
         }
     }
 
     /// True when nothing on the page still needs the user's action.
-    static func isComplete(_ step: OnboardingStep, status: InstallStatus) -> Bool {
-        checks(for: step, status: status).allSatisfy { $0.state != .needed }
+    static func isComplete(_ step: OnboardingStep, state: SetupState) -> Bool {
+        checks(for: step, state: state).allSatisfy { $0.state != .needed }
     }
 
     /// Where a re-run of onboarding should start: the first page that still needs something.
-    static func firstIncompleteStep(status: InstallStatus) -> OnboardingStep {
-        OnboardingStep.allCases.first { $0 != .welcome && !$0.isOptionalPage && !isComplete($0, status: status) } ?? .firstScene
+    static func firstIncompleteStep(state: SetupState) -> OnboardingStep {
+        OnboardingStep.allCases.first { $0 != .welcome && $0 != .firstScene && !isComplete($0, state: state) } ?? .firstScene
     }
 
     /// Short line for the Settings › Screen saver status row.
@@ -111,10 +121,6 @@ enum SetupChecklist {
         if !s.saverUpToDate { return "Selected \u{2014} update available" }
         return "Active"
     }
-}
-
-private extension OnboardingStep {
-    var isOptionalPage: Bool { self == .lockKeys || self == .firstScene }
 }
 
 // MARK: - Uninstall
@@ -136,8 +142,9 @@ struct UninstallPlan: Equatable, Sendable {
     /// - Parameters:
     ///   - keepScenes: the "Keep my scenes" checkbox.
     ///   - userSceneCount: shown next to the library row so the user knows what they'd lose.
+    ///   - restoresLockKeys: LivePaper changed what the lock keys do (LockTakeover has a backup).
     ///   - appBundlePath: the running .app, or nil when not running from a bundle (e.g. `swift run`).
-    static func make(keepScenes: Bool, userSceneCount: Int, appBundlePath: String?,
+    static func make(keepScenes: Bool, userSceneCount: Int, restoresLockKeys: Bool, appBundlePath: String?,
                      home: String = NSHomeDirectory()) -> UninstallPlan {
         func short(_ url: URL) -> String { LPFormat.abbreviatingHome(url.path, home: home) }
         var items: [Item] = [
@@ -147,6 +154,10 @@ struct UninstallPlan: Equatable, Sendable {
             Item(id: "restore", action: .restore, title: "Restore your previous screen saver and settings",
                  detail: "From the backup taken at install (\(short(LPPaths.backups)))."),
         ]
+        if restoresLockKeys {
+            items.append(Item(id: "lock-keys", action: .restore, title: "Restore what \u{2303}\u{2318}Q and the lock key do",
+                              detail: "They lock straight to the wallpaper again, as before LivePaper."))
+        }
         let scenes = userSceneCount == 1 ? "1 scene" : "\(userSceneCount) scenes"
         if keepScenes {
             items.append(Item(id: "library", action: .keep, title: "Keep your scenes (\(scenes))", detail: short(LPPaths.library)))

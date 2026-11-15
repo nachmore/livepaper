@@ -25,7 +25,7 @@ struct OnboardingView: View {
 
     var body: some View {
         HStack(spacing: 0) {
-            StepRail(current: step, visited: visited, status: model.installStatus) { go(to: $0) }
+            StepRail(current: step, visited: visited, state: model.setupState) { go(to: $0) }
                 .frame(width: 210)
                 .background(.background.secondary)
             Divider()
@@ -44,7 +44,7 @@ struct OnboardingView: View {
         .task {
             await model.refreshInstallStatus()
             if startsAtFirstIncomplete && model.hasCompletedOnboarding {
-                go(to: SetupChecklist.firstIncompleteStep(status: model.installStatus))
+                go(to: SetupChecklist.firstIncompleteStep(state: model.setupState))
             }
         }
         .refreshesInstallStatusOnActivation()
@@ -63,7 +63,6 @@ struct OnboardingView: View {
         case .welcome: WelcomePage()
         case .screenSaver: ScreenSaverPage(needsGuidedSelection: $needsGuidedSelection)
         case .lock: LockPage()
-        case .lockKeys: LockKeysPage()
         case .firstScene: FirstScenePage(selection: $firstSceneID)
         }
     }
@@ -88,14 +87,14 @@ struct OnboardingView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(finishing)
             } else {
-                let complete = SetupChecklist.isComplete(step, status: model.installStatus)
+                let complete = SetupChecklist.isComplete(step, state: model.setupState)
                 let next = { if let n = OnboardingStep(rawValue: step.rawValue + 1) { go(to: n) } }
                 if step == .welcome {
                     Button("Get Started", action: next).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                 } else if complete {
                     Button("Continue", action: next).buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
                 } else {
-                    Button(step == .lockKeys ? "Skip" : "Skip for Now", action: next)
+                    Button("Skip for Now", action: next)
                 }
             }
         }
@@ -129,7 +128,7 @@ struct OnboardingView: View {
 private struct StepRail: View {
     let current: OnboardingStep
     let visited: Set<OnboardingStep>
-    let status: InstallStatus
+    let state: SetupState
     let select: (OnboardingStep) -> Void
 
     var body: some View {
@@ -165,8 +164,8 @@ private struct StepRail: View {
 
     private func isDone(_ s: OnboardingStep) -> Bool {
         switch s {
-        case .welcome, .firstScene, .lockKeys: return visited.contains(s) && s != current && SetupChecklist.isComplete(s, status: status)
-        case .screenSaver, .lock: return SetupChecklist.isComplete(s, status: status)
+        case .welcome, .firstScene: return visited.contains(s) && s != current
+        case .screenSaver, .lock: return SetupChecklist.isComplete(s, state: state)
         }
     }
 
@@ -328,13 +327,13 @@ private struct ScreenSaverPage: View {
 
     var body: some View {
         let status = model.installStatus
-        let checks = SetupChecklist.checks(for: .screenSaver, status: status)
+        let checks = SetupChecklist.checks(for: .screenSaver, state: model.setupState)
         VStack(alignment: .leading, spacing: 20) {
             PageHeader(title: "Make LivePaper your screen saver",
                        text: "On macOS the lock screen shows the screen saver that is running, so LivePaper's scenes play as your screen saver. Your current choice is backed up first.")
             CheckCard(checks: checks) { _ in EmptyView() }
             let guided = needsGuidedSelection && status.saverInstalled && !status.saverSelected
-            if !SetupChecklist.isComplete(.screenSaver, status: status) && !guided {
+            if !SetupChecklist.isComplete(.screenSaver, state: model.setupState) && !guided {
                 HStack(spacing: 10) {
                     Button {
                         Task { needsGuidedSelection = !(await model.makeLivePaperScreenSaver()) }
@@ -472,25 +471,26 @@ private struct LockPage: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let status = model.installStatus
         VStack(alignment: .leading, spacing: 20) {
             PageHeader(title: "Lock with your scene",
-                       text: "macOS shows the screen saver on the lock screen only if it is already running when the Mac locks. LivePaper's helper gives you a shortcut that starts your scene first, then locks.")
-            CheckCard(checks: SetupChecklist.checks(for: .lock, status: status)) { check in
+                       text: "macOS shows the screen saver on the lock screen only if it is already running when the Mac locks. LivePaper can make your usual lock keys start the scene first.")
+            CheckCard(checks: SetupChecklist.checks(for: .lock, state: model.setupState)) { check in
                 switch (check.id, check.state) {
-                case (.helper, .needed):
-                    Button("Start Helper") { Task { await model.registerHelper() } }
+                case (.lockKeys, .needed):
+                    Button("Turn On") { model.setLockKeysShowScene(true) }
                         .buttonStyle(.borderedProminent)
-                        .disabled(model.isInstallBusy)
                 case (.password, .needed):
                     Button("Open Lock Screen Settings") { SystemActions.openLockScreenSettings() }
+                case (.helper, .needed):
+                    Button("Start Helper") { Task { await model.registerHelper() } }
+                        .disabled(model.isInstallBusy)
                 default:
                     EmptyView()
                 }
             }
             if let hotkey = model.sharedState.lock.hotkey {
                 HStack(spacing: 8) {
-                    Text("Your lock shortcut:")
+                    Text("Extra lock shortcut:")
                     Text(HotkeyRecorder.display(hotkey))
                         .font(.body.monospaced().weight(.semibold))
                         .padding(.horizontal, 8)
@@ -500,60 +500,10 @@ private struct LockPage: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-        }
-    }
-}
-
-// MARK: - Lock keys (optional)
-
-private struct LockKeysPage: View {
-    @Environment(AppModel.self) private var model
-
-    var body: some View {
-        let status = model.installStatus
-        let lock = model.sharedState.lock
-        VStack(alignment: .leading, spacing: 20) {
-            PageHeader(title: "Use your usual lock keys",
-                       text: "Optional. \u{2303}\u{2318}Q and the lock key lock instantly and show the plain wallpaper. LivePaper can catch them and lock with your scene instead.")
-            VStack(spacing: 0) {
-                SwitchRow(title: "Use \u{2303}\u{2318}Q for LivePaper lock",
-                          detail: "The standard Lock Screen shortcut shows your scene too.",
-                          isOn: Binding(get: { lock.takeOverSystemLock }, set: { v in model.updateLock { $0.takeOverSystemLock = v } }))
-                Divider().padding(.vertical, 10)
-                SwitchRow(title: "Use the lock key",
-                          detail: "The Touch ID / lock key in the top-right corner of the keyboard.",
-                          isOn: Binding(get: { lock.takeOverLockKey }, set: { v in model.updateLock { $0.takeOverLockKey = v } }))
-            }
-            .padding(14)
-            .card(cornerRadius: 10)
-            CheckCard(checks: SetupChecklist.checks(for: .lockKeys, status: status)) { _ in
-                if !status.accessibilityTrusted {
-                    Button("Open Accessibility Settings") { model.openAccessibilitySettings() }
-                }
-            }
-            Text("Catching keys needs Accessibility access. If the helper ever stops, the keys simply work as they always did.")
+            Text("Closing the lid or letting the display sleep still locks to the wallpaper. Nothing here needs special permissions, and Uninstall puts the lock keys back as they were.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
-        }
-    }
-}
-
-/// Title + explanation on the left, a switch on the right (like a grouped Form row).
-private struct SwitchRow: View {
-    let title: String
-    let detail: String
-    @Binding var isOn: Bool
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                Text(detail).font(.callout).foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            Toggle(title, isOn: $isOn)
-                .labelsHidden()
-                .toggleStyle(.switch)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

@@ -71,7 +71,10 @@ enum ServiceFactory {
         let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0-dev"
         let appPath = (!mock && bundle.bundleURL.pathExtension == "app") ? bundle.bundleURL.path : nil
         let stateURL = LPPaths.stateFile
-        return AppEnvironment(isMock: mock, defaults: defaults, stateURL: stateURL,
+        // LPPaths already points at the scratch root in mock mode (redirectPaths runs first).
+        let lockPreference: BoolPreference = mock ? InMemoryBoolPreference() : LoginWindowLockPreference()
+        let lockTakeover = LockTakeover(preference: lockPreference, backupURL: LPPaths.backups.appendingPathComponent("loginwindow-lock.json"))
+        return AppEnvironment(isMock: mock, defaults: defaults, lockTakeover: lockTakeover, stateURL: stateURL,
                               saveState: { try $0.save(to: stateURL) }, previewCacheDirectory: cache,
                               appVersion: version, appBundlePath: appPath)
     }

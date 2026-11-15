@@ -64,7 +64,7 @@ private struct ScreenSaverSettingsTab: View {
         let status = model.installStatus
         Form {
             Section {
-                ForEach(SetupChecklist.checks(for: .screenSaver, status: status)) { SetupCheckRow(check: $0) }
+                ForEach(SetupChecklist.checks(for: .screenSaver, state: model.setupState)) { SetupCheckRow(check: $0) }
                 if !(status.saverInstalled && status.saverUpToDate && status.saverSelected) {
                     HStack {
                         Button("Make LivePaper My Screen Saver") {
@@ -114,68 +114,53 @@ private struct LockSettingsTab: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        let status = model.installStatus
-        let lock = model.sharedState.lock
+        let checks = SetupChecklist.checks(for: .lock, state: model.setupState)
         Form {
+            Section {
+                Toggle(isOn: Binding(get: { model.lockKeysShowScene }, set: { model.setLockKeysShowScene($0) })) {
+                    Text("Use \u{2303}\u{2318}Q and the lock key for LivePaper lock")
+                    Text("Also Apple menu \u{203A} Lock Screen. Your Mac starts the scene, then locks.")
+                }
+                ForEach(checks.filter { $0.id == .password }) { check in
+                    HStack {
+                        SetupCheckRow(check: check)
+                        Spacer()
+                        if check.state == .needed {
+                            Button("Open Lock Screen Settings\u{2026}") { SystemActions.openLockScreenSettings() }
+                        }
+                    }
+                }
+            } header: {
+                Text("Lock keys")
+            } footer: {
+                Text("macOS normally locks straight to the wallpaper. With this on it starts your screen saver first, so the lock screen shows your scene. Closing the lid or letting the display sleep still shows the wallpaper. No permissions are needed, and uninstalling LivePaper restores the previous behaviour.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
             Section {
                 LabeledContent("Lock shortcut") {
                     HotkeyRecorderView(hotkey: Binding(get: { model.sharedState.lock.hotkey },
                                                        set: { key in model.updateLock { $0.hotkey = key } }))
                 }
-                Text("Starts your scene and locks your Mac, so the lock screen shows the scene instead of the plain wallpaper. Needs no special permissions.")
-                    .font(.callout).foregroundStyle(.secondary)
-                ForEach(SetupChecklist.checks(for: .lock, status: status)) { check in
+                ForEach(checks.filter { $0.id == .helper }) { check in
                     HStack {
                         SetupCheckRow(check: check)
                         Spacer()
-                        switch (check.id, check.state) {
-                        case (.helper, .needed):
+                        if check.state == .needed {
                             Button("Start Helper") { Task { await model.registerHelper() } }
                                 .disabled(model.isInstallBusy)
-                        case (.password, .needed):
-                            Button("Open Lock Screen Settings\u{2026}") { SystemActions.openLockScreenSettings() }
-                        default:
-                            EmptyView()
                         }
                     }
                 }
             } header: {
-                Text("LivePaper lock")
-            }
-            Section {
-                Toggle(isOn: Binding(get: { lock.takeOverSystemLock },
-                                     set: { v in model.updateLock { $0.takeOverSystemLock = v } })) {
-                    Text("Use \u{2303}\u{2318}Q for LivePaper lock")
-                    Text("The standard Lock Screen shortcut shows your scene too.")
-                }
-                Toggle(isOn: Binding(get: { lock.takeOverLockKey },
-                                     set: { v in model.updateLock { $0.takeOverLockKey = v } })) {
-                    Text("Use the lock key")
-                    Text("The Touch ID / lock key in the top-right corner of the keyboard shows your scene.")
-                }
-                if (lock.takeOverSystemLock || lock.takeOverLockKey) && !status.accessibilityTrusted {
-                    Label("These need Accessibility access before they take effect.", systemImage: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                }
-                ForEach(SetupChecklist.checks(for: .lockKeys, status: status)) { check in
-                    HStack {
-                        SetupCheckRow(check: check)
-                        Spacer()
-                        if !status.accessibilityTrusted {
-                            Button("Open Accessibility Settings\u{2026}") { model.openAccessibilitySettings() }
-                        }
-                    }
-                }
-            } header: {
-                Text("System lock keys")
+                Text("Extra shortcut")
             } footer: {
-                Text("macOS locks immediately when you use its own lock keys, before any screen saver can start, so the lock screen shows the plain wallpaper. With these on, the LivePaper helper catches the keys and runs its own lock instead. If the helper isn't running, the keys work exactly as before. Apple menu \u{203A} Lock Screen always uses the plain lock.")
+                Text("A shortcut of your choice that starts your scene and locks, provided by the LivePaper helper.")
                     .font(.callout).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .formStyle(.grouped)
-        .frame(minHeight: 520)
+        .frame(minHeight: 440)
     }
 }
 
