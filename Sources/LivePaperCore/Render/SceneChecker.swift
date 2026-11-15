@@ -3,6 +3,7 @@
 //
 // The report is read by AI agents as much as by people, so every problem is one sentence that says
 // what is wrong, where (size, time), by how much, and what to do about it.
+import Darwin
 import Foundation
 
 /// Budgets and thresholds a scene must meet. Luminance is mean Rec. 709 luma, 0–255.
@@ -112,6 +113,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         let pkg = package.standardizedFileURL
         let checkDir = pkg.appendingPathComponent(Self.checkDirectory)
         try Self.resetCheckDirectory(checkDir)
+        try Self.verifyCheckDirectory(checkDir)
         let manifest: SceneManifest
         do {
             manifest = try SceneCompiler.loadManifest(pkg)
@@ -128,6 +130,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
 
         let html = checkDir.appendingPathComponent(Self.compiledFile)
         progress?("compiling \(pkg.lastPathComponent)")
+        try Self.verifyCheckDirectory(checkDir)
         do {
             try compiler.compile(package: pkg, to: html)
         } catch let e as SceneCompileError {
@@ -345,17 +348,65 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
 
     // MARK: - Output
 
-    /// Removes what a previous check wrote (only our own files; anything else is left alone).
+    /// Makes `dir` (a package's `.check`) a real directory and removes what a previous check wrote
+    /// (only our own files; anything else is left alone).
+    ///
+    /// The checker runs with the user's full rights, including on packages an AI agent just left
+    /// behind or that came from elsewhere, so it never follows symbolic links here: a `.check` that
+    /// is a link (or any other non-directory) is removed itself — never what it points to — and
+    /// replaced by a new directory; inside it only regular files with our names are deleted, through
+    /// the directory's descriptor, so a link swapped in meanwhile can't redirect the deletes.
     static func resetCheckDirectory(_ dir: URL) throws {
-        let fm = FileManager.default
-        try fm.createDirectory(at: dir, withIntermediateDirectories: true)
-        for name in (try? fm.contentsOfDirectory(atPath: dir.path)) ?? []
-        where name.hasSuffix(".png") || name == reportFile || name == compiledFile {
-            try? fm.removeItem(at: dir.appendingPathComponent(name))
+        var st = stat()
+        if lstat(dir.path, &st) == 0, (st.st_mode & S_IFMT) != S_IFDIR {
+            guard unlink(dir.path) == 0 || errno == ENOENT else { throw posixError("remove \(dir.path)") }
+        }
+        if mkdir(dir.path, 0o755) != 0, errno != EEXIST { throw posixError("create \(dir.path)") }
+        let fd = open(dir.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw posixError("open \(dir.path)") }
+        defer { close(fd) }
+        for name in directoryEntries(fd) where name.hasSuffix(".png") || name == reportFile || name == compiledFile {
+            var entry = stat()
+            guard fstatat(fd, name, &entry, AT_SYMLINK_NOFOLLOW) == 0 else { continue }
+            let type = entry.st_mode & S_IFMT
+            // Our outputs are regular files; a link with one of their names is removed itself.
+            if type == S_IFREG || type == S_IFLNK { _ = unlinkat(fd, name, 0) }
         }
     }
 
+    /// Throws unless `dir` is a real directory directly inside its package (no symbolic link
+    /// anywhere between the package and it), i.e. writing into it can't land somewhere else.
+    static func verifyCheckDirectory(_ dir: URL) throws {
+        let parent = dir.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
+        let real = dir.resolvingSymlinksInPath().standardizedFileURL.path
+        guard FileOps.isRealDirectory(dir), real == (parent as NSString).appendingPathComponent(dir.lastPathComponent) else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(ELOOP), userInfo: [NSLocalizedDescriptionKey:
+                "\(dir.path) is not a plain directory inside the scene package (a symbolic link?); LivePaper won't write there"])
+        }
+    }
+
+    private static func directoryEntries(_ fd: Int32) -> [String] {
+        let dup = dup(fd)
+        guard dup >= 0, let dirp = fdopendir(dup) else { if dup >= 0 { close(dup) }; return [] }
+        defer { closedir(dirp) }
+        var names: [String] = []
+        while let entry = readdir(dirp) {
+            let name = withUnsafePointer(to: entry.pointee.d_name) {
+                $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) { String(cString: $0) }
+            }
+            if name != "." && name != ".." { names.append(name) }
+        }
+        return names
+    }
+
+    private static func posixError(_ what: String) -> NSError {
+        let code = errno
+        return NSError(domain: NSPOSIXErrorDomain, code: Int(code),
+                       userInfo: [NSLocalizedDescriptionKey: "Could not \(what): \(String(cString: strerror(code)))"])
+    }
+
     private func finish(_ report: CheckReport, checkDir: URL, package: URL, manifest: SceneManifest?) throws -> CheckReport {
+        try Self.verifyCheckDirectory(checkDir)
         try Self.write(report, to: checkDir.appendingPathComponent(Self.reportFile))
         if report.passed, manifest?.kind == .web {
             try Self.recordPerformance(report, package: package)

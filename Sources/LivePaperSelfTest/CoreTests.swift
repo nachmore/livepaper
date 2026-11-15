@@ -958,6 +958,42 @@ extension SelfTests {
                 try expectEqual(events.last, .failed("Fake Codex exited with status 1: Request exceeds the maximum allowed size"))
             }
         },
+        TestCase(name: "core.ai.session.symlinked-candidate") {
+            // The agent swaps parts of its candidate for symlinks before it exits. LivePaper's own
+            // check and clean-up run outside any agent sandbox, so they must not follow them.
+            try CoreSandbox.with("session-symlink") { sb in
+                let fm = FileManager.default
+                let victim = sb.root.appendingPathComponent("Pictures")
+                for name in ["photo.png", "report.json", "scene.html"] { try sb.write("mine", to: victim.appendingPathComponent(name)) }
+                let checker = SceneChecker(compiler: SceneCompiler(), render: RuntimeTests.FakeRender())
+                let (linkedCheck, h1) = try sessionFixture(sb, checker: checker, agent: """
+                printf 'LivePaper.scene({ draw(lp) { lp.ctx.fillRect(0, 0, lp.w, lp.h); } });\\n' > scene/scene.js
+                rm -rf scene/.check
+                ln -s '\(victim.path)' scene/.check
+                """)
+                let last = try collect(try linkedCheck.start(.create(prompt: "x"), harness: h1, model: nil)).last
+                try expect({ if case .failed(let m) = last { return m.contains("symbolic link") }; return false }(), "\(String(describing: last))")
+                try expectEqual(children(victim), ["photo.png", "report.json", "scene.html"])
+                for name in ["photo.png", "report.json", "scene.html"] { try expectEqual(read(victim.appendingPathComponent(name)), "mine") }
+
+                // scene/ itself replaced by a link to another scene package: its history must survive
+                // the clean-up of "scratch files" that precedes import.
+                let lib = sb.makeLibrary()
+                let other = try lib.createWebScene(name: "Other", description: "")
+                try SceneHistory.append(SceneHistoryEntry(action: .create), to: other.packageURL)
+                try sb.write("jpg", to: other.packageURL.appendingPathComponent("thumbnail.jpg"))
+                let before = children(other.packageURL)
+                let (linkedScene, h2) = try sessionFixture(sb, library: lib, agent: """
+                printf '// other v2\\n' > '\(other.packageURL.path)/scene.js'
+                rm -rf scene
+                ln -s '\(other.packageURL.path)' scene
+                """)
+                let last2 = try collect(try linkedScene.start(.create(prompt: "x"), harness: h2, model: nil)).last
+                try expect({ if case .failed(let m) = last2 { return m.contains("symbolic link") }; return false }(), "\(String(describing: last2))")
+                try expectEqual(children(other.packageURL), before)
+                try expect(fm.fileExists(atPath: other.packageURL.appendingPathComponent("history.jsonl").path))
+            }
+        },
         TestCase(name: "core.ai.session.renderer-first") {
             // With the real checker, the session makes sure a render server listens before the agent
             // starts, so the agent's `livepaper` never has to launch LivePaperRenderd itself.

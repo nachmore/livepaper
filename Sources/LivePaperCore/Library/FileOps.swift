@@ -88,6 +88,21 @@ enum FileOps {
         do { try fm.linkItem(at: source, to: destination) } catch { try fm.copyItem(at: source, to: destination) }
     }
 
+    /// True for a real directory: not a symlink to one.
+    static func isRealDirectory(_ url: URL) -> Bool {
+        var st = stat()
+        return lstat(url.path, &st) == 0 && (st.st_mode & S_IFMT) == S_IFDIR
+    }
+
+    /// `root` itself if it is a symbolic link, else the first symbolic link inside it (see
+    /// `firstSymlink(in:)`, which would walk the link's target instead).
+    static func firstSymlink(atOrIn root: URL) -> URL? {
+        var st = stat()
+        guard lstat(root.path, &st) == 0 else { return nil }
+        if (st.st_mode & S_IFMT) == S_IFLNK { return root }
+        return firstSymlink(in: root)
+    }
+
     /// The first symbolic link found inside `root` (packages must be self-contained: a link could
     /// smuggle arbitrary files into the published screen saver).
     static func firstSymlink(in root: URL) -> URL? {

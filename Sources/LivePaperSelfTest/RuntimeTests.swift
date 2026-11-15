@@ -26,6 +26,7 @@ extension SelfTests {
             TestCase(name: "runtime.check.startFailureCollapses", run: RuntimeTests.checkStartFailure),
             TestCase(name: "runtime.check.writesReportAndPerformance", run: RuntimeTests.checkWritesFiles),
             TestCase(name: "runtime.check.compileFailureSkipsRendering", run: RuntimeTests.checkCompileFailure),
+            TestCase(name: "runtime.check.symlinkedCheckDirectory", run: RuntimeTests.checkSymlinkedCheckDirectory),
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
             TestCase(name: "runtime.client.waitsForServerHoldingLock", run: RuntimeTests.clientWaitsForLockHolder),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
@@ -341,6 +342,37 @@ enum RuntimeTests {
         try expectEqual(perf?["energyMw"] as? Double, 70)
         try expect(perf?["checkedAt"] is String, "checkedAt")
         try expectEqual(try SceneManifest.load(package: pkg).performance?.benchMs, 2.5)
+    }
+
+    /// A package whose .check is a symlink (planted by an agent, or shipped in a downloaded package)
+    /// must not make the checker delete or overwrite files wherever the link points.
+    static func checkSymlinkedCheckDirectory() throws {
+        let fm = FileManager.default
+        let pkg = try package("linked", js: minimalScene)
+        let victim = try tempDir("victim")
+        defer { try? fm.removeItem(at: victim); try? fm.removeItem(at: pkg.deletingLastPathComponent()) }
+        for (name, text) in [("photo.png", "my photo"), ("report.json", "my report"), ("scene.html", "my page"), ("keep.txt", "keep")] {
+            try Data(text.utf8).write(to: victim.appendingPathComponent(name))
+        }
+        try fm.createSymbolicLink(at: pkg.appendingPathComponent(".check"), withDestinationURL: victim)
+        let fake = FakeRender()
+        let report = try blocking { try await SceneChecker(compiler: SceneCompiler(), render: fake).check(package: pkg, options: CheckOptions(quick: true)) }
+        try expect(report.passed, "\(report.problems)")
+        for (name, text) in [("photo.png", "my photo"), ("report.json", "my report"), ("scene.html", "my page"), ("keep.txt", "keep")] {
+            try expectEqual((try? String(contentsOf: victim.appendingPathComponent(name), encoding: .utf8)) ?? "(deleted)", text)
+        }
+        try expectEqual(try fm.contentsOfDirectory(atPath: victim.path).sorted(), ["keep.txt", "photo.png", "report.json", "scene.html"])
+        // The link was replaced by a real directory that holds this check's output.
+        let check = pkg.appendingPathComponent(".check")
+        try expectEqual((try fm.attributesOfItem(atPath: check.path))[.type] as? FileAttributeType, .typeDirectory)
+        try expect(fm.fileExists(atPath: check.appendingPathComponent("report.json").path), "report written into the real .check")
+        try expect(fake.requests.allSatisfy { ($0.out ?? check.path).hasPrefix(check.path + "/") || $0.out == nil }, "stills go to the real .check")
+
+        // A .check that holds a symlink named like our output: the link goes, its target stays.
+        let target = victim.appendingPathComponent("photo.png")
+        try fm.createSymbolicLink(at: check.appendingPathComponent("1512x982@2-t4.png"), withDestinationURL: target)
+        _ = try blocking { try await SceneChecker(compiler: SceneCompiler(), render: fake).check(package: pkg, options: CheckOptions(quick: true)) }
+        try expectEqual((try? String(contentsOf: target, encoding: .utf8)) ?? "(deleted)", "my photo")
     }
 
     static func checkCompileFailure() throws {
