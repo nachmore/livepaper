@@ -54,7 +54,10 @@ struct ScenePreview: View {
         switch item.manifest.kind {
         case .video:
             if let video = videoURL {
+                // The file keeps its name (video.mov) when the scene is replaced, so the view is
+                // keyed on the manifest too: a new version gets a new player and its own fit.
                 LivePreviewRepresentable(content: .video(video, fit: item.manifest.video?.fit ?? .fill), cornerRadius: cornerRadius)
+                    .id(videoKey)
             }
         case .web:
             if let compiledHTML {
@@ -72,6 +75,10 @@ struct ScenePreview: View {
     }
 
     private var compileKey: String { "\(item.id)#\(item.manifest.updated?.timeIntervalSince1970 ?? 0)#\(livePreviewsEnabled)" }
+
+    private var videoKey: String {
+        "\(item.id)#\(item.manifest.updated?.timeIntervalSince1970 ?? 0)#\(item.manifest.video?.file ?? "")#\(item.manifest.video?.fit.rawValue ?? "")"
+    }
 
     private var videoURL: URL? {
         guard let file = item.manifest.video?.file else { return nil }

@@ -223,18 +223,17 @@ public final class LibraryService: LibraryServicing, @unchecked Sendable {
             return .same(item)
         }
         guard url.pathExtension.lowercased() == SceneManifest.packageExtension, let manifest = try? validatedPackage(at: url) else { return nil }
-        let preferred = SceneManifest.isValidID(manifest.id) ? manifest.id : SceneManifest.slug(from: manifest.name)
-        // 2. A scene with the same contents: the one with the package's id first, then the ids an
-        //    earlier import of it would have got (`id-2`, …), then any other; user scenes before
-        //    built-ins (the order `scenes()` returns).
-        func rank(_ item: SceneItem) -> Int { item.id == preferred ? 0 : item.id.hasPrefix(preferred + "-") ? 1 : 2 }
-        let ordered = all.enumerated().sorted { (rank($0.element), $0.offset) < (rank($1.element), $1.offset) }.map(\.element)
-        for item in ordered where ScenePackageComparison.sameScene(item.packageURL, item.manifest, url, manifest) {
-            return .same(item)
+        // 2. A scene with the same contents; 3. another version of a user scene with that id.
+        return ScenePackageComparison.match(url, manifest, in: all)
+    }
+
+    public func openPackage(at url: URL) throws -> SceneOpenResult {
+        // One step under the lock: a second open of the same new package (a double-click while the
+        // first copy is still running, two copies opened together) finds the first one's import.
+        try withLock {
+            if let match = try? existingScene(matching: url) { return .existing(match) }
+            return .imported(try importPackage(at: url))
         }
-        // 3. A user scene with that id whose contents differ.
-        if let item = all.first(where: { $0.id == preferred && !$0.isBuiltin }) { return .otherVersion(item) }
-        return nil
     }
 
     /// The file system's identity for a file (same file ⇔ equal), whatever path or case was used.

@@ -414,6 +414,7 @@ extension SelfTests {
         func replaceContents(id: String, with package: URL) throws -> SceneItem { try base.replaceContents(id: id, with: package) }
         func importPackage(at url: URL) throws -> SceneItem { try base.importPackage(at: url) }
         func existingScene(matching url: URL) throws -> SceneImportMatch? { try base.existingScene(matching: url) }
+        func openPackage(at url: URL) throws -> SceneOpenResult { try base.openPackage(at: url) }
         func exportPackage(id: String, to url: URL) throws { try base.exportPackage(id: id, to: url) }
     }
 }

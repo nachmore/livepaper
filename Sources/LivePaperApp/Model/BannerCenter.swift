@@ -42,7 +42,7 @@ final class BannerCenter {
         banners.removeAll { $0.title == title && $0.message == message }
         let banner = Banner(style: style, title: title, message: message, actions: actions)
         banners.append(banner)
-        if banners.count > BannerCenter.maxVisible { banners.removeFirst(banners.count - BannerCenter.maxVisible) }
+        trimToMaxVisible()
         if let delay = banner.autoDismissAfter {
             let id = banner.id
             Task { @MainActor [weak self] in
@@ -60,4 +60,18 @@ final class BannerCenter {
     }
 
     func dismiss(_ id: UUID) { banners.removeAll { $0.id == id } }
+
+    /// Over the cap, older banners make room for the newest in this order: ones that go away on
+    /// their own anyway, then ones without actions, then the oldest. So a warning waiting for a
+    /// decision (Replace with This Version, …) survives a burst of "Imported" banners from opening
+    /// many packages at once.
+    private func trimToMaxVisible() {
+        while banners.count > BannerCenter.maxVisible {
+            let older = banners.indices.dropLast()
+            let doomed = older.first { banners[$0].autoDismissAfter != nil }
+                ?? older.first { banners[$0].actions.isEmpty }
+                ?? banners.startIndex
+            banners.remove(at: doomed)
+        }
+    }
 }

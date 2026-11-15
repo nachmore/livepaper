@@ -60,7 +60,8 @@ final class MockLibraryService: LibraryServicing, @unchecked Sendable {
     let userRoot: URL
     let builtinRoot: URL
     private let pace: Double
-    private let lock = NSLock()
+    /// Recursive: openPackage holds it across existingScene and importPackage.
+    private let lock = NSRecursiveLock()
     private let fm = FileManager.default
 
     init(root: URL, pace: Double) throws {
@@ -221,10 +222,13 @@ final class MockLibraryService: LibraryServicing, @unchecked Sendable {
         let path = url.standardizedFileURL.resolvingSymlinksInPath().path
         if let item = all.first(where: { $0.packageURL.standardizedFileURL.resolvingSymlinksInPath().path == path }) { return .same(item) }
         guard let m = try? SceneManifest.load(package: url) else { return nil }
-        // Like LibraryService: the scene with the package's id first (sample scenes share contents).
-        let ordered = all.filter { $0.id == m.id } + all.filter { $0.id != m.id }
-        if let item = ordered.first(where: { ScenePackageComparison.sameScene($0.packageURL, $0.manifest, url, m) }) { return .same(item) }
-        return all.first(where: { $0.id == m.id && !$0.isBuiltin }).map { .otherVersion($0) }
+        return ScenePackageComparison.match(url, m, in: all)
+    }
+
+    func openPackage(at url: URL) throws -> SceneOpenResult {
+        lock.lock(); defer { lock.unlock() }
+        if let match = try? existingScene(matching: url) { return .existing(match) }
+        return .imported(try importPackage(at: url))
     }
 
     func exportPackage(id: String, to url: URL) throws {
