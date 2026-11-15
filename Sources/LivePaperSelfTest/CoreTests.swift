@@ -1191,6 +1191,32 @@ extension SelfTests {
                 try expect(!exists(sb.support), "support directory deleted")
             }
         },
+        TestCase(name: "core.install.lock-takeover") {
+            try CoreSandbox.with("takeover") { sb in
+                let prefs = FakePreferences()
+                let system = FakeSystem()
+                let key = "com.apple.loginwindow|immediateLockLaunchesScreenSaver|false"
+                let make = { (dryRun: Bool) in
+                    InstallService(paths: sb.installPaths(), publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
+                                   preferences: prefs, dryRun: dryRun)
+                }
+                let service = make(false)
+                try expect(!service.systemLockTakeoverEnabled)
+                try make(true).setSystemLockTakeover(true)
+                try expect(prefs.values[key] == nil, "dry run changes nothing")
+                try service.setSystemLockTakeover(true)
+                try expect(service.systemLockTakeoverEnabled)
+                try service.setSystemLockTakeover(false)
+                try expect(prefs.values[key] == nil && !exists(sb.installPaths().defaultsBackup), "back to unset, backup gone")
+                // The user had it on before LivePaper: off means off, uninstall puts "on" back.
+                prefs.values[key] = true
+                try service.setSystemLockTakeover(true)
+                try service.setSystemLockTakeover(false)
+                try expect(!service.systemLockTakeoverEnabled)
+                try service.uninstall(removeLibrary: true)
+                try expectEqual(prefs.values[key] as? Bool, true)
+            }
+        },
         TestCase(name: "core.install.wallpaper-store") {
             try CoreSandbox.with("store") { sb in
                 try writeStore(sb.store, selected: true)

@@ -370,6 +370,51 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
     }
 
+    /// Puts one preference changed with `changeSystemDefault` back to its value from before
+    /// LivePaper and forgets the backup. No-op if LivePaper never changed it.
+    public func restoreSystemDefault(domain: String, key: String, currentHost: Bool = false) throws {
+        let matches = { (c: DefaultsChange) in c.domain == domain && c.key == key && c.currentHost == currentHost }
+        try perform("Restore \(domain) \(key)", skipIf: { loadDefaultsChanges().contains(where: matches) ? nil : "not changed by LivePaper" }) {
+            var changes = loadDefaultsChanges()
+            guard let index = changes.firstIndex(where: matches) else { return "not changed by LivePaper" }
+            guard preferences.set(Self.previousValue(changes[index]), domain: domain, key: key, currentHost: currentHost) else {
+                throw InstallError.commandFailed("Restoring \(domain) \(key)", "the preference couldn't be saved")
+            }
+            changes.remove(at: index)
+            if changes.isEmpty { try FileOps.removeIfPresent(paths.defaultsBackup) } else { try saveDefaultsChanges(changes) }
+            return nil
+        }
+    }
+
+    // MARK: - Lock takeover (ARCHITECTURE §7)
+
+    /// With this loginwindow preference on, ⌃⌘Q, the Apple-menu Lock Screen item and the Touch ID /
+    /// lock key start the screen saver before locking, so the lock screen shows the scene. It is a
+    /// plain user preference (no permissions needed); loginwindow picks it up without a logout.
+    public static let lockTakeoverDomain = "com.apple.loginwindow"
+    public static let lockTakeoverKey = "immediateLockLaunchesScreenSaver"
+
+    public var systemLockTakeoverEnabled: Bool {
+        (preferences.value(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey, currentHost: false) as? NSNumber)?.boolValue == true
+    }
+
+    /// On: sets the preference (remembering the previous value for uninstall). Off: restores the
+    /// value from before LivePaper, and turns it off explicitly if that was "on".
+    public func setSystemLockTakeover(_ enabled: Bool) throws {
+        if enabled {
+            try changeSystemDefault(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey, to: true)
+            return
+        }
+        try restoreSystemDefault(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey)
+        if systemLockTakeoverEnabled {
+            try changeSystemDefault(domain: Self.lockTakeoverDomain, key: Self.lockTakeoverKey, to: false)
+        }
+    }
+
+    private static func previousValue(_ change: DefaultsChange) -> Any? {
+        change.previous.flatMap { (try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any])?["value"] }
+    }
+
     private func loadDefaultsChanges() -> [DefaultsChange] {
         guard let data = try? Data(contentsOf: paths.defaultsBackup) else { return [] }
         return (try? JSONDecoder().decode([DefaultsChange].self, from: data)) ?? []
@@ -385,10 +430,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         let changes = loadDefaultsChanges()
         var failed: [String] = []
         for change in changes.reversed() {
-            let previous = change.previous.flatMap {
-                (try? PropertyListSerialization.propertyList(from: $0, format: nil) as? [String: Any])?["value"]
-            }
-            if !preferences.set(previous, domain: change.domain, key: change.key, currentHost: change.currentHost) {
+            if !preferences.set(Self.previousValue(change), domain: change.domain, key: change.key, currentHost: change.currentHost) {
                 failed.append("\(change.domain) \(change.key)")
             }
         }
