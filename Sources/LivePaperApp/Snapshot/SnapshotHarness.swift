@@ -84,6 +84,24 @@ enum SnapshotHarness {
         shoot("detail-dark", main, dark: true, MainWindowView())
         model.libraryPath = []
 
+        // The full-screen preview's overlay (hint bar, message) over a scene's thumbnail; the live
+        // scene itself isn't rendered here.
+        func fullScreen(_ name: String, _ size: CGSize, scene: String?, position: String?, canStep: Bool, clockOn: Bool = true,
+                        lock: Bool = false, message: String? = nil) {
+            let state = FullScreenPreviewState()
+            state.sceneName = scene.flatMap { model.entry(id: $0)?.manifest.name } ?? "Neon Rain"
+            state.position = position
+            state.hintItems = FullScreenHint.items(canStep: canStep, clockOn: clockOn, lockPreview: lock)
+            state.hintVisible = true
+            state.message = message
+            shoot(name, size, dark: true, FullScreenSnapshot(entry: scene.flatMap { model.entry(id: $0) }, state: state))
+        }
+        fullScreen("fullscreen-hint", CGSize(width: 1512, height: 982), scene: "aurora-lake", position: "2 of 9", canStep: true)
+        fullScreen("fullscreen-lock-wide", CGSize(width: 2560, height: 720), scene: "paper-lanterns", position: nil, canStep: false,
+                   clockOn: false, lock: true)
+        fullScreen("fullscreen-error", CGSize(width: 1280, height: 800), scene: nil, position: "3 of 3", canStep: true,
+                   message: "\u{201C}Neon Rain\u{201D} can\u{2019}t be shown: scene.js has a syntax error on line 42 (Unexpected token \u{2018})\u{2019}).")
+
         model.section = .create
         shoot("create-light", main, dark: false, MainWindowView())
         shoot("create-narrow-dark", CGSize(width: 880, height: 760), dark: true, MainWindowView())
@@ -142,6 +160,25 @@ enum SnapshotHarness {
 
         running?.cancel()
         print("snapshot: wrote PNGs to \(dir.path)")
+    }
+
+    /// A scene's thumbnail standing in for the live scene, with the full-screen overlay on top.
+    private struct FullScreenSnapshot: View {
+        let entry: LibraryEntry?
+        let state: FullScreenPreviewState
+
+        // The overlay sets the size; the fill-scaled thumbnail behind it must not (at 32:9 it is taller).
+        var body: some View {
+            FullScreenPreviewOverlay(state: state)
+                .background {
+                    Color.black.overlay {
+                        if let entry {
+                            ThumbnailImage(url: entry.thumbnail, maxPixel: 2560, placeholderSymbol: entry.badge.symbolName)
+                        }
+                    }
+                    .clipped()
+                }
+        }
     }
 
     private static func clearBanners(_ model: AppModel) {

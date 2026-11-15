@@ -19,6 +19,17 @@ struct PlaylistView: View {
         }
         .formStyle(.grouped)
         .navigationTitle("Screen Saver")
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button(action: previewPlaylist) {
+                    Label("Preview Playlist", systemImage: FullScreenPreviewSymbol.name)
+                        .labelStyle(.titleAndIcon)
+                }
+                .help("Show these scenes full screen in order, as the screen saver will (\u{21E7}\u{2318}F); \u{2190} \u{2192} change the scene")
+                .disabled(!canPreview)
+            }
+        }
+        .focusedSceneValue(\.fullScreenPreview, canPreview ? FullScreenPreviewAction(run: previewPlaylist) : nil)
         .safeAreaInset(edge: .bottom, spacing: 0) { publishBar }
         .onAppear(perform: syncFromModel)
         .onChange(of: model.playlist) { old, new in
@@ -33,6 +44,11 @@ struct PlaylistView: View {
     }
 
     private var available: [String] { model.availableSceneIDs }
+
+    /// The draft as it stands (unsaved changes included): its scenes, order, clock and profile.
+    private var canPreview: Bool { !draft.effectiveSceneIDs(available: available).isEmpty }
+
+    private func previewPlaylist() { FullScreenPreviewLauncher.previewPlaylist(draft.settings, model: model) }
 
     // MARK: skipped scenes
 

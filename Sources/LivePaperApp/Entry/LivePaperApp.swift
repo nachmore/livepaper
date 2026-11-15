@@ -171,6 +171,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct LivePaperCommands: Commands {
     let model: AppModel
     @Environment(\.openWindow) private var openWindow
+    /// Published by the focused library card, the scene detail view or the Screen Saver screen.
+    @FocusedValue(\.fullScreenPreview) private var fullScreenPreview
 
     private var currentScene: LibraryEntry? {
         guard model.section == .library, let id = model.libraryPath.last else { return nil }
@@ -194,6 +196,10 @@ struct LivePaperCommands: Commands {
             Button("Reload Library") { Task { await model.reloadLibrary() } }.keyboardShortcut("r")
         }
         CommandMenu("Scene") {
+            Button("Preview Full Screen") { fullScreenPreview?.run() }
+                .keyboardShortcut("f", modifiers: [.command, .shift])
+                .disabled(fullScreenPreview == nil)
+            Divider()
             Button("Use as Screen Saver") { if let e = currentScene { Task { await model.useAsScreenSaver(e.id) } } }
                 .disabled(currentScene == nil)
             Button("Add to Playlist") { if let e = currentScene { Task { await model.addToPlaylist(e.id) } } }
