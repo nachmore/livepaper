@@ -24,14 +24,15 @@ enum FullScreenPreviewLauncher {
 
     /// An AI session's result before it is accepted (it still lives in the session's workspace).
     /// Modifying a library scene: ← → switch between the new version and the current one. Once the
-    /// result is accepted it is a library scene and previews like one.
+    /// result is accepted and in the library it is a library scene and previews like one
+    /// (FullScreenPreviewRequest.aiResult).
     static func previewCandidate(_ item: SceneItem, session: AISessionModel, model: AppModel) {
-        if case .accepted(let id) = session.resolution {
-            previewScene(id, model: model)
-            return
-        }
-        guard let request = FullScreenPreviewRequest.candidate(item, session: session.id, replacing: session.targetSceneID,
-                                                               available: model.availableSceneIDs, playlist: model.playlist)
+        var accepted: String?
+        if case .accepted(let id) = session.resolution { accepted = id }
+        guard let request = FullScreenPreviewRequest.aiResult(item, session: session.id, accepted: accepted,
+                                                              replacing: session.targetSceneID,
+                                                              visible: model.visibleEntries.map(\.id),
+                                                              available: model.availableSceneIDs, playlist: model.playlist)
         else { return }
         FullScreenPreviewController.shared.present(request, model: model, origin: .window(currentWindowFrame))
     }

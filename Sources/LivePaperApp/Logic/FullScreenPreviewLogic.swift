@@ -1,8 +1,9 @@
 // FullScreenPreviewLogic — the rules of the full-screen preview that don't need AppKit: which scenes
-// ← → step through and in what order, when the hint bar and the pointer show, which screen the
-// preview covers, the hint text, and the runtime configuration web scenes get (the saver's own,
-// from Saver/SaverLogic.swift). Foundation + CoreGraphics only; also compiled into LivePaperSelfTest
-// via Sources/LivePaperSelfTest/AppLogic/ (where SaverLogic.swift is compiled in as well).
+// ← → step through and in what order, what the keys do, when the hint bar and the pointer show,
+// which screen the preview covers, the hint text, and the runtime configuration web scenes get (the
+// saver's own, from Saver/SaverLogic.swift). Foundation + CoreGraphics only; also compiled into
+// LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/ (where SaverLogic.swift is compiled in
+// as well).
 import CoreGraphics
 import Foundation
 import LivePaperCore
@@ -78,6 +79,19 @@ struct FullScreenPreviewSequence: Equatable, Sendable {
         return true
     }
 
+    /// ← → and a playlist's own scene change, with the library possibly changed under the preview:
+    /// drops the scenes that are gone (`retain`), then moves by `delta`. When the scene on screen is
+    /// one of them, `retain` has already moved on to the next remaining scene, and that counts as
+    /// the first step forward: → shows the scene after the deleted one (not the one after that), ←
+    /// the one before it, and either shows the last scene left. Returns false when nothing is left.
+    @discardableResult
+    mutating func advance(_ delta: Int, available: Set<String>) -> Bool {
+        let shown = current
+        guard retain(available: available) else { return false }
+        step(current == shown ? delta : (delta > 0 ? delta - 1 : delta))
+        return true
+    }
+
     /// The library's order as its grid shows it (search and kind filter applied, the user's scenes
     /// before the built-in ones). A scene the grid doesn't show (a filter hides it) steps through the
     /// whole library instead, so ← → never jump to an unrelated subset.
@@ -120,8 +134,10 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
     }
 
     /// One library scene, stepping through the library order, with the saved playlist's clock and
-    /// performance settings (what the saver would use for it).
+    /// performance settings (what the saver would use for it). nil when `start` isn't in the
+    /// library (any more, or not yet): the preview never opens on some other scene instead.
     static func library(start: String, visible: [String], all: [String], playlist: PlaylistSettings) -> FullScreenPreviewRequest? {
+        guard all.contains(start) else { return nil }
         let ids = FullScreenPreviewSequence.libraryOrder(visible: visible, all: all, start: start)
         guard let sequence = FullScreenPreviewSequence(ids: ids, start: start, source: .library) else { return nil }
         return FullScreenPreviewRequest(sequence: sequence, showClock: playlist.showClock, performance: playlist.performance)
@@ -149,6 +165,18 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
         return FullScreenPreviewRequest(sequence: sequence, showClock: playlist.showClock, performance: playlist.performance,
                                         candidates: [FullScreenPreviewCandidate(key: key, item: item, label: label)],
                                         labels: compare.map { [$0: "Current version"] } ?? [:])
+    }
+
+    /// What an AI session's result panel previews: once the result is accepted and in the library,
+    /// that library scene (it previews like one). Otherwise the result itself from the session's
+    /// workspace, which accepting copies rather than moves — also right after "Add to Library",
+    /// before the library has reloaded, and after the accepted scene was deleted again.
+    static func aiResult(_ item: SceneItem, session: String, accepted: String?, replacing current: String?,
+                         visible: [String], available: [String], playlist: PlaylistSettings) -> FullScreenPreviewRequest? {
+        if let accepted, available.contains(accepted) {
+            return library(start: accepted, visible: visible, all: available, playlist: playlist)
+        }
+        return candidate(item, session: session, replacing: current, available: available, playlist: playlist)
     }
 
     /// The sequence id of a session's candidate. Scene ids are slugs (letters, digits, dashes), so
@@ -248,6 +276,98 @@ enum FullScreenHint {
     }
 }
 
+// MARK: - Keys
+
+/// A key-down as the preview sees it (the parts of an NSEvent its rules look at).
+struct FullScreenKeyPress: Equatable, Sendable {
+    var keyCode: UInt16
+    /// `charactersIgnoringModifiers`, lowercased.
+    var key = ""
+    var command = false
+    var shift = false
+    var control = false
+    var option = false
+    /// An auto-repeat of a key that is being held.
+    var isRepeat = false
+}
+
+/// What a key does in the preview.
+enum FullScreenKeyAction: Equatable, Sendable {
+    case close
+    case step(Int)
+    case toggleClock
+    case toggleLockUI
+    /// The preview's key, but nothing to do (a held key repeating; ⌘ shortcuts that would otherwise
+    /// act on the window behind the preview).
+    case swallow
+    /// Not the preview's: plain keys are dropped quietly, ⌘ shortcuts go on to the menu.
+    case pass
+}
+
+/// The preview's keys. Every key acts once per press: the repeats of a held key are swallowed, so
+/// holding the Space that opened the preview doesn't close it, and holding C or L doesn't flicker
+/// the clock (each flip re-lays out a web scene).
+enum FullScreenKeys {
+    static let escape: UInt16 = 53, space: UInt16 = 49, left: UInt16 = 123, right: UInt16 = 124
+
+    /// Plain keys: Esc and Space (as in Quick Look) close, ← → step, C and L toggle (also with ⇧).
+    static func keyDown(_ press: FullScreenKeyPress) -> FullScreenKeyAction {
+        let action: FullScreenKeyAction
+        switch press.keyCode {
+        case escape, space: action = .close
+        case left: action = .step(-1)
+        case right: action = .step(1)
+        default:
+            guard !press.command, !press.control, !press.option else { return .pass }
+            switch press.key {
+            case "c": action = .toggleClock
+            case "l": action = .toggleLockUI
+            default: return .pass
+            }
+        }
+        return press.isRepeat ? .swallow : action
+    }
+
+    /// ⌘ shortcuts: ⌘. and ⌘W close (so does ⇧⌘F, which opened it); Quit and Hide go on to the
+    /// menu; every other one is swallowed so nothing acts on the window behind the preview.
+    static func keyEquivalent(_ press: FullScreenKeyPress) -> FullScreenKeyAction {
+        guard press.command else { return .pass }
+        switch (press.shift, press.control, press.option, press.key) {
+        case (false, false, false, "."), (false, false, false, "w"), (true, false, false, "f"):
+            return press.isRepeat ? .swallow : .close
+        case (false, false, false, "q"), (false, false, false, "h"), (false, false, true, "h"):
+            return .pass
+        default:
+            return .swallow
+        }
+    }
+}
+
+/// The rest of the key press that closed the preview. The preview acts on key-down, so a key held a
+/// moment longer goes on repeating after the preview has gone, into whatever has the keyboard next:
+/// a library card's Space or the menu's ⇧⌘F would open the preview again, and the app the preview
+/// gives focus back to would type the repeats. So the key's repeats are dropped until it is
+/// released, and focus goes back only then.
+struct FullScreenClosingKey: Equatable, Sendable {
+    let keyCode: UInt16
+
+    enum Verdict: Equatable, Sendable {
+        /// A repeat of the closing key: dropped.
+        case drop
+        /// Delivered as usual.
+        case deliver
+        /// The press is over — its key-up, or another key pressed (which ends the repeating; also
+        /// when the key-up went elsewhere): delivered, and the wait ends.
+        case released
+    }
+
+    func verdict(keyUp: Bool, keyCode: UInt16, isRepeat: Bool) -> Verdict {
+        if keyUp { return keyCode == self.keyCode ? .released : .deliver }
+        guard isRepeat else { return .released }
+        return keyCode == self.keyCode ? .drop : .deliver
+    }
+}
+
 // MARK: - Which screen
 
 /// Where the request came from, for choosing the screen.
@@ -307,14 +427,38 @@ enum FullScreenSceneConfig {
         return config.userScript + "window.LIVEPAPER_CONFIG.lockUI = \(lockUI);"
     }
 
-    /// Brings a running page to the preview's clock and lock-UI state (C and L). Like every saver
-    /// host call it is a no-op until the runtime exists; the host re-applies it on `ready`.
-    static func stateScript(showClock: Bool, lockUI: Bool) -> String {
-        SaverJS.hostCall("config", "{\"clock\":\(showClock)}") + SaverJS.lockUI(lockUI)
+    /// Brings a running page to the preview's whole state: the clock and lock-UI state (C and L)
+    /// and the power state with the profile's fps and render scale for it (AC ⇄ battery and Low
+    /// Power Mode changes, which the saver follows with the same `LivePaper.host.power` call). Like
+    /// every saver host call it is a no-op until the runtime exists; the host re-applies it on
+    /// `ready`, replacing any earlier one — hence always the whole state.
+    static func stateScript(showClock: Bool, lockUI: Bool, performance: LPPerformanceProfile, power: SaverPowerState) -> String {
+        let profile = SaverPerformance.resolve(performance, power: power, preview: false)
+        return SaverJS.hostCall("config", "{\"clock\":\(showClock)}") + SaverJS.lockUI(lockUI)
+            + SaverJS.power(SaverPowerUpdate(power: power, profile: profile))
     }
 
     /// Whether a native (video) clock shows: the clock is on and the (simulated) lock UI isn't up.
     static func nativeClockVisible(showClock: Bool, lockUI: Bool) -> Bool { showClock && !lockUI }
+
+    /// The file a video scene plays, checked the way publishing checks it (scene.json is untrusted
+    /// input), so the preview never plays a video the saver wouldn't get: a plain file name inside
+    /// the package (LibraryService.isPlainFileName — no path, not hidden), a regular file (not a
+    /// symlink), in a format the saver plays (no extension counts as .mov, as publishing does).
+    /// nil: the saver won't show the scene; publishing leaves it out and says why.
+    static func videoFile(_ name: String?, in package: URL, isRegularFile: (URL) -> Bool = isRegularFile) -> URL? {
+        guard let name, !name.isEmpty, !name.contains("/"), !name.hasPrefix(".") else { return nil }
+        let url = package.appendingPathComponent(name)
+        let ext = url.pathExtension.isEmpty ? "mov" : url.pathExtension.lowercased()
+        guard LPPlaylistEntry.videoExtensions.contains(ext), isRegularFile(url) else { return nil }
+        return url
+    }
+
+    /// A regular file itself, not a symlink to one (URL resource values don't follow the last link).
+    static func isRegularFile(_ url: URL) -> Bool {
+        let values = try? url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+        return values?.isRegularFile == true && values?.isSymbolicLink != true
+    }
 
     /// A fresh scene seed, in the saver's range (1…100 000), as a new saver session would pick.
     static func randomSeed() -> Int { Int.random(in: 1...100_000) }
