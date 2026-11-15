@@ -227,23 +227,26 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         func collectErrors(_ r: RenderResponse) {
             for e in r.errors where !jsErrors.contains(e) { jsErrors.append(e) }
         }
-        // Findings that repeat across frames are grouped into one sentence each.
-        var failures: [String: [CheckFrame]] = [:], failureOrder: [String] = []
+        // Findings that repeat across frames are grouped into one sentence each, naming where they
+        // happened (a frame's label: "1512x982@2 t=12"; for motion just the size, as the server's
+        // note names the moment).
+        var failures: [String: [String]] = [:], failureOrder: [String] = []
         var neverStarted = false
-        func renderFailed(_ r: RenderResponse, _ what: String, _ frame: CheckFrame) {
+        func renderFailed(_ r: RenderResponse, _ what: String, place: String,
+                          replay: String = "Stills replay update() in 1/30 s steps up to t, so t=600 runs it 18,000 times") {
             let why = r.note ?? "no reason given"
             // The runtime gave up because of JS errors (reported on their own below).
             if !r.ready && !r.errors.isEmpty && why.hasPrefix(startFailureNote) { neverStarted = true; return }
             let key: String
             if !r.ready && why.contains("timed out") {
-                key = "The scene did not finish loading for the \(what) (\(why)). Stills replay update() in 1/30 s steps up " +
-                      "to t, so t=600 runs it 18,000 times: keep update() cheap, or compute state from lp.t."
+                key = "The scene did not finish loading for the \(what) (\(why)). \(replay): keep update() cheap, or compute state from lp.t."
             } else {
                 key = "The \(what) failed: \(why)."
             }
             if failures[key] == nil { failureOrder.append(key) }
-            failures[key, default: []].append(frame)
+            failures[key, default: []].append(place)
         }
+        func renderFailed(_ r: RenderResponse, _ what: String, _ frame: CheckFrame) { renderFailed(r, what, place: frame.label) }
 
         // Stills + luminance.
         var tooBright: [(CheckFrame, Double)] = [], clockTooBright: [(CheckFrame, Double)] = []
@@ -295,7 +298,12 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             collectErrors(r)
             guard r.ok else {
                 // A render server from before the motion op can't even decode the request.
-                if (r.note ?? "").hasPrefix("bad request") { motionUnsupported = r.note } else { renderFailed(r, "motion measurement", frame) }
+                if (r.note ?? "").hasPrefix("bad request") { motionUnsupported = r.note } else {
+                    // Motion never samples the frame's t: each moment gets its own page, stepped up to it.
+                    renderFailed(r, "motion measurement", place: frame.sizeLabel,
+                                 replay: "The motion check replays update() in 1/30 s steps up to each sampled moment " +
+                                         "(\(MotionAnalysis.timeList(plan.motionTimes)))")
+                }
                 continue
             }
             guard let m = r.motion else { motionUnsupported = "it returned no motion data"; continue }
@@ -353,7 +361,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             }
         }
 
-        for key in failureOrder { problems.append(key.dropLast() + " (at \(frameList(failures[key] ?? [])))." ) }
+        for key in failureOrder { problems.append(key.dropLast() + " (at \(labelList(failures[key] ?? [])))." ) }
         if neverStarted {
             problems.append("Because of the JavaScript errors above the scene never started, so nothing could be rendered or measured.")
         }
@@ -505,8 +513,9 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
     static func fmt(_ x: Double, _ digits: Int = 0) -> String { String(format: "%.\(digits)f", x) }
 
     /// "1512x982@2 t=4, 1512x982@2 t=30 and 3 more"
-    static func frameList(_ frames: [CheckFrame]) -> String {
-        let labels = frames.map(\.label)
+    static func frameList(_ frames: [CheckFrame]) -> String { labelList(frames.map(\.label)) }
+
+    static func labelList(_ labels: [String]) -> String {
         guard labels.count > 3 else { return labels.joined(separator: ", ") }
         return labels.prefix(3).joined(separator: ", ") + " and \(labels.count - 3) more"
     }

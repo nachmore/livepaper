@@ -285,6 +285,9 @@ frames 1, 3, 7 and 15 frames (1/30 s each), 0.5 s, 2 s and 5 s later, tile by ti
 across). A tile *moves* when it visibly changes: ignoring differences of up to 2/255 (dithering),
 its pixels change by at least 0.5/255 on average, or at least 3 % of them by 8/255 or more. A very
 faint haze or a single tiny dot crossing a big empty tile barely registers — make motion visible.
+Flicker compares the frames of the short burst after t with each other (1, 2, 4 and 8 frames
+apart): a flash, a strobe or per-frame random values show up there, and so does a whole-frame fade
+or pan fast enough to change a tile by about 12/255 within a quarter second.
 
 | Measure | Fails when | Aim |
 |---|---|---|
@@ -292,7 +295,7 @@ faint haze or a single tiny dot crossing a big empty tile barely registers — m
 | Coverage within 2 s | | ≥ 25 % |
 | Regions (thirds × thirds) with motion | fewer than 5 of 9 | all 9 |
 | Busy: share of the frame changing strongly within 0.5 s | > 50 % | close to 0 |
-| Flicker: share of the frame jumping between successive frames | > 30 % | close to 0 |
+| Flicker: share of the frame changing sharply within a fraction of a second | > 30 % | close to 0 |
 
 `report.json` has them under `motion` (one entry per size): `coverage5s`, `coverage2s`, `spread`
 (regions with motion / 9), `stillRegions`, `busy`, `flicker`, `map` — one string per tile row, top
@@ -474,7 +477,7 @@ your own scenes, built-in scenes ship theirs).
 Thresholds: frame brightness ≤ 165/255 on average; behind the clock ≤ 120/255; not black at every
 sampled time; not black at t = 600 when earlier stills aren't; motion within 5 s over ≥ 25 % of the
 frame and in ≥ 5 of its 9 regions; ≤ 50 % of the frame changing strongly within 0.5 s; ≤ 30 %
-jumping between successive frames (§7).
+changing sharply within a fraction of a second (flicker, §7).
 
 ## 15. Host bridge (for host developers)
 

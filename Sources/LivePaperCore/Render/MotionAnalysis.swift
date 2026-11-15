@@ -7,10 +7,13 @@
 //   coverage   how much of the frame visibly changes within 2 s / 5 s
 //   spread     whether that change reaches every part of the frame (nine regions: thirds × thirds)
 //   busy       how much of the frame changes strongly within half a second (fast, large motion)
-//   flicker    how much of the frame jumps between successive frames (strobing, flashing)
+//   flicker    how much of the frame changes sharply within a fraction of a second: between the
+//              successive frames of a short burst, 1, 2, 4 and 8 frames apart (flashing, strobing,
+//              per-frame noise — and fast whole-frame fades or pans)
 //
 // and `verdict` turns those into actionable problems and warnings. Foundation only: the tile maths
-// runs in the render server on snapshots and in the self tests on synthetic frames.
+// (and the heat map's pixels) runs in the render server on snapshots and in the self tests on
+// synthetic frames.
 import Foundation
 
 // MARK: - Measurement (what the render server returns)
@@ -38,7 +41,8 @@ public struct MotionSample: Codable, Sendable, Equatable {
     public var t: Double
     public var gaps: [MotionGap]
     /// Per tile, the largest change between successive frames of a short burst after t (frame offsets
-    /// `MotionAnalysis.flickerOffsets`): high across the frame means flashing or strobing.
+    /// `MotionAnalysis.flickerOffsets`, 1–8 frames apart): high across the frame means flashing,
+    /// strobing or a fast whole-frame change.
     public var flicker: MotionTiles
     public init(t: Double, gaps: [MotionGap], flicker: MotionTiles) { self.t = t; self.gaps = gaps; self.flicker = flicker }
 }
@@ -80,7 +84,8 @@ public struct MotionSummary: Codable, Sendable, Equatable {
     public var stillRegions: [String]
     /// Largest share of the frame, over the sampled moments, that changes strongly within 0.5 s.
     public var busy: Double
-    /// Largest share of the frame, over the sampled moments, that jumps between successive frames.
+    /// Largest share of the frame, over the sampled moments, that changes sharply between successive
+    /// burst frames (1–8 frames apart).
     public var flicker: Double
     /// The sampled moment `flicker` comes from.
     public var flickerAt: Double?
@@ -123,8 +128,9 @@ public struct MotionBudgets: Sendable, Equatable {
     /// Too busy: tiles whose change within 0.5 s reaches `busyLevel` cover more than `maxBusy` of the frame.
     public var busyLevel: Double = 16
     public var maxBusy: Double = 0.5
-    /// Flicker: tiles whose largest frame-to-frame change reaches `flickerLevel` cover more than
-    /// `maxFlicker` of the frame.
+    /// Flicker: tiles whose largest change between successive burst frames (1, 2, 4 and 8 frames
+    /// apart, `MotionAnalysis.flickerOffsets`) reaches `flickerLevel` cover more than `maxFlicker` of
+    /// the frame.
     public var flickerLevel: Double = 10
     public var maxFlicker: Double = 0.3
     public init() {}
@@ -136,7 +142,9 @@ public enum MotionAnalysis {
     /// Scene time advances in fixed steps of 1/frameRate s, exactly as stills replay update().
     public static let frameRate = 30.0
     /// Frame offsets of the flicker burst after each sampled moment. Successive spans of 1, 2, 4 and
-    /// 8 frames: a periodic flash can't hide between them (it would have to repeat every frame).
+    /// 8 frames: a periodic flash can't hide between them (it would have to repeat every frame), and
+    /// together they cover the first half second for coverage too. A span is up to 8 frames, so
+    /// `flicker` measures sharp change within about a quarter second, not single-frame steps only.
     public static let flickerOffsets = [0, 1, 3, 7, 15]
     /// Differences up to this many code values are ignored by `level` (dithering, resampling noise).
     public static let noiseFloor = 2
@@ -213,23 +221,71 @@ public enum MotionAnalysis {
     /// skipped). `frames[0]` is the frame at t.
     public static func sample(t: Double, gaps: [Double], frames: [Int: [UInt8]], width: Int, height: Int,
                               cols: Int, rows: Int) -> MotionSample {
-        let zero = MotionTiles(level: Array(repeating: 0, count: cols * rows), area: Array(repeating: 0, count: cols * rows))
-        guard let base = frames[0] else { return MotionSample(t: t, gaps: [], flicker: zero) }
-        var result: [MotionGap] = []
-        for gap in gaps {
-            guard let later = frames[Self.frames(gap)] else { continue }
-            result.append(MotionGap(gap: gap, tiles: tiles(base, later, width: width, height: height, cols: cols, rows: rows)))
+        var builder = SampleBuilder(t: t, gaps: gaps, width: width, height: height, cols: cols, rows: rows)
+        for offset in frames.keys.sorted() { builder.add(offset: offset, frame: frames[offset]!) }
+        return builder.finish()
+    }
+
+    /// Builds one sample from frames fed in ascending offset order, as the render server snapshots
+    /// them: each frame is compared as it arrives, so only the frame at t and the previous burst
+    /// frame are kept (not every snapshot of the sample). Same result as `sample`.
+    public struct SampleBuilder {
+        public let t: Double
+        public let gaps: [Double]
+        let width: Int, height: Int, cols: Int, rows: Int
+        private var base: [UInt8]?
+        private var previous: (offset: Int, frame: [UInt8])?
+        private var gapTiles: [Int: MotionTiles] = [:]
+        private var flicker: MotionTiles
+
+        public init(t: Double, gaps: [Double], width: Int, height: Int, cols: Int, rows: Int) {
+            self.t = t; self.gaps = gaps; self.width = width; self.height = height; self.cols = cols; self.rows = rows
+            let n = max(0, cols * rows)
+            flicker = MotionTiles(level: Array(repeating: 0, count: n), area: Array(repeating: 0, count: n))
         }
-        var flicker = zero
-        for (from, to) in zip(flickerOffsets, flickerOffsets.dropFirst()) {
-            guard let a = frames[from], let b = frames[to] else { continue }
-            let step = tiles(a, b, width: width, height: height, cols: cols, rows: rows)
-            for i in flicker.level.indices {
-                flicker.level[i] = max(flicker.level[i], step.level[i])
-                flicker.area[i] = max(flicker.area[i], step.area[i])
+
+        /// The frame `offset` frames (1/frameRate s each) after t; offsets must ascend.
+        public mutating func add(offset: Int, frame: [UInt8]) {
+            if offset == 0 { base = frame }
+            guard let base else { return }
+            if gaps.contains(where: { MotionAnalysis.frames($0) == offset }) {
+                gapTiles[offset] = MotionAnalysis.tiles(base, frame, width: width, height: height, cols: cols, rows: rows)
             }
+            guard let k = flickerOffsets.firstIndex(of: offset) else { return }
+            // Only successive burst offsets are compared (a missing one leaves its spans out).
+            if k > 0, let previous, previous.offset == flickerOffsets[k - 1] {
+                let step = MotionAnalysis.tiles(previous.frame, frame, width: width, height: height, cols: cols, rows: rows)
+                for i in flicker.level.indices {
+                    flicker.level[i] = max(flicker.level[i], step.level[i])
+                    flicker.area[i] = max(flicker.area[i], step.area[i])
+                }
+            }
+            previous = k + 1 < flickerOffsets.count ? (offset, frame) : nil
         }
-        return MotionSample(t: t, gaps: result, flicker: flicker)
+
+        public func finish() -> MotionSample {
+            guard base != nil else {
+                let n = max(0, cols * rows)
+                return MotionSample(t: t, gaps: [], flicker: MotionTiles(level: Array(repeating: 0, count: n), area: Array(repeating: 0, count: n)))
+            }
+            let result = gaps.compactMap { gap in gapTiles[MotionAnalysis.frames(gap)].map { MotionGap(gap: gap, tiles: $0) } }
+            return MotionSample(t: t, gaps: result, flicker: flicker)
+        }
+    }
+
+    /// At most this many tiles × sampled moments × (gaps + 1) per motion request: each carries a
+    /// `level` and an `area` number, and the whole response must fit in one line a client reads
+    /// (LineSocket.maxLineBytes, 1 MiB; at most ~13 bytes per tile-pair, so ≤ 0.85 MiB). The
+    /// default request (16×9 tiles, 4 moments, 3 gaps) needs 2,304.
+    public static let maxTileValues = 65_536
+
+    /// Whether a motion response for this grid and sampling stays within `maxTileValues`.
+    public static func responseFits(cols: Int, rows: Int, times: Int, gaps: Int) -> Bool {
+        let (g, o0) = gaps.addingReportingOverflow(1)
+        let (a, o1) = cols.multipliedReportingOverflow(by: rows)
+        let (b, o2) = a.multipliedReportingOverflow(by: times)
+        let (c, o3) = b.multipliedReportingOverflow(by: g)
+        return !o0 && !o1 && !o2 && !o3 && c >= 0 && c <= maxTileValues
     }
 
     // MARK: Summary
@@ -342,28 +398,38 @@ extension MotionAnalysis {
         let stat = summaries.filter(tooStatic)
         // The worst size speaks for all of them; the others are named in passing.
         if let worst = stat.min(by: { ($0.coverage5s, $0.movingRegions) < ($1.coverage5s, $1.movingRegions) }) {
-            let others = stat.filter { $0.size != worst.size }.map { "\($0.size): \(percent($0.coverage5s)), \($0.movingRegions) of 9 regions" }
+            let others = stat.filter { $0.size != worst.size }.map {
+                "\($0.size): \(percent($0.coverage5s, limit: b.minCoverage5s)), \($0.movingRegions) of 9 regions"
+            }
             problems.append(staticProblem(worst, others: others, b))
         }
         if let worst = summaries.filter({ $0.busy > b.maxBusy }).max(by: { $0.busy < $1.busy }) {
-            problems.append("Too busy at \(worst.size): \(percent(worst.busy)) of the frame changes strongly within half a second (at most " +
+            problems.append("Too busy at \(worst.size): \(percent(worst.busy, limit: b.maxBusy)) of the frame changes strongly within half a second (at most " +
                             "\(percent(b.maxBusy))). Fast or large motion across the whole frame is tiring on a lock screen: slow it " +
                             "down — drift layers by a few pixels per second, use cycles of 10–60 s, move big layers only slightly and keep " +
                             "quick motion to small accents.")
         }
         if let worst = summaries.filter({ $0.flicker > b.maxFlicker }).max(by: { $0.flicker < $1.flicker }) {
             let when = worst.flickerAt.map { " (t = \(num($0)) s)" } ?? ""
-            problems.append("Flickers at \(worst.size)\(when): \(percent(worst.flicker)) of the frame jumps in brightness or colour from one " +
-                            "frame to the next (at most \(percent(b.maxFlicker))), which reads as strobing. Change large areas only " +
-                            "gradually: ease brightness and colour changes over a second or more, never pick per-frame random values " +
+            // Measured over burst spans of up to 8 frames (flickerOffsets), so a fast whole-frame fade
+            // or pan counts as well as a flash: the advice covers both (SCENE_API §7, principle 6).
+            problems.append("Flickers at \(worst.size)\(when): \(percent(worst.flicker, limit: b.maxFlicker)) of the frame changes sharply in " +
+                            "brightness or colour within a fraction of a second (at most \(percent(b.maxFlicker))), which reads as " +
+                            "flashing or strobing. Change large areas only gradually: fade whole-frame brightness and colour over a " +
+                            "couple of seconds or more, move large high-contrast shapes slowly, never pick per-frame random values " +
                             "(Math.random() or lp.rand() inside draw) for big shapes or the background, and derive shimmer from smooth " +
                             "noise of lp.t (LivePaper.util.noise2/fbm2).")
         }
         if stat.isEmpty {
-            if let s = summaries.min(by: { $0.coverage5s < $1.coverage5s }),
-               s.coverage5s < b.goodCoverage5s || s.coverage2s < b.goodCoverage2s {
-                warnings.append("Motion is on the subtle side at \(s.size): \(percent(s.coverage5s)) of the frame changes within 5 s and " +
-                                "\(percent(s.coverage2s)) within 2 s. Aim for at least \(percent(b.goodCoverage5s)) within 5 s and " +
+            // Each advice threshold is checked at every size: the lowest 5 s and 2 s coverages may come
+            // from different sizes.
+            if let low5 = summaries.min(by: { $0.coverage5s < $1.coverage5s }), let low2 = summaries.min(by: { $0.coverage2s < $1.coverage2s }),
+               low5.coverage5s < b.goodCoverage5s || low2.coverage2s < b.goodCoverage2s {
+                let five = percent(low5.coverage5s, limit: b.goodCoverage5s), two = percent(low2.coverage2s, limit: b.goodCoverage2s)
+                let numbers = low5.size == low2.size
+                    ? " at \(low5.size): \(five) of the frame changes within 5 s and \(two) within 2 s"
+                    : ": \(five) of the frame changes within 5 s at \(low5.size), and \(two) within 2 s at \(low2.size)"
+                warnings.append("Motion is on the subtle side\(numbers). Aim for at least \(percent(b.goodCoverage5s)) within 5 s and " +
                                 "motion visible within 1–2 s wherever you look (see \(guide)).")
             }
             if let s = summaries.max(by: { $0.stillRegions.count < $1.stillRegions.count }), !s.stillRegions.isEmpty {
@@ -385,14 +451,14 @@ extension MotionAnalysis {
             // Concentrated (a sun, one moon) or thinly scattered (a few small movers everywhere)?
             let total = s.regions.values.reduce(0, +), inMoving = moving.compactMap { s.regions[$0] }.reduce(0, +)
             let concentrated = !moving.isEmpty && (total == 0 || inMoving >= 0.7 * total)
-            head = "Too static at \(s.size): only \(percent(s.coverage5s)) of the frame visibly changes within 5 s (needs at least " +
+            head = "Too static at \(s.size): only \(percent(s.coverage5s, limit: b.minCoverage5s)) of the frame visibly changes within 5 s (needs at least " +
                    "\(percent(b.minCoverage5s))), " +
                    (concentrated ? "almost all of it in the \(list(moving)) — the other \(s.stillRegions.count) of 9 regions " +
                                    "(\(s.stillRegions.joined(separator: ", "))) stay still."
                                  : "in small, scattered spots: \(s.stillRegions.count) of 9 regions (\(s.stillRegions.joined(separator: ", "))) " +
                                    "are still or nearly so.")
         } else if lowCoverage {
-            head = "Too static at \(s.size): only \(percent(s.coverage5s)) of the frame visibly changes within 5 s (needs at least " +
+            head = "Too static at \(s.size): only \(percent(s.coverage5s, limit: b.minCoverage5s)) of the frame visibly changes within 5 s (needs at least " +
                    "\(percent(b.minCoverage5s))); the motion reaches most of the frame but is sparse (small, isolated movers)."
         } else {
             head = "Motion is confined to part of the frame at \(s.size): \(percent(s.coverage5s)) of the frame changes within 5 s, but " +
@@ -414,6 +480,17 @@ extension MotionAnalysis {
         return "\(Int((x * 100).rounded())) %"
     }
 
+    /// `x` as a percentage that stays on its side of `limit`: whole percent, or one decimal when
+    /// rounding would make it read as the limit itself or cross it (0.247 against 25 % is "24.7 %",
+    /// not "25 %"; 0.503 against 50 % is "50.3 %").
+    public static func percent(_ x: Double, limit: Double) -> String {
+        let whole = (x * 100).rounded(), edge = (limit * 100).rounded()
+        guard (x < limit && whole >= edge) || (x > limit && whole <= edge) else { return percent(x) }
+        var tenths = (x * 1000).rounded()
+        if x < limit { tenths = min(tenths, edge * 10 - 1) } else { tenths = max(tenths, edge * 10 + 1) }
+        return String(format: "%.1f %%", max(0, tenths) / 10)
+    }
+
     /// "top-left", "top-left and top", "top-left, top and centre".
     static func list(_ names: [String]) -> String {
         guard names.count > 1 else { return names.first ?? "" }
@@ -424,4 +501,57 @@ extension MotionAnalysis {
     static func timeList(_ times: [Double]) -> String { "t = " + list(times.map(num)) + " s" }
 
     static func num(_ x: Double) -> String { CheckFrame.num(x) }
+}
+
+// MARK: - Heat map
+
+extension MotionAnalysis {
+    /// The pixels of the motion heat map of `livepaper check` (RenderKit's Bitmap.motionHeatmap
+    /// encodes them): the frame `pixels` (premultiplied RGBA, `width * 4` bytes per row) dimmed to
+    /// grey, each tile of a `cols`×`rows` grid tinted by how often it changed within 5 s (`alive`,
+    /// 0–1: blue at some sampled moments, amber at most of them, plain grey never), thin borders
+    /// around every tile (the frame's outer edge included), and tiles that flicker outlined in red —
+    /// a 2 px box on all four sides, inside the tile itself.
+    public static func heatmap(_ pixels: [UInt8], width: Int, height: Int, alive: [Double], flicker: [Bool],
+                               cols: Int, rows: Int) -> [UInt8] {
+        guard width > 0, height > 0, cols > 0, rows > 0, pixels.count >= width * height * 4 else { return pixels }
+        var out = pixels
+        let colOf = (0..<width).map { $0 * cols / width }, rowOf = (0..<height).map { $0 * rows / height }
+        // Per pixel row/column: first (or last) one of its tile, and within two of that edge.
+        func edges(_ i: Int, _ tileOf: [Int]) -> (start: Bool, near: Bool, end: Bool) {
+            let n = tileOf.count, t = tileOf[i]
+            let start = i == 0 || tileOf[i - 1] != t
+            let end = i == n - 1 || tileOf[i + 1] != t
+            let nearStart = start || i == 1 || tileOf[i - 2] != t
+            let nearEnd = end || i == n - 2 || tileOf[i + 2] != t
+            return (start, nearStart || nearEnd, end)
+        }
+        let colEdges = (0..<width).map { edges($0, colOf) }
+        for y in 0..<height {
+            let r = rowOf[y], rowEdge = edges(y, rowOf)
+            for x in 0..<width {
+                let c = colOf[x], tile = r * cols + c, i = (y * width + x) * 4, colEdge = colEdges[x]
+                let luma = 0.2126 * Double(pixels[i]) + 0.7152 * Double(pixels[i + 1]) + 0.0722 * Double(pixels[i + 2])
+                // Lifted and stretched so even a dark scene stays recognisable under the tint.
+                let grey = 40 + 0.8 * luma
+                var rgb = (grey, grey, grey)
+                let a = tile < alive.count ? alive[tile] : 0
+                if a > 0 {
+                    let (tint, k): ((Double, Double, Double), Double) = a >= 0.5 ? ((255, 165, 30), 0.22 + 0.2 * a) : ((70, 150, 255), 0.3)
+                    rgb = (rgb.0 + (tint.0 - rgb.0) * k, rgb.1 + (tint.1 - rgb.1) * k, rgb.2 + (tint.2 - rgb.2) * k)
+                }
+                if tile < flicker.count, flicker[tile], rowEdge.near || colEdge.near {
+                    rgb = (235, 40, 40)
+                } else if rowEdge.start || colEdge.start || y == height - 1 || x == width - 1 {
+                    // Grid lines at each tile's top and left, and closing the frame at the right and bottom.
+                    rgb = (rgb.0 * 0.55, rgb.1 * 0.55, rgb.2 * 0.55)
+                }
+                out[i] = UInt8(max(0, min(255, rgb.0.rounded())))
+                out[i + 1] = UInt8(max(0, min(255, rgb.1.rounded())))
+                out[i + 2] = UInt8(max(0, min(255, rgb.2.rounded())))
+                out[i + 3] = 255
+            }
+        }
+        return out
+    }
 }

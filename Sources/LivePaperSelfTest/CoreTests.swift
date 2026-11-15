@@ -1110,10 +1110,26 @@ extension SelfTests {
         },
         TestCase(name: "core.ai.session.render-relay") {
             // A sandboxed agent's CLI leaves render requests in the spool; the runner relays them
-            // after checking them: LivePaper compiles the scene itself, and every path must stay in
-            // the workspace.
+            // after checking them: LivePaper compiles the scene itself, every path must stay in the
+            // workspace, images are written there by the relay (never by the server, whose rules
+            // admit every AI workspace), and an agent's `timeout` is dropped.
             try CoreSandbox.with("session-relay") { sb in
                 let render = RuntimeTests.FakeRender()
+                render.writesOutputs = true
+                // Another session's workspace, which the agent can read but not write.
+                let theirs = sb.workspaces.appendingPathComponent("other-session/scene/assets")
+                try sb.write("their art", to: theirs.appendingPathComponent("x.png"))
+                // While the "server" renders the t=99 still, the agent swaps a folder it showed the
+                // relay for a link into that other workspace.
+                render.whileRendering = { request in
+                    guard request.t == 99, let sessions = try? FileManager.default.contentsOfDirectory(at: sb.workspaces, includingPropertiesForKeys: nil) else { return }
+                    for ws in sessions {
+                        let d = ws.appendingPathComponent("scene/.check/d")
+                        guard (try? FileManager.default.attributesOfItem(atPath: d.path))?[.type] as? FileAttributeType == .typeDirectory else { continue }
+                        try? FileManager.default.removeItem(at: d)
+                        try? FileManager.default.createSymbolicLink(at: d, withDestinationURL: theirs)
+                    }
+                }
                 let checker = SceneChecker(compiler: SceneCompiler(), render: render)
                 let outside = sb.root.appendingPathComponent("Documents")
                 try sb.write("my thesis", to: outside.appendingPathComponent("thesis.png"))
@@ -1121,7 +1137,10 @@ extension SelfTests {
                 // (id, op, html, scene, out) — the agent writes them as the CLI would and waits for answers.
                 let requests: [(String, String)] = [
                     ("ok", #"{"op":"still","html":"WS/scene/.check/scene.html","width":320,"height":200,"dpr":1,"t":3,"out":"WS/scene/.check/a.png"}"#),
-                    ("bench", #"{"op":"bench","html":"WS/scene/.check/scene.html","frames":10,"out":"OUT/thesis.png"}"#),
+                    ("bench", #"{"op":"bench","html":"WS/scene/.check/scene.html","frames":10,"out":"OUT/thesis.png","timeout":100000000}"#),
+                    ("motion", #"{"op":"motion","html":"WS/scene/.check/scene.html","out":"WS/scene/.check/motion-m.png","timeout":100000000}"#),
+                    ("thumb", #"{"op":"thumbnail","scene":"WS/scene","out":"WS/scene/thumbnail.jpg","timeout":1e8}"#),
+                    ("swap", #"{"op":"still","html":"WS/scene/.check/scene.html","t":99,"out":"WS/scene/.check/d/x.png"}"#),
                     ("outside-out", #"{"op":"still","html":"WS/scene/.check/scene.html","out":"OUT/thesis.png"}"#),
                     ("own-html", #"{"op":"still","html":"WS/scene/evil.html","out":"WS/scene/.check/b.png"}"#),
                     ("outside-scene", #"{"op":"bench","html":"OUT/elsewhere.lpscene/.check/scene.html"}"#),
@@ -1129,7 +1148,7 @@ extension SelfTests {
                     ("not-png", #"{"op":"still","html":"WS/scene/.check/scene.html","out":"WS/scene/notes.docx"}"#),
                     ("shutdown", #"{"op":"shutdown"}"#),
                 ]
-                var agent = "ws=$(pwd -P)\n"
+                var agent = "ws=$(pwd -P)\nmkdir -p \"$ws/scene/.check/d\"\n"
                 for (id, json) in requests {
                     let body = json.replacingOccurrences(of: "WS/", with: "$ws/").replacingOccurrences(of: "OUT/", with: outside.path + "/")
                     agent += "printf '%s' \"\(body.replacingOccurrences(of: "\"", with: "\\\""))\" > \"$\(AISessionPolicy.renderSpoolVariable)/.\(id).tmp\"\n"
@@ -1140,28 +1159,48 @@ extension SelfTests {
                 let handle = try ai.start(.create(prompt: "x"), harness: harness, model: nil)
                 _ = try collect(handle)
                 let ws = AIWorkspace(root: handle.workspace)
+                let wsReal = ws.root.resolvingSymlinksInPath().path
                 func response(_ id: String) throws -> RenderResponse {
                     try JSONDecoder().decode(RenderResponse.self, from: Data(contentsOf: ws.renderSpool.appendingPathComponent(id + ".response.json")))
                 }
-                let ok = try response("ok"), bench = try response("bench")
-                try expect(ok.ok, "\(ok)")
-                try expect(bench.ok, "a bench writes nothing; its stray out is dropped: \(bench)")
+                func inWorkspace(_ path: String?, _ rel: String) -> Bool {
+                    guard let path else { return false }
+                    return URL(fileURLWithPath: path).resolvingSymlinksInPath().path == wsReal + "/" + rel
+                }
+                let ok = try response("ok"), bench = try response("bench"), motion = try response("motion"), thumb = try response("thumb")
+                try expect(ok.ok && inWorkspace(ok.out, "scene/.check/a.png"), "\(ok)")
+                try expectEqual(read(ws.root.appendingPathComponent("scene/.check/a.png")), "image of still t=3")
+                try expect(bench.ok && bench.out == nil, "a bench writes nothing; its stray out is dropped: \(bench)")
+                try expect(motion.ok && inWorkspace(motion.out, "scene/.check/motion-m.png") && motion.motion != nil, "\(motion)")
+                try expectEqual(read(ws.root.appendingPathComponent("scene/.check/motion-m.png")), "image of motion t=0")
+                try expect(thumb.ok && inWorkspace(thumb.out, "scene/thumbnail.jpg"), "\(thumb)")
+                try expectEqual(read(ws.root.appendingPathComponent("scene/thumbnail.jpg")), "image of thumbnail t=0")
+                // The folder swapped for a link after the relay checked it: nothing lands in the other workspace.
+                let swap = try response("swap")
+                try expect(!swap.ok && (swap.note ?? "").contains("LivePaper refused") && (swap.note ?? "").contains("outside this AI session's workspace"),
+                           "\(swap)")
+                try expectEqual(children(theirs), ["x.png"])
+                try expectEqual(read(theirs.appendingPathComponent("x.png")), "their art")
                 for id in ["outside-out", "own-html", "outside-scene", "thumb-outside", "not-png", "shutdown"] {
                     let r = try response(id)
                     try expect(!r.ok && (r.note ?? "").contains("LivePaper refused"), "\(id): \(r.note ?? "-")")
                 }
-                // Only the two valid requests reached the renderer, with LivePaper's own compile of the
-                // scene (outside the workspace) and the workspace output; the bench lost its out.
-                let wsReal = ws.root.resolvingSymlinksInPath().path
-                try expectEqual(render.requests.count, 2)
+                // Only the valid requests reached the renderer, with LivePaper's own compile of the
+                // scene and its own output file (both outside the workspace), and without a timeout.
+                try expectEqual(render.requests.count, 5)
                 for r in render.requests {
-                    let html = r.html ?? ""
-                    try expect(html.hasSuffix(".html") && !html.hasPrefix(ws.root.path) && !html.hasPrefix(wsReal), "compiled privately: \(html)")
-                    try expect(html.contains(WorkspaceBuilder.relayDirectoryNameForTests), html)
+                    if r.op != .thumbnail {
+                        let html = r.html ?? ""
+                        try expect(html.hasSuffix(".html") && !html.hasPrefix(ws.root.path) && !html.hasPrefix(wsReal), "compiled privately: \(html)")
+                        try expect(html.contains(WorkspaceBuilder.relayDirectoryNameForTests), html)
+                    }
+                    if let out = r.out {
+                        try expect(!out.hasPrefix(ws.root.path) && !out.hasPrefix(wsReal) && out.contains(WorkspaceBuilder.relayDirectoryNameForTests),
+                                   "the server writes into the relay's folder: \(out)")
+                    }
+                    try expect(r.timeout == nil, "\(r.op): timeout \(r.timeout ?? 0) relayed")
                 }
-                let still = render.requests.first { $0.op == .still }, benchReq = render.requests.first { $0.op == .bench }
-                try expect(still?.out?.hasSuffix("/scene/.check/a.png") == true && benchReq != nil && benchReq?.out == nil,
-                           "\(render.requests.map { "\($0.op) \($0.out ?? "-")" })")
+                try expect(render.requests.first { $0.op == .bench }?.out == nil, "\(render.requests.map { "\($0.op) \($0.out ?? "-")" })")
                 try expectEqual(read(outside.appendingPathComponent("thesis.png")), "my thesis")
                 try expect(!exists(ws.relayDirectory), "the relay cleans up after the session")
             }

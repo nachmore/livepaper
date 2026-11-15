@@ -41,7 +41,9 @@ final class SceneRenderer {
     }
 
     func perform(_ request: RenderRequest) async -> RenderResponse {
-        let deadline = Date().addingTimeInterval(request.timeout ?? Self.defaultTimeout(request))
+        // The server's own per-op limit; a client's `timeout` is capped (RenderLimits), so no request
+        // can hold the one render slot for long.
+        let deadline = Date().addingTimeInterval(request.serverTimeout)
         do {
             switch request.op {
             case .still: return try await still(request, deadline: deadline)
@@ -55,15 +57,6 @@ final class SceneRenderer {
             return RenderResponse(ok: false, ready: failure.ready, errors: failure.errors, note: failure.message)
         } catch {
             return RenderResponse(ok: false, note: "\(error)")
-        }
-    }
-
-    static func defaultTimeout(_ r: RenderRequest) -> TimeInterval {
-        switch r.op {
-        case .live: return (r.seconds ?? 12) + (r.warmup ?? 3) + 30
-        case .bench: return 90
-        case .motion: return 150
-        default: return 60
         }
     }
 
@@ -136,7 +129,7 @@ final class SceneRenderer {
         let (size, dpr) = try Self.geometry(r)
         let html = try Self.readHTML(r)
         let fps = min(max(r.fps ?? 60, 10), 120), scale = min(max(r.scale ?? 1, 0.25), 1)
-        let warmup = min(max(r.warmup ?? 3, 0), 60), seconds = min(max(r.seconds ?? 12, 1), 600)
+        let warmup = r.liveWarmup, seconds = r.liveSeconds
         let config: [String: Any] = ["fps": fps, "scale": scale, "clock": r.clock ?? true, "dprMax": max(2, dpr), "seed": 1]
         return try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, _ in
             try await Task.sleep(nanoseconds: UInt64(warmup * 1e9))
@@ -161,7 +154,8 @@ final class SceneRenderer {
 
     /// Renders the scene at each sampled moment t and 1, 3, 7, 15 frames and every gap later (one page
     /// per moment, in manual mode: the same 1/30 s replay of update() as stills), and compares the
-    /// frames tile by tile (MotionAnalysis). With `out`, also writes the heat map PNG.
+    /// frames tile by tile as they arrive (MotionAnalysis.SampleBuilder: only the frame at t and the
+    /// previous burst frame are kept). With `out`, also writes the heat map PNG.
     private func motion(_ r: RenderRequest, deadline: Date) async throws -> RenderResponse {
         let (size, dpr) = try Self.geometry(r)
         if r.out != nil { try validateOutput(r) }
@@ -180,6 +174,11 @@ final class SceneRenderer {
             throw RenderFailure("motion \"grid\" must be [cols, rows], each 1–64 and at most the frame's pixels")
         }
         let (cols, rows) = (grid[0], grid[1])
+        // The answer is one line: it must fit what clients read (LineSocket.maxLineBytes).
+        guard MotionAnalysis.responseFits(cols: cols, rows: rows, times: times.count, gaps: gaps.count) else {
+            throw RenderFailure("motion \"grid\" × \"times\" × (\"gaps\" + 1) must be at most \(MotionAnalysis.maxTileValues) tiles " +
+                                "(got \(cols)x\(rows) × \(times.count) × \(gaps.count + 1)); use fewer tiles, moments or gaps")
+        }
         let offsets = MotionAnalysis.offsets(gaps: gaps)
         let clock = r.clock ?? true
         var samples: [MotionSample] = [], errors: [String] = []
@@ -189,22 +188,29 @@ final class SceneRenderer {
             // A fixed clock time keeps scenes that draw their own clock from "moving" when a minute turns.
             let config: [String: Any] = ["manual": true, "t": t, "clock": clock, "debug": false, "dprMax": max(2, dpr), "seed": 1,
                                          "clockTime": Self.fixedClockTime]
-            let (sample, base, seen) = try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, _ in
-                if clock { _ = try await page.evaluate("LivePaper.debug.overlay(false)", deadline: deadline) }
-                var frames: [Int: [UInt8]] = [:], base: Bitmap?, at = 0
-                for offset in offsets {
-                    if offset > at {
-                        _ = try await page.evaluate("(function (n) { for (var i = 0; i < n; i++) LivePaper.host.advance(1 / 30); return n; })(\(offset - at))",
-                                                    deadline: deadline)
-                        at = offset
+            let keepBase = first == nil
+            let sample: MotionSample, base: Bitmap?, seen: [String]
+            do {
+                (sample, base, seen) = try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, _ in
+                    if clock { _ = try await page.evaluate("LivePaper.debug.overlay(false)", deadline: deadline) }
+                    var builder = MotionAnalysis.SampleBuilder(t: t, gaps: gaps, width: pw, height: ph, cols: cols, rows: rows)
+                    var base: Bitmap?, at = 0
+                    for offset in offsets {
+                        if offset > at {
+                            _ = try await page.evaluate("(function (n) { for (var i = 0; i < n; i++) LivePaper.host.advance(1 / 30); return n; })(\(offset - at))",
+                                                        deadline: deadline)
+                            at = offset
+                        }
+                        try await page.nextFrames(deadline: deadline)
+                        let frame = try await page.snapshot(deadline: deadline)
+                        if offset == 0 && keepBase { base = frame }
+                        builder.add(offset: offset, frame: frame.pixels)
                     }
-                    try await page.nextFrames(deadline: deadline)
-                    let frame = try await page.snapshot(deadline: deadline)
-                    if offset == 0 { base = frame }
-                    frames[offset] = frame.pixels
+                    return (builder.finish(), base, page.errors)
                 }
-                let sample = MotionAnalysis.sample(t: t, gaps: gaps, frames: frames, width: pw, height: ph, cols: cols, rows: rows)
-                return (sample, base, page.errors)
+            } catch let f as PageFailure {
+                // Name the moment: each one replays update() up to its own t.
+                throw PageFailure(message: f.message + " (at t = \(Self.format(t)) s)", ready: f.ready, errors: f.errors)
             }
             samples.append(sample)
             if first == nil { first = base }

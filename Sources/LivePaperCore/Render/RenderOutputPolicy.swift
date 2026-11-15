@@ -15,7 +15,8 @@
 // the opened folder's real path (F_GETPATH) is checked against the allowed roots, and the file is
 // created and renamed relative to that descriptor, so swapping a folder for a link mid-request
 // can't redirect the write. An existing destination must be a regular file (never a link or a
-// folder). Foundation/Darwin only: the CLI links this too.
+// folder). RenderRelay writes the images it relays the same way, confined to one AI workspace
+// (`write(_:to:roots:rule:)`). Foundation/Darwin only: the CLI links this too.
 import Darwin
 import Foundation
 
@@ -77,15 +78,33 @@ public struct RenderOutputPolicy: Sendable {
     @discardableResult
     public func write(_ data: Data, for request: RenderRequest) throws -> URL {
         let (parent, name, roots) = try plan(request)
-        let fd = try Self.openConfinedDirectory(parent, roots: roots, out: request.out ?? "")
+        return try Self.write(data, parent: parent, name: name, roots: roots, out: request.out ?? name, rule: Self.rule)
+    }
+
+    /// Writes `data` to the absolute path `out` under the same rules, for another confinement
+    /// (RenderRelay: one AI workspace): the folder it lands in — as opened at write time, symbolic
+    /// links resolved — must lie inside one of `roots` (real paths); `rule` explains a refusal.
+    @discardableResult
+    static func write(_ data: Data, to out: String, roots: [String], rule: String) throws -> URL {
+        guard out.hasPrefix("/"), !out.split(separator: "/").contains(where: { $0 == ".." }) else {
+            throw RenderOutputError("refusing to write \(out): \(rule)")
+        }
+        let url = URL(fileURLWithPath: out).standardizedFileURL
+        let name = url.lastPathComponent
+        guard !name.isEmpty, name != "/" else { throw RenderOutputError("refusing to write \(out): not a file name") }
+        return try write(data, parent: url.deletingLastPathComponent().path, name: name, roots: roots, out: out, rule: rule)
+    }
+
+    private static func write(_ data: Data, parent: String, name: String, roots: [String], out outPath: String, rule: String) throws -> URL {
+        let fd = try openConfinedDirectory(parent, roots: roots, out: outPath, rule: rule)
         defer { close(fd) }
         var st = stat()
         if fstatat(fd, name, &st, AT_SYMLINK_NOFOLLOW) == 0, (st.st_mode & S_IFMT) != S_IFREG {
-            throw RenderOutputError("refusing to write \(request.out ?? name): it exists and is not a regular file")
+            throw RenderOutputError("refusing to write \(outPath): it exists and is not a regular file")
         }
         let tmp = ".\(name).\(getpid()).\(UInt32.random(in: 0...UInt32.max)).tmp"
         let out = openat(fd, tmp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o644)
-        guard out >= 0 else { throw RenderOutputError("cannot write \(request.out ?? name): \(String(cString: strerror(errno)))") }
+        guard out >= 0 else { throw RenderOutputError("cannot write \(outPath): \(String(cString: strerror(errno)))") }
         var ok = true
         data.withUnsafeBytes { raw in
             var offset = 0
@@ -99,9 +118,9 @@ public struct RenderOutputPolicy: Sendable {
         guard ok, renameat(fd, tmp, fd, name) == 0 else {
             let e = errno
             unlinkat(fd, tmp, 0)
-            throw RenderOutputError("cannot write \(request.out ?? name): \(String(cString: strerror(e)))")
+            throw RenderOutputError("cannot write \(outPath): \(String(cString: strerror(e)))")
         }
-        return URL(fileURLWithPath: Self.descriptorPath(fd) ?? parent).appendingPathComponent(name)
+        return URL(fileURLWithPath: descriptorPath(fd) ?? parent).appendingPathComponent(name)
     }
 
     // MARK: - Internals
@@ -136,7 +155,7 @@ public struct RenderOutputPolicy: Sendable {
 
     /// Creates the missing folders of `parent` (only below an ancestor inside a root, checked on each
     /// opened descriptor), opens `parent` and verifies its real location.
-    private static func openConfinedDirectory(_ parent: String, roots: [String], out: String) throws -> Int32 {
+    private static func openConfinedDirectory(_ parent: String, roots: [String], out: String, rule: String) throws -> Int32 {
         var existing = URL(fileURLWithPath: parent)
         var missing: [String] = []
         while !FileManager.default.fileExists(atPath: existing.path), existing.path != "/" {
@@ -146,7 +165,7 @@ public struct RenderOutputPolicy: Sendable {
         var fd = open(existing.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw RenderOutputError("cannot open \(existing.path): \(String(cString: strerror(errno)))") }
         do {
-            try verify(fd, roots: roots, out: out)
+            try verify(fd, roots: roots, out: out, rule: rule)
             for component in missing {
                 if mkdirat(fd, component, 0o755) != 0, errno != EEXIST {
                     throw RenderOutputError("cannot create \(component) for \(out): \(String(cString: strerror(errno)))")
@@ -155,7 +174,7 @@ public struct RenderOutputPolicy: Sendable {
                 guard next >= 0 else { throw RenderOutputError("refusing to write \(out): \(rule)") }
                 close(fd)
                 fd = next
-                try verify(fd, roots: roots, out: out)
+                try verify(fd, roots: roots, out: out, rule: rule)
             }
             return fd
         } catch {
@@ -164,7 +183,7 @@ public struct RenderOutputPolicy: Sendable {
         }
     }
 
-    private static func verify(_ fd: Int32, roots: [String], out: String) throws {
+    private static func verify(_ fd: Int32, roots: [String], out: String, rule: String) throws {
         guard let real = descriptorPath(fd), isInside(real, roots) else {
             throw RenderOutputError("refusing to write \(out): \(rule)")
         }

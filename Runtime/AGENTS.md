@@ -95,7 +95,8 @@ How it is measured: the scene is laid out at 1280×720 and 1024×820, rendered a
 of 16 tiles across. The summary line `motion` of `livepaper check` and `motion` in report.json give,
 per size: **coverage** (share of the frame that visibly moves within 5 s and 2 s), the **regions**
 of the nine with motion (`stillRegions` names the others), **busy** (share changing strongly within
-0.5 s) and **flicker** (share jumping between successive frames), plus `map` (one string per tile
+0.5 s) and **flicker** (share changing sharply within a fraction of a second: flashes, strobing,
+per-frame random values, fast whole-frame fades), plus `map` (one string per tile
 row: `#` moves at most sampled moments, `+` at some, `.` never) and a heat map image,
 `scene/.check/previews/motion-1280x720@0.5.jpg` (amber: moves most of the time, blue: sometimes,
 grey: still, red outline: flicker). When the check prints a map, the `.` areas are where to add motion.
@@ -113,7 +114,7 @@ grey: still, red outline: flicker). When the check prints a map, the `.` areas a
 | Motion: share of the frame that visibly moves within 5 s | ≥ 25 % (aim for ≥ 50 %, and ≥ 25 % within 2 s) |
 | Motion: regions of the frame (thirds × thirds) with motion | ≥ 5 of 9 (aim for all 9) |
 | Busy: share of the frame changing strongly within 0.5 s | ≤ 50 % (aim for about 0) |
-| Flicker: share of the frame jumping between successive frames | ≤ 30 % (aim for about 0) |
+| Flicker: share of the frame changing sharply within a fraction of a second | ≤ 30 % (aim for about 0) |
 | CPU energy, battery profile (`--power`) | ≤ 300 mW (aim for < 150 mW) |
 
 ## The loop

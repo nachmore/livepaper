@@ -10,7 +10,13 @@
 //     workspaces that the agent can't write, and sends that file instead — so the server never
 //     renders HTML the agent wrote, which could otherwise load anything from the network;
 //   * every path (package, `out`) must resolve inside the workspace, outputs with the op's image
-//     extension only (the server checks again when it writes: RenderOutputPolicy).
+//     extension only. The server never writes into the workspace itself: its wider rules
+//     (RenderOutputPolicy) admit every AI workspace, so an agent that swapped a folder for a link
+//     after this check could aim it at another session's files. The server writes the image into
+//     the relay's own folder instead, and the relay copies it to `out` — checking, when it writes,
+//     that the folder it opened really is inside this workspace;
+//   * `timeout` is dropped (the server applies its own per-op limits, RenderLimits): no scene
+//     command sets it, and an agent's number could hold the shared render server indefinitely.
 //
 // The spool folder is agent-writable, so the relay touches it only through a descriptor whose real
 // path it has checked, and never follows links in it.
@@ -140,17 +146,31 @@ final class RenderRelay: @unchecked Sendable {
         guard let data, let request = try? JSONDecoder().decode(RenderRequest.self, from: data) else {
             return RenderResponse(ok: false, note: "bad request: not a render request")
         }
-        let prepared: RenderRequest, compiled: URL?
-        do { (prepared, compiled) = try prepare(request) } catch {
+        let prepared: Prepared
+        do { prepared = try prepare(request) } catch {
             log.notice("render relay refused a \(request.op.rawValue, privacy: .public) request: \(error.localizedDescription, privacy: .public)")
             return RenderResponse(ok: false, note: error.localizedDescription)
         }
-        defer { if let compiled { try? FileManager.default.removeItem(at: compiled) } }
+        defer {
+            if let compiled = prepared.compiled { try? FileManager.default.removeItem(at: compiled) }
+            if let output = prepared.output { try? FileManager.default.removeItem(at: output.staged) }
+        }
+        var response: RenderResponse
         do {
-            return try await render.send(prepared, timeout: RenderClient.defaultTimeout(for: prepared))
+            response = try await render.send(prepared.request, timeout: RenderClient.defaultTimeout(for: prepared.request))
         } catch {
             return RenderResponse(ok: false, note: error.localizedDescription)
         }
+        // The image the server wrote into the relay's folder goes to where the agent asked for it.
+        guard let output = prepared.output, response.out != nil else { response.out = nil; return response }
+        do {
+            try deliver(output.staged, to: output.destination)
+        } catch {
+            log.notice("render relay refused to write \(request.op.rawValue, privacy: .public) output: \(error.localizedDescription, privacy: .public)")
+            return RenderResponse(ok: false, ready: response.ready, errors: response.errors, note: error.localizedDescription)
+        }
+        response.out = output.destination
+        return response
     }
 
     struct Refusal: Error, LocalizedError {
@@ -158,11 +178,21 @@ final class RenderRelay: @unchecked Sendable {
         var errorDescription: String? { "LivePaper refused this render request: \(message)" }
     }
 
-    /// The request to send on (with LivePaper's own compile of the scene), and that compiled file.
-    func prepare(_ r: RenderRequest) throws -> (RenderRequest, URL?) {
+    /// A request as the relay sends it on, and the files that go with it.
+    struct Prepared {
+        var request: RenderRequest
+        /// LivePaper's own compile of the scene (removed afterwards).
+        var compiled: URL?
+        /// Where the server writes the image (in `privateDirectory`) and where the agent asked for it.
+        var output: (staged: URL, destination: String)?
+    }
+
+    /// The request to send on (with LivePaper's own compile of the scene and the relay's own output
+    /// file), and what to do with the result.
+    func prepare(_ r: RenderRequest) throws -> Prepared {
         switch r.op {
         case .ping:
-            return (RenderRequest(op: .ping), nil)
+            return Prepared(request: RenderRequest(op: .ping))
         case .shutdown:
             throw Refusal(message: "the render server can't be stopped from an AI session")
         case .still, .bench, .live, .motion:
@@ -174,7 +204,11 @@ final class RenderRelay: @unchecked Sendable {
             }
             let package = htmlURL.deletingLastPathComponent().deletingLastPathComponent()
             try confine(package.path, "the scene")
-            if r.op == .still || r.op == .motion, let out = r.out { try confine(out, "out", extensions: ["png"]) }
+            var output: (staged: URL, destination: String)?
+            if r.op == .still || r.op == .motion, let out = r.out {
+                try confine(out, "out", extensions: ["png"])
+                output = (privateDirectory.appendingPathComponent("\(UUID().uuidString).png"), out)
+            }
             try FileManager.default.createDirectory(at: privateDirectory, withIntermediateDirectories: true)
             let compiled = privateDirectory.appendingPathComponent("\(UUID().uuidString).html")
             do { try compiler.compile(package: package, to: compiled) } catch let e as SceneCompileError {
@@ -183,15 +217,43 @@ final class RenderRelay: @unchecked Sendable {
             var p = r
             p.html = compiled.path
             p.scene = nil
-            if r.op != .still && r.op != .motion { p.out = nil }
-            return (p, compiled)
+            p.out = output?.staged.path
+            p.timeout = nil
+            return Prepared(request: p, compiled: compiled, output: output)
         case .thumbnail:
             guard let scene = r.scene, let out = r.out else { throw Refusal(message: "thumbnail needs \"scene\" and \"out\"") }
             try confine(scene, "the scene")
             try confine(out, "out", extensions: ["jpg", "jpeg"])
+            try FileManager.default.createDirectory(at: privateDirectory, withIntermediateDirectories: true)
+            let staged = privateDirectory.appendingPathComponent("\(UUID().uuidString).\(URL(fileURLWithPath: out).pathExtension.lowercased())")
             var p = r
             p.html = nil
-            return (p, nil)
+            p.out = staged.path
+            p.timeout = nil
+            return Prepared(request: p, output: (staged, out))
+        }
+    }
+
+    /// Copies the image the server wrote to `staged` into the workspace at `destination`. The folder
+    /// is opened and its real path checked when writing (RenderOutputPolicy), so a folder swapped
+    /// for a link since `prepare` can't redirect the file out of the workspace.
+    private func deliver(_ staged: URL, to destination: String) throws {
+        let fd = open(staged.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw Refusal(message: "the render server wrote no image") }
+        defer { close(fd) }
+        var st = stat()
+        guard fstat(fd, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { throw Refusal(message: "the render server wrote no image") }
+        var data = Data(count: Int(st.st_size)), done = 0
+        while done < data.count {
+            let n = data.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress! + done, $0.count - done) }
+            if n < 0 && errno == EINTR { continue }
+            guard n > 0 else { throw Refusal(message: "could not read the image the render server wrote") }
+            done += n
+        }
+        do {
+            try RenderOutputPolicy.write(data, to: destination, roots: [workspaceReal], rule: "it is outside this AI session's workspace")
+        } catch {
+            throw Refusal(message: error.localizedDescription)
         }
     }
 
