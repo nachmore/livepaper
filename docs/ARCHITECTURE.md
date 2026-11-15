@@ -574,7 +574,14 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
   again. Failures can be retried (finished steps are skipped); on success the app moves itself to
   the Trash and quits.
 * **Document type:** `.lpscene` (`com.nachmore.livepaper.scene`, a package conforming to
-  `com.apple.package`); opening one imports it into the library.
+  `com.apple.package`). Opening one (double-click in Finder, File › Import Scene…) goes through
+  `LibraryServicing.existingScene(matching:)` first: a package that is a library or built-in scene,
+  or has the same contents as one (`ScenePackageComparison`: the scene's files byte for byte plus
+  kind, runtime, clock and video settings; scene.json metadata, thumbnail, history and `.check/`
+  don't count), just opens that scene. A different version of a user scene with the same id opens
+  that scene with a banner offering "Replace with This Version" (`replaceContents`, previous
+  version kept in history) or "Import as a Copy". Anything else is imported. The CLI's
+  `livepaper import` always imports.
 * **Developer modes:** `LIVEPAPER_MOCK=1` runs on sample data in a temp directory with mock
   services (nothing on the system changes; Lock Now only shows a notice). Debug builds:
   `.build/debug/LivePaperApp --snapshot <dir> [--only name,…]` renders every key screen with mock

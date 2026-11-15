@@ -447,6 +447,83 @@ extension SelfTests {
                 try expect(!children(sb.library).contains { $0.hasPrefix(".") }, "no staging leftovers")
             }
         },
+        TestCase(name: "core.library.already-imported") {
+            try CoreSandbox.with("dedupe") { sb in
+                let lib = sb.makeLibrary()
+                func match(_ url: URL) throws -> SceneImportMatch? { try lib.existingScene(matching: url) }
+                func sameID(_ m: SceneImportMatch?) -> String? { if case .same(let i)? = m { return i.id }; return nil }
+                func otherID(_ m: SceneImportMatch?) -> String? { if case .otherVersion(let i)? = m { return i.id }; return nil }
+                let downloads = sb.root.appendingPathComponent("Downloads")
+                let original = try sb.writeWebScene(in: downloads, id: "voltron-lions", name: "Voltron Lions", js: "// lions v1\n")
+                try sb.write("asset", to: original.appendingPathComponent("assets/lion.svg"))
+                try expectEqual(try match(original), nil)   // not imported yet
+
+                let imported = try lib.importPackage(at: original)
+                try expectEqual(imported.id, "voltron-lions")
+                // The same package again, a Finder copy of it (with .DS_Store), and the library's own package.
+                try expectEqual(sameID(try match(original)), "voltron-lions")
+                let copy = sb.root.appendingPathComponent("Desktop/voltron-lions.lpscene")
+                try FileManager.default.createDirectory(at: copy.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try FileManager.default.copyItem(at: original, to: copy)
+                try sb.write("finder", to: copy.appendingPathComponent(".DS_Store"))
+                try sb.write("finder", to: copy.appendingPathComponent("assets/.DS_Store"))
+                try expectEqual(sameID(try match(copy)), "voltron-lions")
+                try expectEqual(sameID(try match(imported.packageURL)), "voltron-lions")
+                try expectEqual(sameID(try match(URL(fileURLWithPath: imported.packageURL.path.uppercased()))), "voltron-lions")
+                // The library's records don't make it a different scene: renamed, thumbnail, history, check results.
+                var renamed = imported.manifest
+                renamed.name = "My Lions"; renamed.tags = ["mine"]
+                try lib.update(renamed)
+                try sb.write("jpg", to: imported.packageURL.appendingPathComponent("thumbnail.jpg"))
+                try sb.write("png", to: imported.packageURL.appendingPathComponent(".check/still.png"))
+                try SceneHistory.append(SceneHistoryEntry(action: .create, prompt: "lions"), to: imported.packageURL)
+                try expectEqual(sameID(try match(original)), "voltron-lions")
+                // A copy imported under another id still counts (an earlier duplicate import).
+                try lib.delete(id: "voltron-lions")
+                try expectEqual(try match(original), nil)   // deleted: import again
+                try sb.writeWebScene(in: sb.library, id: "voltron-lions-2", name: "Voltron Lions", js: "// lions v1\n")
+                try sb.write("asset", to: sb.library.appendingPathComponent("voltron-lions-2.lpscene/assets/lion.svg"))
+                try expectEqual(sameID(try match(original)), "voltron-lions-2")
+                // Same id, other contents: a different version (a changed file, an extra file, a changed clock).
+                _ = try lib.importPackage(at: original)
+                let newer = try sb.writeWebScene(in: sb.root.appendingPathComponent("v2"), id: "voltron-lions", name: "Voltron Lions", js: "// lions v2\n")
+                try sb.write("asset", to: newer.appendingPathComponent("assets/lion.svg"))
+                try expectEqual(otherID(try match(newer)), "voltron-lions")
+                try sb.write("// lions v1\n", to: newer.appendingPathComponent("scene.js"))
+                try expectEqual(sameID(try match(newer)), "voltron-lions")
+                try sb.write("x", to: newer.appendingPathComponent("assets/extra.svg"))
+                try expectEqual(otherID(try match(newer)), "voltron-lions")
+                try FileManager.default.removeItem(at: newer.appendingPathComponent("assets/extra.svg"))
+                var clocked = try SceneManifest.load(package: newer)
+                clocked.clock.position = .bottomLeft
+                try clocked.write(package: newer)
+                try expectEqual(otherID(try match(newer)), "voltron-lions")
+                // A built-in, and a copy of one, open the built-in; a different scene with a built-in's id imports.
+                let orbit = try unwrap(try lib.scene(id: "orbit"))
+                try expectEqual(sameID(try match(orbit.packageURL)), "orbit")
+                let orbitCopy = sb.root.appendingPathComponent("orbit-copy.lpscene")
+                try FileManager.default.copyItem(at: orbit.packageURL, to: orbitCopy)
+                try expectEqual(sameID(try match(orbitCopy)), "orbit")
+                try sb.write("// mine\n", to: orbitCopy.appendingPathComponent("scene.js"))
+                try expectEqual(try match(orbitCopy), nil)   // a built-in is never replaced
+                // Archives and broken packages are left to import (which reports them).
+                try expectEqual(try match(sb.root.appendingPathComponent("missing.lpscene")), nil)
+                try FileManager.default.createSymbolicLink(at: copy.appendingPathComponent("link"), withDestinationURL: URL(fileURLWithPath: "/etc"))
+                try expectEqual(try match(copy), nil)   // a package with a symlink never matches
+            }
+        },
+        TestCase(name: "core.library.replace-from-export-no-duplicate-history") {
+            try CoreSandbox.with("replace-export") { sb in
+                let lib = sb.makeLibrary()
+                let sky = try lib.createWebScene(name: "Sky", description: "")
+                try SceneHistory.append(SceneHistoryEntry(action: .create, prompt: "sky"), to: sky.packageURL)
+                let exported = sb.root.appendingPathComponent("out/sky.lpscene")
+                try lib.exportPackage(id: "sky", to: exported)
+                try sb.write("// edited elsewhere\n", to: exported.appendingPathComponent("scene.js"))
+                _ = try lib.replaceContents(id: "sky", with: exported)
+                try expectEqual(SceneHistory.entries(in: sky.packageURL).map(\.action), [.create, .replace])
+            }
+        },
         TestCase(name: "core.library.video") {
             try CoreSandbox.with("video") { sb in
                 let lib = sb.makeLibrary()

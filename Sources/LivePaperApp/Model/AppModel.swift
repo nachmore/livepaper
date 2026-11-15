@@ -382,6 +382,59 @@ final class AppModel {
         }
     }
 
+    /// Opening a scene package (double-click in Finder, File › Import Scene…). A scene the library
+    /// already has — the package itself, or a copy with the same contents — just opens. A different
+    /// version of a scene in the library opens that scene and offers to replace it or import the
+    /// package as a copy. Anything else is imported.
+    func openScenePackage(at url: URL) async {
+        let library = services.library
+        let match: SceneImportMatch?
+        do {
+            match = try await offMain { try library.existingScene(matching: url) }
+        } catch {
+            match = nil   // can't tell: importing reports the real problem, if there is one
+        }
+        guard let match else {
+            await importPackage(at: url)
+            return
+        }
+        switch match {
+        case .same(let item):
+            await show(item)
+            banners.post(.info, "\u{201C}\(item.manifest.name)\u{201D} is already in your library")
+        case .otherVersion(let item):
+            await show(item)
+            banners.post(.warning, "\u{201C}\(item.manifest.name)\u{201D} is already in your library",
+                         message: "\(url.lastPathComponent) is a different version of it.",
+                         actions: [.init(title: "Replace with This Version") { [weak self] in Task { await self?.replaceScene(item.id, with: url) } },
+                                   .init(title: "Import as a Copy") { [weak self] in Task { await self?.importPackage(at: url) } }])
+        }
+    }
+
+    /// Shows a scene, loading the library first when it doesn't know the scene yet (a package
+    /// opened from Finder while LivePaper was still starting).
+    private func show(_ item: SceneItem) async {
+        if entry(id: item.id) == nil { await reloadLibrary(quiet: true) }
+        showScene(item.id)
+    }
+
+    /// Replaces a library scene with a package's contents (its previous version stays in history).
+    func replaceScene(_ id: String, with url: URL) async {
+        let library = services.library
+        do {
+            let item = try await offMain { try library.replaceContents(id: id, with: url) }
+            previewHTMLCache = previewHTMLCache.filter { !$0.key.hasPrefix(item.id + "-") }
+            thumbnailRevision[item.id, default: 0] += 1
+            detailsRevision += 1
+            await reloadLibrary()
+            showScene(item.id)
+            banners.post(.success, "Updated \u{201C}\(item.manifest.name)\u{201D}",
+                         message: "The previous version is kept in the scene\u{2019}s history.")
+        } catch {
+            banners.error("Couldn't replace the scene", error) { [weak self] in Task { await self?.replaceScene(id, with: url) } }
+        }
+    }
+
     @discardableResult
     func importPackage(at url: URL) async -> SceneItem? {
         let library = services.library

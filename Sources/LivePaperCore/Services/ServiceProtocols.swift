@@ -35,6 +35,15 @@ public enum LibraryError: Error, LocalizedError, Sendable {
     }
 }
 
+/// What the library already has for a scene package someone opened (ScenePackageComparison).
+public enum SceneImportMatch: Sendable, Equatable {
+    /// The package is this library or built-in scene, or a copy of it with the same contents:
+    /// open it rather than importing a duplicate.
+    case same(SceneItem)
+    /// A user scene with the package's id but different contents (an older or newer version).
+    case otherVersion(SceneItem)
+}
+
 public protocol LibraryServicing: AnyObject, Sendable {
     /// Built-in + user scenes, user scenes first, each group sorted by name.
     func scenes() throws -> [SceneItem]
@@ -50,6 +59,9 @@ public protocol LibraryServicing: AnyObject, Sendable {
     /// Replace a user scene's contents with another package (AI "modify" accept). Keeps history.
     func replaceContents(id: String, with package: URL) throws -> SceneItem
     func importPackage(at url: URL) throws -> SceneItem
+    /// The scene a package to be imported already is, if any (nil: import it). Only scene
+    /// packages are compared; archives and invalid packages return nil (import reports them).
+    func existingScene(matching url: URL) throws -> SceneImportMatch?
     func exportPackage(id: String, to url: URL) throws
 }
 

@@ -769,6 +769,52 @@ extension SelfTests {
                 try expect(model.banners.banners.contains { $0.style == .error }, "built-ins can't be deleted")
             }
         },
+        TestCase(name: "app.model.open-package-already-imported") {
+            try withModel("open-package") { model, fx in
+                var copy: SceneItem?
+                try awaitMain { copy = await model.clone("aurora-lake", name: "Lake") }
+                let item = try unwrap(copy)
+                let exported = fx.root.appendingPathComponent("Downloads/lake.lpscene")
+                try FileManager.default.createDirectory(at: exported.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try awaitMain { await model.export(item.id, to: exported) }
+                let before = model.entries.count
+                // Double-clicking the same scene (a copy, or the library's own package) opens it.
+                for url in [exported, item.packageURL] {
+                    model.libraryPath = []
+                    model.section = .playlist
+                    try awaitMain { await model.openScenePackage(at: url) }
+                    try expectEqual(model.entries.count, before)
+                    try expectEqual(model.section, .library)
+                    try expectEqual(model.libraryPath, [item.id])
+                    try expect(model.banners.banners.last?.title.contains("already in your library") == true)
+                }
+                // A different version of it: shown, with Replace and Import as a Copy.
+                let js = exported.appendingPathComponent("scene.js")
+                try Data("// edited elsewhere\n".utf8).write(to: js)
+                model.libraryPath = []
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before)
+                try expectEqual(model.libraryPath, [item.id])
+                let banner = try unwrap(model.banners.banners.last)
+                try expectEqual(banner.style, .warning)
+                try expectEqual(banner.actions.map(\.title), ["Replace with This Version", "Import as a Copy"])
+                try awaitMain { await model.replaceScene(item.id, with: exported) }
+                try expectEqual(model.entries.count, before)
+                try expectEqual(String(decoding: try Data(contentsOf: item.packageURL.appendingPathComponent("scene.js")), as: UTF8.self),
+                                "// edited elsewhere\n")
+                // Now identical again: it just opens.
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before)
+                // A new scene still imports.
+                try Data("// another scene\n".utf8).write(to: js)
+                var m = try SceneManifest.load(package: exported)
+                m.id = "brand-new"; m.name = "Brand New"
+                try m.write(package: exported)
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before + 1)
+                try expect(model.entry(id: "brand-new") != nil, "imported")
+            }
+        },
         TestCase(name: "app.model.lock-settings") {
             try withModel("lock") { model, fx in
                 let saved = fx.saved

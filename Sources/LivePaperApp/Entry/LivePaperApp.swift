@@ -134,11 +134,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Double-clicking a .lpscene package (declared in Info.plist) imports it into the library.
+    /// Double-clicking a .lpscene package (declared in Info.plist) opens it: a scene that is already
+    /// in the library just opens; anything else is imported (AppModel.openScenePackage).
     func application(_ application: NSApplication, open urls: [URL]) {
         let model = AppBootstrap.model
-        for url in urls where url.pathExtension == SceneManifest.packageExtension {
-            Task { await model.importPackage(at: url) }
+        for url in urls where url.pathExtension.lowercased() == SceneManifest.packageExtension {
+            Task { await model.openScenePackage(at: url) }
         }
         WindowRouter.shared.openMainWindow?()
     }
@@ -184,7 +185,7 @@ struct LivePaperCommands: Commands {
             Button("New Scene\u{2026}") { show(.create) }
                 .keyboardShortcut("n")
             Button("Import Scene\u{2026}") {
-                if let url = SystemActions.chooseScenePackage() { Task { await model.importPackage(at: url) } }
+                if let url = SystemActions.chooseScenePackage() { Task { await model.openScenePackage(at: url) } }
             }
             .keyboardShortcut("o")
         }

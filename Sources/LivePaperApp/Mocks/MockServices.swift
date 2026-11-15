@@ -216,6 +216,17 @@ final class MockLibraryService: LibraryServicing, @unchecked Sendable {
         return SceneItem(manifest: m, packageURL: pkg, isBuiltin: false)
     }
 
+    func existingScene(matching url: URL) throws -> SceneImportMatch? {
+        let all = try scenes()
+        let path = url.standardizedFileURL.resolvingSymlinksInPath().path
+        if let item = all.first(where: { $0.packageURL.standardizedFileURL.resolvingSymlinksInPath().path == path }) { return .same(item) }
+        guard let m = try? SceneManifest.load(package: url) else { return nil }
+        // Like LibraryService: the scene with the package's id first (sample scenes share contents).
+        let ordered = all.filter { $0.id == m.id } + all.filter { $0.id != m.id }
+        if let item = ordered.first(where: { ScenePackageComparison.sameScene($0.packageURL, $0.manifest, url, m) }) { return .same(item) }
+        return all.first(where: { $0.id == m.id && !$0.isBuiltin }).map { .otherVersion($0) }
+    }
+
     func exportPackage(id: String, to url: URL) throws {
         guard let item = try scene(id: id) else { throw LibraryError.notFound(id) }
         if fm.fileExists(atPath: url.path) { throw LibraryError.exists(url.lastPathComponent) }
