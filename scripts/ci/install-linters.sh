@@ -9,9 +9,9 @@
 set -euo pipefail
 
 SHELLCHECK_VERSION=0.11.0
-SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198   # shellcheck-v0.11.0.linux.x86_64.tar.xz
+SHELLCHECK_SHA256=8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198   # = shellcheck-v0.11.0.linux.x86_64.tar.xz
 ACTIONLINT_VERSION=1.7.12
-ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8   # actionlint_1.7.12_linux_amd64.tar.gz
+ACTIONLINT_SHA256=8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8   # = actionlint_1.7.12_linux_amd64.tar.gz
 
 [ $# = 1 ] || { sed -n '2,9p' "$0" >&2; exit 2; }
 [ "$(uname -s)-$(uname -m)" = Linux-x86_64 ] || { echo "✗ Linux x86-64 only (got $(uname -s)-$(uname -m))" >&2; exit 1; }

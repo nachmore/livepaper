@@ -15,8 +15,8 @@
 #   beta     a versioned pre-release for tag vX.Y.Z-beta.N (never "latest").
 #   stable   the release for tag vX.Y.Z, marked latest.
 #   beta and stable get generated notes (since the previous beta/release, or since the previous
-#   release for stable) after a short install header. Re-running the job updates the assets of an
-#   existing release instead of failing.
+#   release for stable) after a short install header; the very first one lists the commits itself.
+#   Re-running the job updates the assets of an existing release instead of failing.
 #
 # --dry-run prints the gh commands instead of running them and needs no network (NIGHTLY_PREVIOUS
 # may name the previous nightly's commit, DRY_RUN_STATE=published pretends the release exists).
@@ -30,11 +30,11 @@ DIST="$(cd "$1" && pwd)"
 
 fail() { echo "✗ $*" >&2; [ -n "${GITHUB_ACTIONS:-}" ] && echo "::error title=Publish::$*" >&2; exit 1; }
 step() { echo "▸ $*"; }
-for v in CHANNEL VERSION TAG ASSET_BASE BUILD_NUMBER GITHUB_SHA GITHUB_REPOSITORY SIGNING; do
+case "${CHANNEL:-}" in nightly|beta|stable) ;; *) fail "nothing to publish for channel '${CHANNEL:-}'" ;; esac
+for v in VERSION TAG ASSET_BASE BUILD_NUMBER GITHUB_SHA GITHUB_REPOSITORY SIGNING; do
   [ -n "${!v:-}" ] || fail "$v is not set"
 done
 [ "$DRY" = 1 ] || [ -n "${GH_TOKEN:-}" ] || fail "GH_TOKEN is not set"
-case "$CHANNEL" in nightly|beta|stable) ;; *) fail "nothing to publish for channel '$CHANNEL'" ;; esac
 case "$SIGNING" in developer-id|adhoc) ;; *) fail "SIGNING must be developer-id or adhoc (got '$SIGNING')" ;; esac
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]] || fail "GITHUB_SHA must be a full commit hash"
 [ "$(git rev-parse HEAD)" = "$GITHUB_SHA" ] || fail "the checkout ($(git rev-parse --short HEAD)) isn't GITHUB_SHA"
@@ -70,6 +70,13 @@ trap 'rm -f "$NOTES"' EXIT
 # Commit subjects can contain @handles: keep them from notifying anyone (backticks are literal here).
 # shellcheck disable=SC2016
 no_mentions() { sed -E 's/(^|[^A-Za-z0-9`])@([A-Za-z0-9][A-Za-z0-9_-]*)/\1`@\2`/g'; }
+# commit_list <rev-range…>: up to 100 commit subjects as a Markdown list.
+commit_list() {
+  local total
+  total="$(git rev-list --count --no-merges "$@")"
+  git log --no-merges --max-count=100 --format="* %s (%h)" "$@" | no_mentions
+  [ "$total" -le 100 ] || echo "* … and $((total - 100)) more"
+}
 {
   case "$CHANNEL" in
     nightly) printf '%s\n\n' "Rolling build of \`main\`, replaced on every push. For something steadier, use the [latest release]($REPO_URL/releases/latest)." ;;
@@ -107,18 +114,16 @@ no_mentions() { sed -E 's/(^|[^A-Za-z0-9`])@([A-Za-z0-9][A-Za-z0-9_-]*)/\1`@\2`/
     if [ -n "$PREV" ] && [ "$PREV" = "$GITHUB_SHA" ]; then
       echo "Same commit as the previous nightly (rebuilt)."
     elif [ -n "$PREV" ] && git cat-file -e "$PREV^{commit}" 2>/dev/null && git merge-base --is-ancestor "$PREV" "$GITHUB_SHA"; then
-      total="$(git rev-list --count --no-merges "$PREV..$GITHUB_SHA")"
       echo "### Changes since the previous nightly"
       echo
-      git log --no-merges --max-count=100 --format="* %s (%h)" "$PREV..$GITHUB_SHA" | no_mentions
-      [ "$total" -le 100 ] || echo "* … and $((total - 100)) more"
+      commit_list "$PREV..$GITHUB_SHA"
       echo
       echo "[All changes]($REPO_URL/compare/$PREV...$GITHUB_SHA)"
     else
       # First nightly, or main was rewritten since the previous one.
       echo "### Recent changes"
       echo
-      git log --no-merges --max-count=30 --format="* %s (%h)" "$GITHUB_SHA" | no_mentions
+      commit_list --max-count=30 "$GITHUB_SHA"
       echo
       echo "[History]($REPO_URL/commits/$GITHUB_SHA)"
     fi
@@ -144,7 +149,7 @@ move_nightly_tag() {
 }
 
 # The version tag to start generated notes from: for stable the previous stable release, for a beta
-# the previous beta or release. Empty when there is none (GitHub then picks one itself).
+# the previous beta or release. Empty when there is none.
 previous_version_tag() {
   local t seen=0 re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-beta\.[1-9][0-9]*)?$'
   [ "$CHANNEL" = stable ] && re='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
@@ -187,9 +192,15 @@ else
       gh_do release edit "$TAG" --title "$TITLE" --prerelease=false --draft=false --latest
     fi
   else
-    args=(release create "$TAG" "${FILES[@]}" --verify-tag --title "$TITLE" --notes-file "$NOTES" --generate-notes)
+    args=(release create "$TAG" "${FILES[@]}" --verify-tag --title "$TITLE" --notes-file "$NOTES")
     START="$(previous_version_tag)"
-    [ -n "$START" ] && args+=(--notes-start-tag "$START")
+    if [ -n "$START" ]; then
+      args+=(--generate-notes --notes-start-tag "$START")
+    else
+      # The first one: GitHub's default starting point could be the rolling nightly (a recent
+      # commit), so list the history ourselves.
+      { echo; echo "### Changes"; echo; commit_list "$GITHUB_SHA"; echo; echo "[History]($REPO_URL/commits/$TAG)"; } >> "$NOTES"
+    fi
     if [ "$CHANNEL" = beta ]; then args+=(--prerelease --latest=false); else args+=(--latest); fi
     gh_do "${args[@]}"
   fi

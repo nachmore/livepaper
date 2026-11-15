@@ -46,8 +46,10 @@ the previous nightly — and finally moves the `nightly` tag to the new commit. 
 
 **Betas and releases** get `LivePaper-<version>.zip`, `.dmg` and `SHA256SUMS`, a short install header
 and GitHub's generated notes since the previous beta or release (for a release: since the previous
-release, so the notes cover all its betas). Re-running a failed publish replaces the assets of the
-release it already created and leaves its notes alone.
+release, so the notes cover all its betas). The first beta and the first release have no
+predecessor, so their notes list the commits instead (GitHub's automatic starting point could be the
+nightly). Re-running a failed publish replaces the assets of the release it already created and
+leaves its notes alone.
 
 ## Cutting a beta or a release
 

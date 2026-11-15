@@ -1,6 +1,6 @@
 #!/bin/bash
 # Lints the repository's shell scripts (shellcheck) and GitHub workflows (actionlint, which also
-# shellchecks every `run:` block). Run by CI; locally: brew install shellcheck actionlint.
+# runs shellcheck on every `run:` block). Run by CI; locally: brew install shellcheck actionlint.
 #
 #   scripts/ci/lint.sh
 set -euo pipefail
