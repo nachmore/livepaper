@@ -3,7 +3,8 @@
 // The full-size stills are what users see, but a dithered 3024×1964 PNG is 4–6 MB: several of them
 // exceed the request size some AI harnesses allow (Codex on Bedrock fails the whole turn with
 // "request_too_large"), and they are slow for any image viewer. `check` therefore also writes
-// .check/previews/<still>.jpg, at most `maxPixels` on the long side, which agents are told to view.
+// .check/previews/<still>.jpg, at most `maxPixels` on the long side, which agents are told to view —
+// and the same for the motion heat maps (.check/motion-<size>.png → previews/motion-<size>.jpg).
 // ImageIO + CoreGraphics only: the CLI never links AppKit.
 import CoreGraphics
 import Darwin

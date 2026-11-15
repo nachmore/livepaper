@@ -7,7 +7,7 @@ enum SceneCommands {
     static var all: [CLICommand] {
         [
             CLICommand(name: "check", synopsis: "<dir.lpscene> [--quick] [--power] [--json]",
-                       summary: "build + validate a scene: stills, JS errors, benchmarks, brightness; exit 0 only if it passes",
+                       summary: "build + validate a scene: stills, JS errors, benchmarks, brightness, motion; exit 0 only if it passes",
                        run: check),
             CLICommand(name: "still", synopsis: "<dir.lpscene> [--t 8] [--size 1512x982] [--dpr 2] [--out x.png] [--no-clock] [--json]",
                        summary: "render one frame of a scene to a PNG", run: still),

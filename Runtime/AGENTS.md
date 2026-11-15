@@ -68,11 +68,11 @@ demands attention. `livepaper check` measures this and **fails** scenes that are
 * **Every region, all the time.** Treat the frame as thirds × thirds: each of the nine regions needs
   something moving at every moment, visible within 1–2 s wherever you look. Ambient motion is the
   base layer of the scene, not one hero element.
-* **Layers at different speeds (parallax).** Far layers drift slowest (1–3 pt/s), middle ones faster
-  (3–8), near ones fastest (8–20); scale with `lp.w`.
+* **Layers at different speeds (parallax).** Far layers drift slowest (1–3 CSS px/s on a 1512-px-wide
+  screen), middle ones faster (3–8), near ones fastest (8–20); scale with `lp.w`.
 * **Atmosphere:** 2–4 large, soft, low-alpha layers of fog, mist, haze, cloud, smoke, aurora or
   light shafts, drifting in slightly different directions — the cheapest way to reach every region.
-* **Nature:** foliage and grass sway (sine of `lp.t`, per-element phase, a few pt), water shimmers
+* **Nature:** foliage and grass sway (sine of `lp.t`, per-element phase, a few px), water shimmers
   and ripples, flames and lanterns flicker *softly* (smooth noise), particles drift (dust, pollen,
   snow, embers, plankton, rain, fireflies).
 * **A slow camera:** a drift or zoom of a few % over 1–2 minutes (sin/cos, seamless) moves every
@@ -86,8 +86,9 @@ demands attention. `livepaper check` measures this and **fails** scenes that are
   sin/cos and long, unrelated periods (47 s, 73 s, 131 s) so nothing visibly repeats or jumps.
 * **Cheaply:** paint layers once in `resize()` (oversized for a camera drift, two screens wide for a
   scrolling band) and `drawImage` them at an offset per frame; one `util.glow` sprite per particle;
-  in WebGL, a few octaves of noise moved by `lp.t`. A complete example (0.3 ms per frame, motion in
-  all nine regions) is in SCENE_API.md §7.
+  in WebGL, a few octaves of noise moved by `lp.t`. Motion everywhere must still fit the frame-time
+  and energy budgets below. A complete example (0.3 ms per frame, motion in all nine regions) is in
+  SCENE_API.md §7.
 
 How it is measured: the scene is laid out at 1280×720 and 1024×820, rendered at t = 3, 17, 41 and
 120 s, and each frame is compared with the frames a few frames, 0.5 s, 2 s and 5 s later on a grid

@@ -189,12 +189,12 @@ and fails scenes that are too static, too busy or that flicker.
    within 1–2 s. Motion is the ambient state of the scene, not one hero element.
 2. **Layers at different speeds.** Depth reads as parallax: far layers (sky, nebula, distant hills)
    drift slowest, middle layers faster, near layers (foreground mist, foliage, water) fastest.
-   As a guide, at a 1512-pt-wide screen: far 1–3 pt/s, middle 3–8, near 8–20 (scale with `lp.w`).
+   As a guide, on a 1512-px-wide screen: far 1–3 CSS px/s, middle 3–8, near 8–20 (scale with `lp.w`).
 3. **Atmosphere moves.** Fog, mist, haze, clouds, smoke, aurora curtains and light shafts drift,
    thin and thicken. Two to four large, soft, low-alpha layers moving in slightly different
    directions are the cheapest way to bring every region to life.
 4. **Nature moves.** Foliage and grass sway (a sine of `lp.t` with a per-element phase, amplitude of
-   a few pt); water shimmers and ripples (reflections offset by noise, glints that come and go);
+   a few px); water shimmers and ripples (reflections offset by noise, glints that come and go);
    flames and lanterns flicker *softly* (smooth noise, never random per frame); particles drift
    (dust, pollen, snow, embers, plankton, rain, fireflies).
 5. **A slow camera.** A gentle drift or zoom of the whole composition — a few % over 1–2 minutes,
