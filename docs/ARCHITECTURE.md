@@ -440,12 +440,13 @@ Budgets (`CheckBudgets`):
 | Flicker: tiles with a frame-to-frame step ≥ 10 | > 30 % of the frame | |
 | Motion not measured (render server too old) | | always |
 
-Motion calibration (2026-11, the built-ins at 16:9 / 5:4): Ringed Giant 7 / 9 % in 2 / 1 regions
+Motion calibration (2026-11, the built-ins as they were before their motion pass, at 16:9 / 5:4;
+docs/SCENES.md has the current numbers): Ringed Giant 7 / 9 % in 2 / 1 regions
 and Ink and Ember 2 / 2 % in 0 / 0 regions (both judged too static by a person) fail; Abyssal
 Lanterns 30 / 41 % (6 / 6), Liquid Glass 47 / 45 % (7 / 7) and Rain on the River 100 % (9) pass.
 Busy and flicker stay at 0–1 % for all five (falling rain included); strobing and fast pans
 measure 100 %. `LIVEPAPER_SELFTEST_E2E=1 swift run LivePaperSelfTest runtime.e2e.motionBuiltins`
-prints these numbers again (`LIVEPAPER_MOTION_DUMP=<dir>` saves the raw maps).
+prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir>` saves the raw maps).
 
 `report.json` `benchMs` keys are `"<w>x<h>@<dpr> t=<t>"`; probe benches carry the suffix `" probe"`
 (`"1512x982@2 t=30 probe"`) so consumers can tell them from the full benches.
