@@ -31,6 +31,8 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     public let request: AISessionRequest
     public let harness: AIHarness
     public let model: String?
+    /// The session's reference images (empty without).
+    public let references: SessionReferences
 
     /// What the session needs from its environment. Closures are evaluated on the session's queue
     /// when it launches, so slow lookups (login shell, capability probes) never block `start()`.
@@ -86,11 +88,14 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     private var stillDates: [String: Date] = [:]
     private var sceneBefore: Data?
     private var lastStatus: String?
+    /// The prompt history.jsonl records (TASK.md's request, attached paths replaced); nil: the request's.
+    private let recordedPrompt: String?
 
     init(id: String, workspace: AIWorkspace, request: AISessionRequest, harness: AIHarness, model: String?,
-         dependencies: Dependencies) {
+         dependencies: Dependencies, references: SessionReferences = .init(), recordedPrompt: String? = nil) {
         self.id = id; self.ws = workspace; self.request = request; self.harness = harness
         self.model = model?.trimmingCharacters(in: .whitespaces).nilIfEmpty; self.deps = dependencies
+        self.references = references; self.recordedPrompt = recordedPrompt
         (events, continuation) = AsyncStream<AISessionEvent>.makeStream()
     }
 
@@ -157,7 +162,8 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         let invocation: HarnessInvocation
         do {
             invocation = try adapter.invocation(for: harness, context: HarnessContext(
-                workspace: ws, model: model, searchPath: deps.searchPath(), extraArguments: deps.extraArguments))
+                workspace: ws, model: model, searchPath: deps.searchPath(), extraArguments: deps.extraArguments,
+                referenceImages: references.harnessImages))
         } catch {
             finish(.failed(error.localizedDescription)); return
         }
@@ -259,15 +265,37 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         // link the agent left in its candidate would point the check's writes and the clean-up's
         // deletes at files elsewhere (and a scene package must be self-contained anyway).
         if let problem = candidateLinkProblem() { finish(.failed(problem)); return }
+        // The picture to animate is checked (and kept) exactly as LivePaper wrote it.
+        do { try restoreAnimateAsset() } catch {
+            finish(.failed("LivePaper couldn't put back the picture to animate (scene/\(references.animate?.assetPath ?? "assets")): " +
+                           error.localizedDescription))
+            return
+        }
 
         phase = .checking
         emit(.status("Validating the scene…"))
-        let checker = deps.checker, scene = ws.scene
+        let checker = deps.checker, scene = ws.scene, options = CheckOptions(reference: references.checkTarget)
         Task.detached {
             let result: Result<CheckReport, Error>
-            do { result = .success(try await checker.check(package: scene, options: CheckOptions())) } catch { result = .failure(error) }
+            do { result = .success(try await checker.check(package: scene, options: options)) } catch { result = .failure(error) }
             self.queue.async { self.checked(result) }
         }
+    }
+
+    /// Writes the picture to animate back into the candidate if the agent changed, replaced or
+    /// removed it (it must reach the library exactly as LivePaper prepared it). Runs after
+    /// `candidateLinkProblem`, so nothing in scene/ is a link; `assets` must be a real directory.
+    private func restoreAnimateAsset() throws {
+        guard let animate = references.animate else { return }
+        let fm = FileManager.default
+        let assets = ws.scene.appendingPathComponent(SceneCompiler.assetsDirectory)
+        let file = ws.scene.appendingPathComponent(animate.assetPath)
+        if FileOps.isRegularFile(file), (try? Data(contentsOf: file)) == animate.data { return }
+        if FileOps.entryExists(assets), !FileOps.isRealDirectory(assets) { try fm.removeItem(at: assets) }
+        if !FileOps.entryExists(assets) { try fm.createDirectory(at: assets, withIntermediateDirectories: false) }
+        if FileOps.entryExists(file) { try fm.removeItem(at: file) }
+        try FileOps.writeAtomically(animate.data, to: file)
+        emit(.status("Put back scene/\(animate.assetPath), which \(harness.name) had changed."))
     }
 
     private func checked(_ result: Result<CheckReport, Error>) {
@@ -341,7 +369,8 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         // and covers sessions that used the harness's own default.
         let usedModel = parser?.reportedModel ?? model
         try SceneHistory.append(SceneHistoryEntry(date: now, action: action, harness: harness.kind.rawValue, model: usedModel,
-                                                  prompt: prompt, summary: summary), to: ws.scene)
+                                                  prompt: recordedPrompt ?? prompt, summary: summary, references: references.counts),
+                                to: ws.scene)
     }
 
     // MARK: - Stills

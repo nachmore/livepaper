@@ -17,6 +17,18 @@ struct ProvenanceEntry: Identifiable, Equatable, Sendable {
     var model: String?
     var prompt: String?
     var summary: String?
+    /// Reference images the session had (`references` {reference, animate}): all of them, and how
+    /// many were animated. nil without.
+    var referenceCount: Int?
+    var animatedCount: Int?
+
+    /// "3 reference images (1 animated)", "1 picture animated", or nil.
+    var referencesText: String? {
+        guard let n = referenceCount, n > 0 else { return nil }
+        let animated = animatedCount ?? 0
+        if n == 1 && animated == 1 { return "1 picture animated" }
+        return "\(n) reference image\(n == 1 ? "" : "s")" + (animated > 0 ? " (\(animated) animated)" : "")
+    }
 
     /// AI work: an explicit create/modify, or any line that names a harness.
     var isAI: Bool { action == "create" || action == "modify" || harness != nil }
@@ -46,8 +58,14 @@ enum ProvenanceLog {
                 let t = v.trimmingCharacters(in: .whitespacesAndNewlines)
                 return t.isEmpty ? nil : t
             }
-            out.append(ProvenanceEntry(id: out.count, date: str("date").flatMap(parseDate), action: str("action") ?? str("kind"),
-                                       harness: str("harness"), model: str("model"), prompt: str("prompt"), summary: str("summary")))
+            var entry = ProvenanceEntry(id: out.count, date: str("date").flatMap(parseDate), action: str("action") ?? str("kind"),
+                                        harness: str("harness"), model: str("model"), prompt: str("prompt"), summary: str("summary"))
+            if let refs = obj["references"] as? [String: Any] {
+                func count(_ k: String) -> Int { max(0, (refs[k] as? NSNumber)?.intValue ?? 0) }
+                let total = count("reference") + count("animate")
+                if total > 0 { entry.referenceCount = total; entry.animatedCount = count("animate") }
+            }
+            out.append(entry)
         }
         return out
     }

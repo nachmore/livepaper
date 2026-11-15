@@ -15,8 +15,21 @@ final class AISessionModel: Identifiable {
         case discarded
     }
 
+    /// A reference image of the session as the session view shows it: the workspace copy.
+    struct SessionReferenceFile: Identifiable, Equatable {
+        let id: UUID
+        /// `<workspace>/references/ref-01.jpg`
+        let url: URL
+        let role: AIReferenceRole
+        /// The original's name (UI only).
+        let displayName: String
+    }
+
     let id: String
     let request: AISessionRequest
+    /// The prepared images the session was started with (kept so "Try Again" can reuse them
+    /// without opening the originals again).
+    let references: [PreparedReference]
     let harness: AIHarness
     let model: String?
     let startedAt: Date
@@ -40,12 +53,22 @@ final class AISessionModel: Identifiable {
     var isRunning: Bool { !state.phase.isTerminal }
     var isModify: Bool { if case .modify = request { return true } else { return false } }
     var targetSceneID: String? { if case .modify(let id, _) = request { return id } else { return nil } }
+    /// nil without reference images.
+    var referenceCounts: ReferenceCounts? { references.isEmpty ? nil : ReferenceCounts(roles: references.map(\.role)) }
+    /// The workspace copies, in the order the agent got them (ref-01 first).
+    var referenceFiles: [SessionReferenceFile] {
+        references.enumerated().map { i, r in
+            SessionReferenceFile(id: r.id, url: workspace.appendingPathComponent(ReferenceWorkspace.relativeImagePath(index: i + 1, format: r.vision.format)),
+                                 role: r.role, displayName: r.displayName)
+        }
+    }
 
-    init(handle: AISessionHandle, request: AISessionRequest, harness: AIHarness, model: String?,
+    init(handle: AISessionHandle, request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness, model: String?,
          timeout: TimeInterval, clonedFrom: String? = nil, now: Date = Date()) {
         self.id = handle.id
         self.handle = handle
         self.request = request
+        self.references = references
         self.harness = harness
         self.model = model
         self.timeout = timeout

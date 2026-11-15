@@ -830,13 +830,15 @@ final class AppModel {
     }
 
     /// Starts an AI session and navigates to it. `model` nil = the default from Settings › AI.
+    /// `references` are already prepared (ReferenceTray), so this only writes bytes and stays quick.
     @discardableResult
-    func startSession(_ request: AISessionRequest, harness: AIHarness, model: String?, clonedFrom: String? = nil) -> AISessionModel? {
+    func startSession(_ request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness, model: String?,
+                      clonedFrom: String? = nil) -> AISessionModel? {
         let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let chosen = (trimmed?.isEmpty == false ? trimmed : nil) ?? defaultModel(for: harness)
         do {
-            let handle = try services.ai.start(request, harness: harness, model: chosen)
-            let session = AISessionModel(handle: handle, request: request, harness: harness, model: chosen,
+            let handle = try services.ai.start(request, references: references, harness: harness, model: chosen)
+            let session = AISessionModel(handle: handle, request: request, references: references, harness: harness, model: chosen,
                                          timeout: aiSettings.timeout, clonedFrom: clonedFrom)
             sessions.insert(session, at: 0)
             session.start { [weak self] s in self?.sessionDidFinish(s) }
@@ -850,7 +852,8 @@ final class AppModel {
 
     /// "Modify with AI". Built-in scenes are read-only, so a copy is modified instead.
     @discardableResult
-    func startModify(sceneID: String, prompt: String, harness: AIHarness, model: String?) async -> AISessionModel? {
+    func startModify(sceneID: String, prompt: String, references: [PreparedReference] = [], harness: AIHarness,
+                     model: String?) async -> AISessionModel? {
         guard let entry = entry(id: sceneID) else { return nil }
         var target = sceneID
         var clonedFrom: String?
@@ -860,7 +863,8 @@ final class AppModel {
             target = copy.id
             clonedFrom = entry.manifest.name
         }
-        return startSession(.modify(sceneID: target, prompt: prompt), harness: harness, model: model, clonedFrom: clonedFrom)
+        return startSession(.modify(sceneID: target, prompt: prompt), references: references, harness: harness, model: model,
+                            clonedFrom: clonedFrom)
     }
 
     private func sessionDidFinish(_ session: AISessionModel) {
@@ -908,7 +912,8 @@ final class AppModel {
         }
     }
 
-    /// "Try again with feedback": a new session with the original prompt plus the feedback.
+    /// "Try again with feedback": a new session with the original prompt plus the feedback, and
+    /// the same reference images (same ids and roles; nothing is read from disk again).
     @discardableResult
     func retry(_ session: AISessionModel, feedback: String) -> AISessionModel? {
         let prompt = PromptComposer.retry(original: session.prompt, feedback: feedback)
@@ -919,7 +924,8 @@ final class AppModel {
         }
         if session.isRunning { session.cancel() }
         if session.resolution == nil { session.resolution = .discarded }
-        let next = startSession(request, harness: session.harness, model: session.model, clonedFrom: session.clonedFrom)
+        let next = startSession(request, references: session.references, harness: session.harness, model: session.model,
+                                clonedFrom: session.clonedFrom)
         if next != nil { sessions.removeAll { $0 === session } }
         return next
     }
