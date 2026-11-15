@@ -55,6 +55,13 @@ public struct WallpaperSaverModule: Sendable, Equatable {
         WallpaperSlot.moduleURLs(slot).contains(where: names)
     }
 
+    /// True when `moduleURL` names this saver bundle but at another location that exists — e.g. a
+    /// copy installed in /Library/Screen Savers: a choice of it is the user's own and worth putting
+    /// back on uninstall (one at a location that no longer exists isn't).
+    public func isOtherExistingCopy(_ moduleURL: URL, moduleExists: (URL) -> Bool) -> Bool {
+        names(moduleURL) && !isLocation(moduleURL) && moduleExists(moduleURL)
+    }
+
     /// True when the slot already holds exactly this saver at this location (nothing to write).
     public func isCurrentChoice(in slot: PlistValue) -> Bool {
         guard let choices = WallpaperSlot.choices(slot), choices.count == 1, choices[0].provider == WallpaperSlot.screenSaverProvider,

@@ -138,7 +138,12 @@ directories and inject fakes for commands, preferences and login items.
                                   file constantly and a stale copy would clobber newer Desktop choices)
     wallpaper-selection.json      per-slot manifest of the Idle slots LivePaper changed (original provider +
                                   configuration); uninstall restores only slots that still point at LivePaper
+                                  (written without slots when LivePaper finds itself already selected)
+    wallpaper-store-before-last-change.plist   the exact store bytes LivePaper replaced last (select or
+                                  restore), saved before each write; named if a rollback can't be confirmed
   wallpaper-store.lock            flock: one wallpaper-store apply at a time
+  helper-launch.json              the app fell back to the helper LaunchAgent because SMAppService refused
+                                  (kept to, so no login item is registered next to it)
     changed-defaults.json         every system preference LivePaper changed, with its previous value
                                   (including the lock keys, §7) — restored by uninstall
   render.sock                     RenderService socket (§8)
@@ -147,13 +152,16 @@ directories and inject fakes for commands, preferences and login items.
   renderd.pid                     informational (`livepaper server status`)
   Logs/renderd.log                output of a LivePaperRenderd started by a client
 ~/Library/Screen Savers/LivePaper.saver           installed saver, published content inside (LIVEPAPER_SAVERS_DIR)
-~/Library/LaunchAgents/com.nachmore.livepaper.helper.plist    only for the unbundled fallback (LIVEPAPER_LAUNCH_AGENTS_DIR)
+~/Library/LaunchAgents/com.nachmore.livepaper.helper.fallback.plist   only for the LaunchAgent fallback; its own
+                                  label, never the login item's (LIVEPAPER_LAUNCH_AGENTS_DIR)
+~/Library/Application Support/LivePaper.uninstalled   written by uninstall (outside the data folder): the helper
+                                  exits at launch while it exists; installing again removes it
 ~/Library/Application Support/com.apple.wallpaper/Store/Index.plist   read via WallpaperStore (LIVEPAPER_WALLPAPER_STORE)
 $TMPDIR/LivePaperPreviews/                        compiled preview HTML (the app clears it at launch)
 ```
 Uninstall keeping the scenes keeps `Library/`, `state.json`, `playlist-settings.json` and
-`ai-settings.json`; everything else in the support directory goes (backups only after a successful
-restore). Other overrides: `LIVEPAPER_RESOURCES` (app resources), `LIVEPAPER_SOURCE_ROOT`
+`ai-settings.json`; everything else in the support directory goes (backups only when no step failed).
+Other overrides: `LIVEPAPER_RESOURCES` (app resources), `LIVEPAPER_SOURCE_ROOT`
 (`swift run` from the source tree), `LIVEPAPER_CLI` (the CLI the workspace shim execs).
 The saver keeps its own session bookkeeping in ScreenSaverDefaults (inside its sandbox).
 
@@ -482,10 +490,15 @@ Budgets (`CheckBudgets`):
   including "waiting for approval in Login Items") → First scene (pick what plays).
 * **Uninstall** (Settings › About): shows exactly what will happen, then runs
   `InstallServicing.performUninstall` and shows the step log (done / nothing to do / failed with the
-  reason). Steps: unregister the helper, restore the previous screen-saver choice, restore the lock
-  keys, restore other changed preferences, remove the saver, delete LivePaper's data (optionally the
-  library). Failures can be retried (finished steps are skipped); on success the app moves itself
-  to the Trash and quits.
+  reason). Steps: mark LivePaper as uninstalled (`LivePaper.uninstalled`, §4.1), unregister and stop
+  the helper, switch every screen-saver slot that still names LivePaper.saver back (recorded
+  original, else the placeholder, else for SystemDefault the pre-LivePaper choice or macOS's Message
+  saver — docs/RESEARCH.md §5.7), restore the lock keys, restore other changed preferences, remove the
+  saver (only once the store, re-read, no longer points at it), delete LivePaper's data (optionally
+  the library; backups/ stay if any step failed). If the screen saver can't be switched back
+  automatically the step fails and says to pick another saver in System Settings and run uninstall
+  again. Failures can be retried (finished steps are skipped); on success the app moves itself to
+  the Trash and quits.
 * **Document type:** `.lpscene` (`com.nachmore.livepaper.scene`, a package conforming to
   `com.apple.package`); opening one imports it into the library.
 * **Developer modes:** `LIVEPAPER_MOCK=1` runs on sample data in a temp directory with mock

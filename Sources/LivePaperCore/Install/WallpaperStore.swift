@@ -54,8 +54,23 @@ public struct WallpaperStore: Sendable {
 
     /// The applier that writes this store (LIVE PATH with a LiveWallpaperSystem).
     public func applier(system: WallpaperSystem, clock: WallpaperClock = SystemWallpaperClock(),
-                        options: WallpaperApplyOptions = WallpaperApplyOptions(), lockURL: URL? = nil) -> WallpaperStoreApplier {
-        WallpaperStoreApplier(storeURL: url, system: system, clock: clock, options: options, lockURL: lockURL)
+                        options: WallpaperApplyOptions = WallpaperApplyOptions(), lockURL: URL? = nil,
+                        snapshotURL: URL? = nil) -> WallpaperStoreApplier {
+        WallpaperStoreApplier(storeURL: url, system: system, clock: clock, options: options, lockURL: lockURL, snapshotURL: snapshotURL)
+    }
+
+    /// True while some Idle slot would point at a missing module once the installed saver is
+    /// deleted: it names this LivePaper.saver, or a LivePaper.saver at a location that doesn't exist.
+    /// A copy at another location that exists (e.g. /Library/Screen Savers) doesn't count. A store in
+    /// an unknown format counts whenever its Idle subtrees mention LivePaper (`isSelected()`).
+    public func dependsOnSaver(moduleExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) -> Bool {
+        guard let document = try? read() else { return isSelected() }
+        return document.records.contains { record in
+            guard let idle = record.idle else { return false }
+            return WallpaperSlot.moduleURLs(idle).contains { url in
+                module.names(url) && !module.isOtherExistingCopy(url, moduleExists: moduleExists)
+            }
+        }
     }
 
     // MARK: - Fallback scan

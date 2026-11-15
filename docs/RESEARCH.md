@@ -179,25 +179,35 @@ LivePaper changes the store only on an explicit click, never at login or on a ti
 * The saver isn't installed.
 
 **Otherwise it runs this sequence:**
-1. Hold a lock file, so no other LivePaper process edits the store at the same time.
+1. Hold a lock file, so no other LivePaper process edits the store at the same time, and run the
+   checks above again once it has it.
 2. Wait until the file has been unchanged for about 1 s.
 3. Read the store and decode it with the mirror.
-4. Back up before writing anything:
-   * the raw file, the first time only;
-   * a manifest that records, for each Idle slot it replaces, the user's original choice.
-5. Replace only `SystemDefault.Idle` and the explicit (non-placeholder) Idle slots.
-6. Check the result before writing:
+4. Replace only `SystemDefault.Idle` and the explicit (non-placeholder) Idle slots.
+5. Check the result before writing:
    * it still decodes;
    * only the planned Idle slots differ;
-   * every Desktop slot is byte-identical;
-   * the file hasn't changed since it was read.
-7. Put it in place with a single atomic rename, then **immediately** run
-   `killall WallpaperAgent`.
-8. Wait for the restarted agent's own rewrite, re-read the store and confirm the result:
-   * If the Idle slots were lost (the old agent wrote between the rename and the kill), retry, at
-     most twice, 2 s apart.
-   * If the Desktop slots changed or the store is unreadable, put the original bytes back and
-     restart the agent once more.
+   * every Desktop slot is byte-identical.
+6. Check again that the session is unlocked and System Settings isn't open: the waits above take
+   seconds, and locking the Mac to look at the new screen saver right after clicking is natural.
+   Every agent restart below is preceded by the same check.
+7. Back up before writing anything:
+   * the exact bytes about to be replaced (every time, select and restore alike);
+   * the raw file, the first time only;
+   * a manifest that records, for each Idle slot it replaces, the user's original choice.
+8. Put it in place with a single atomic rename (only if the file hasn't changed since it was read),
+   then **immediately** run `killall WallpaperAgent`.
+9. Wait for the restarted agent's own rewrite, re-read the store and confirm the result. A planned
+   slot counts as kept when it makes the planned choice; the agent may spell option values and
+   timestamps its own way (System Settings itself copies the Desktop's option values into saver
+   slots):
+   * If an Idle choice was lost (the old agent wrote between the rename and the kill), plan again
+     and retry, at most twice, 2 s apart. If the new plan is empty, the agent's own store already
+     is right: confirmed without another restart.
+   * If the Desktop slots changed or the store is unreadable, roll back: put the original bytes
+     back through the same protected steps (wait until unlocked, rename, restart, confirm, retry at
+     most twice). Only a confirmed rollback is reported as "put the previous settings back";
+     otherwise LivePaper says it couldn't confirm it and names the saved copy from step 7.
 
 Optional hardening, not used: freezing the agent with SIGSTOP while swapping the file would close
 the race completely. But if LivePaper crashed mid-step, the process that draws the desktop and the
@@ -205,18 +215,29 @@ lock screen would stay frozen.
 
 ### 5.7 Undoing it (uninstall)
 * Restore runs **before** the `.saver` is deleted. The store must never point at a missing module;
-  what the agent does then is Unknown.
-* Only Idle slots that **still** point at LivePaper are changed:
-  * If the manifest has an original for that slot, the original goes back exactly.
+  what the agent does then is Unknown. So the saver is removed only after the store has been
+  re-read and no Idle slot names it (a copy of LivePaper.saver at another location that exists
+  doesn't count).
+* Every Idle slot that **still** names LivePaper.saver is changed, whether or not LivePaper made
+  the selection itself (it may have been picked by hand in System Settings):
+  * If the manifest has an original for that slot, the original goes back exactly. LivePaper.saver
+    at another location that still exists (say /Library/Screen Savers) is recorded as an original
+    too, so that location comes back.
   * A slot with no recorded original gets the placeholder. An example is a display added since
     install, which was copied from `SystemDefault`.
   * A recorded original whose module was deleted since also gets the placeholder. The exception
     is `SystemDefault`, which has nothing to fall back to: its original goes back as it was.
+  * `SystemDefault` (or an explicit `AllSpacesAndDisplays`) without a recorded original gets the
+    choice the raw pre-LivePaper copy has there, unless that names LivePaper too; otherwise macOS's
+    own Message saver (`/System/Library/Screen Savers/FloatingMessage.saver`, the same legacy
+    `.saver` payload as §5.3), and uninstall says so.
 * Slots the user changed since are left alone.
 * The whole old file is **never** put back: that would undo later Desktop changes and drop
   displays and Spaces added since.
-* If the restore fails for a reason that may pass, such as System Settings being open, the saver
-  is kept and uninstall can be run again.
+* If the restore can't run — for a reason that may pass, such as System Settings being open, or
+  one that won't, such as a new store format — the step fails and says what to do, and the saver
+  and every backup are kept. Once the user has picked another saver in System Settings, running
+  uninstall again finishes.
 
 ### 5.8 Detection
 * Reading the store, as in §5.2, is the only reliable signal. "Selected" means that an Idle slot's

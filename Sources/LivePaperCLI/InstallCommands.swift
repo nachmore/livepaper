@@ -255,6 +255,16 @@ enum InstallCommands {
         }
         print("LivePaper's helper, screen saver and settings are removed" + (removeLibrary ? ", and its data deleted." : "."))
         if !removeLibrary { print("Your scenes are kept in \(displayPath(LPPaths.library)).") }
+        let loginItemLeft = steps.contains { step in
+            guard step.title == InstallService.unregisterLoginItemTitle, case .skipped(let why) = step.outcome else { return false }
+            return why.contains("Login Items")
+        }
+        if loginItemLeft, let app = CLIEnvironment.appBundle {
+            // Only the app's own executable can unregister its login item; the uninstall marker keeps
+            // the entry from starting the helper in the meantime.
+            print("LivePaper's entry in System Settings › General › Login Items can only be removed by the app: it can't " +
+                  "start the helper any more, and it goes away once \(displayPath(app)) is deleted (or remove it there).")
+        }
         if let app = CLIEnvironment.appBundle { print("Delete \(displayPath(app)) to finish (move it to the Trash).") }
         print("If you picked another screen saver before LivePaper, choose it again in System Settings › Wallpaper › Screen Saver.")
         return ExitCode.ok

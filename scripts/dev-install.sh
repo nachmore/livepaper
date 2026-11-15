@@ -73,12 +73,14 @@ codesign --verify --deep --strict "$DEST"
 LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister
 [ -x "$LSREGISTER" ] && "$LSREGISTER" -f "$DEST" >/dev/null 2>&1 || true
 
-# A registered helper keeps running the old binary until it restarts.
-HELPER="gui/$(id -u)/com.nachmore.livepaper.helper"
-if launchctl print "$HELPER" >/dev/null 2>&1; then
-  echo "▸ restarting the helper"
-  launchctl kickstart -k "$HELPER" >/dev/null 2>&1 || true
-fi
+# A registered helper keeps running the old binary until it restarts (the login item, or the
+# LaunchAgent fallback, which has its own label).
+for HELPER in "gui/$(id -u)/com.nachmore.livepaper.helper" "gui/$(id -u)/com.nachmore.livepaper.helper.fallback"; do
+  if launchctl print "$HELPER" >/dev/null 2>&1; then
+    echo "▸ restarting the helper"
+    launchctl kickstart -k "$HELPER" >/dev/null 2>&1 || true
+  fi
+done
 # A render daemon started from the old bundle hands over to the next one on demand.
 CLI="$DEST/Contents/Helpers/livepaper"
 "$CLI" server stop >/dev/null 2>&1 || true
