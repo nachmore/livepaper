@@ -138,8 +138,10 @@ enum AICommands {
         let session = try ai.start(request, harness: harness, model: model?.isEmpty == false ? model : nil)
         out.started(session: session, harness: harness, model: model, request: request)
 
-        // Ctrl-C cancels the agent (its whole process group); a second Ctrl-C quits at once.
-        let interrupt = Interrupts { session.cancel() }
+        // Ctrl-C cancels the agent (its whole process group); a second Ctrl-C quits at once, and
+        // closing the terminal (SIGHUP) stops the agent synchronously before exiting.
+        let interrupt = Interrupts(onInterrupt: { session.cancel() },
+                                   onExit: { _ = (session as? AISessionTerminating)?.terminateNow(grace: 0) })
         var candidate: URL?
         var failure: String?
         var report: CheckReport?
@@ -329,23 +331,28 @@ final class SessionPrinter {
 }
 
 /// SIGINT/SIGTERM while a session runs: the first one calls `onInterrupt` (cancel the agent and let
-/// the event stream finish), a second one exits immediately.
+/// the event stream finish); a second one, or SIGHUP (terminal closed), calls `onExit` (stop the
+/// agent's process group synchronously, so nothing is orphaned) and exits.
 final class Interrupts: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
     private var sources: [DispatchSourceSignal] = []
 
-    init(_ onInterrupt: @escaping @Sendable () -> Void) {
-        for sig in [SIGINT, SIGTERM] {
+    init(onInterrupt: @escaping @Sendable () -> Void, onExit: @escaping @Sendable () -> Void) {
+        for sig in [SIGINT, SIGTERM, SIGHUP] {
             signal(sig, SIG_IGN)   // handled by the dispatch source below
             let source = DispatchSource.makeSignalSource(signal: sig, queue: .global(qos: .userInitiated))
             source.setEventHandler { [weak self] in
                 guard let self else { return }
                 let n = self.lock.withLock { () -> Int in self.count += 1; return self.count }
-                if n == 1 {
+                if sig == SIGHUP {
+                    onExit()
+                    exit(129)
+                } else if n == 1 {
                     FileHandle.standardError.write(Data("\n… cancelling (press Ctrl-C again to quit at once)\n".utf8))
                     onInterrupt()
                 } else {
+                    onExit()
                     exit(130)
                 }
             }
@@ -362,5 +369,6 @@ final class Interrupts: @unchecked Sendable {
         sources = []
         signal(SIGINT, SIG_DFL)
         signal(SIGTERM, SIG_DFL)
+        signal(SIGHUP, SIG_DFL)
     }
 }
