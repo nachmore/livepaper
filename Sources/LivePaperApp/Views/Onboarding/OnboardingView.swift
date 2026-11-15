@@ -189,17 +189,29 @@ private struct PageHeader: View {
     }
 }
 
-/// A check row with an optional action on the right.
-private struct CheckWithAction<Action: View>: View {
-    let check: SetupCheck
-    @ViewBuilder var action: Action
+/// Status rows grouped in one card, each with an optional action on the right.
+private struct CheckCard<Action: View>: View {
+    let checks: [SetupCheck]
+    let action: (SetupCheck) -> Action
+
+    init(checks: [SetupCheck], @ViewBuilder action: @escaping (SetupCheck) -> Action) {
+        self.checks = checks
+        self.action = action
+    }
+
     var body: some View {
-        HStack(alignment: .center, spacing: 12) {
-            SetupCheckRow(check: check)
-            Spacer(minLength: 8)
-            action
+        VStack(spacing: 0) {
+            ForEach(Array(checks.enumerated()), id: \.element.id) { index, check in
+                if index > 0 { Divider().padding(.leading, 42) }
+                HStack(alignment: .center, spacing: 12) {
+                    SetupCheckRow(check: check)
+                    Spacer(minLength: 8)
+                    action(check)
+                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 11)
+            }
         }
-        .padding(14)
         .card(cornerRadius: 10)
     }
 }
@@ -320,11 +332,7 @@ private struct ScreenSaverPage: View {
         VStack(alignment: .leading, spacing: 20) {
             PageHeader(title: "Make LivePaper your screen saver",
                        text: "On macOS the lock screen shows the screen saver that is running, so LivePaper's scenes play as your screen saver. Your current choice is backed up first.")
-            VStack(spacing: 10) {
-                ForEach(checks) { check in
-                    CheckWithAction(check: check) { EmptyView() }
-                }
-            }
+            CheckCard(checks: checks) { _ in EmptyView() }
             let guided = needsGuidedSelection && status.saverInstalled && !status.saverSelected
             if !SetupChecklist.isComplete(.screenSaver, status: status) && !guided {
                 HStack(spacing: 10) {
@@ -358,7 +366,7 @@ struct GuidedSaverSelection: View {
                 .font(.headline)
             HStack(alignment: .top, spacing: 18) {
                 SettingsIllustration()
-                    .frame(width: 260, height: 168)
+                    .frame(width: 240, height: 140)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 10) {
                     GuideStep(n: 1, text: "Click Open Screen Saver Settings below.")
@@ -468,20 +476,16 @@ private struct LockPage: View {
         VStack(alignment: .leading, spacing: 20) {
             PageHeader(title: "Lock with your scene",
                        text: "macOS shows the screen saver on the lock screen only if it is already running when the Mac locks. LivePaper's helper gives you a shortcut that starts your scene first, then locks.")
-            VStack(spacing: 10) {
-                ForEach(SetupChecklist.checks(for: .lock, status: status)) { check in
-                    CheckWithAction(check: check) {
-                        switch (check.id, check.state) {
-                        case (.helper, .needed):
-                            Button("Start Helper") { Task { await model.registerHelper() } }
-                                .buttonStyle(.borderedProminent)
-                                .disabled(model.isInstallBusy)
-                        case (.password, .needed):
-                            Button("Open Lock Screen Settings") { SystemActions.openLockScreenSettings() }
-                        default:
-                            EmptyView()
-                        }
-                    }
+            CheckCard(checks: SetupChecklist.checks(for: .lock, status: status)) { check in
+                switch (check.id, check.state) {
+                case (.helper, .needed):
+                    Button("Start Helper") { Task { await model.registerHelper() } }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.isInstallBusy)
+                case (.password, .needed):
+                    Button("Open Lock Screen Settings") { SystemActions.openLockScreenSettings() }
+                default:
+                    EmptyView()
                 }
             }
             if let hotkey = model.sharedState.lock.hotkey {
@@ -522,11 +526,9 @@ private struct LockKeysPage: View {
             }
             .padding(14)
             .card(cornerRadius: 10)
-            ForEach(SetupChecklist.checks(for: .lockKeys, status: status)) { check in
-                CheckWithAction(check: check) {
-                    if !status.accessibilityTrusted {
-                        Button("Open Accessibility Settings") { model.openAccessibilitySettings() }
-                    }
+            CheckCard(checks: SetupChecklist.checks(for: .lockKeys, status: status)) { _ in
+                if !status.accessibilityTrusted {
+                    Button("Open Accessibility Settings") { model.openAccessibilitySettings() }
                 }
             }
             Text("Catching keys needs Accessibility access. If the helper ever stops, the keys simply work as they always did.")

@@ -58,22 +58,32 @@ enum SnapshotHarness {
             render(name, size: size, dark: dark, view: view, model: model, into: dir)
         }
 
-        // Onboarding first: it shows the initial (nothing installed) state.
+        // Onboarding first: it starts from the initial (nothing installed) state.
         let sheet = CGSize(width: 800, height: 580)
         shoot("onboarding-welcome-light", sheet, dark: false, OnboardingView(initialStep: .welcome))
         try? services.install.installSaver()
         wait { await model.refreshInstallStatus() }
         shoot("onboarding-saver-dark", sheet, dark: true, OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
-        shoot("onboarding-lockkeys-light", sheet, dark: false, OnboardingView(initialStep: .lockKeys))
+        shoot("onboarding-lock-light", sheet, dark: false, OnboardingView(initialStep: .lock))
+        shoot("onboarding-lockkeys-dark", sheet, dark: true, OnboardingView(initialStep: .lockKeys))
         shoot("onboarding-scene-light", sheet, dark: false, OnboardingView(initialStep: .firstScene))
 
+        // Library: banners, both appearances, a narrow window and an empty search.
         model.section = .library
         model.banners.post(.success, "Screen saver updated", message: "9 scenes published.")
         shoot("library-light", main, dark: false, MainWindowView())
-        model.banners.banners.forEach { model.banners.dismiss($0.id) }
+        shoot("library-dark", main, dark: true, MainWindowView())
+        clearBanners(model)
+        model.banners.error("Couldn't update the screen saver", SnapshotError(), retry: {})
+        shoot("library-narrow-light", CGSize(width: 900, height: 700), dark: false, MainWindowView())
+        clearBanners(model)
+        model.query.text = "volcano"
+        shoot("library-noresults-dark", CGSize(width: 900, height: 500), dark: true, MainWindowView())
+        model.query.text = ""
         model.libraryPath = ["paper-lanterns"]
         shoot("detail-dark", main, dark: true, MainWindowView())
         model.libraryPath = []
+
         model.section = .create
         shoot("create-light", main, dark: false, MainWindowView())
         shoot("create-narrow-dark", CGSize(width: 880, height: 760), dark: true, MainWindowView())
@@ -81,23 +91,40 @@ enum SnapshotHarness {
         shoot("session-running-dark", main, dark: true, MainWindowView())
         if let done { model.section = .session(done.id) }
         shoot("session-done-light", main, dark: false, MainWindowView())
+
         // An explicit playlist: per-card markers and the ordered list with remove buttons.
         wait {
             await model.useAsScreenSaver("paper-lanterns")
             await model.addToPlaylist("neon-rain")
             await model.addToPlaylist("aurora-lake")
         }
-        model.banners.banners.forEach { model.banners.dismiss($0.id) }
+        clearBanners(model)
         model.section = .playlist
         shoot("playlist-dark", main, dark: true, MainWindowView())
         model.section = .library
         shoot("library-explicit-dark", main, dark: true, MainWindowView())
+
+        let shortSheet = CGSize(width: 480, height: 170)
+        shoot("sheet-clone-light", shortSheet, dark: false, SceneActionSheet(action: .clone("aurora-lake")))
+        shoot("sheet-modify-dark", CGSize(width: 480, height: 330), dark: true, SceneActionSheet(action: .modify("aurora-lake")))
+        shoot("sheet-delete-light", shortSheet, dark: false, SceneActionSheet(action: .delete("neon-rain")))
         shoot("settings-saver-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .screenSaver))
+        shoot("settings-lock-light", CGSize(width: 640, height: 600), dark: false, SettingsView(initialTab: .lock))
+        shoot("settings-performance-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .performance))
+        shoot("settings-ai-dark", CGSize(width: 640, height: 560), dark: true, SettingsView(initialTab: .ai))
         shoot("settings-about-dark", CGSize(width: 640, height: 440), dark: true, SettingsView(initialTab: .about))
         shoot("uninstall-dark", CGSize(width: 520, height: 470), dark: true, UninstallSheet())
 
         running?.cancel()
         print("snapshot: wrote PNGs to \(dir.path)")
+    }
+
+    private static func clearBanners(_ model: AppModel) {
+        model.banners.banners.forEach { model.banners.dismiss($0.id) }
+    }
+
+    private struct SnapshotError: LocalizedError {
+        var errorDescription: String? { "The screen saver bundle is busy. Try again in a moment." }
     }
 
     // MARK: rendering
