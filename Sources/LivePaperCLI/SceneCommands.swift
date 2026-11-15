@@ -7,7 +7,8 @@ enum SceneCommands {
     static var all: [CLICommand] {
         [
             CLICommand(name: "check", synopsis: "<dir.lpscene> [--quick] [--power] [--json]",
-                       summary: "build + validate a scene: stills, JS errors, benchmarks, brightness, motion; exit 0 only if it passes",
+                       summary: "build + validate a scene: stills, JS errors, benchmarks, brightness, motion (and, in an AI session " +
+                                "animating a picture, that the stills show it); exit 0 only if it passes",
                        run: check),
             CLICommand(name: "still", synopsis: "<dir.lpscene> [--t 8] [--size 1512x982] [--dpr 2] [--out x.png] [--no-clock] [--json]",
                        summary: "render one frame of a scene to a PNG", run: still),
@@ -32,7 +33,10 @@ enum SceneCommands {
         let json = args.flag("json")
         let started = Date()
         if !json { checker.progress = { line in stderr("  … \(line)") } }
-        let report = try await checker.check(package: pkg, options: CheckOptions(quick: args.flag("quick"), power: args.flag("power")))
+        // In an AI session that animates a picture, the session's candidate is compared with it.
+        let options = CheckOptions(quick: args.flag("quick"), power: args.flag("power"),
+                                   reference: ReferenceWorkspace.checkTarget(forPackage: pkg))
+        let report = try await checker.check(package: pkg, options: options)
         let previews = StillPreviews.write(for: report, package: pkg)
         if json {
             print(String(decoding: try SceneChecker.reportEncoder().encode(report), as: UTF8.self))
@@ -64,6 +68,7 @@ enum SceneCommands {
             print(line)
         }
         printMotion(r, checkDir: checkDir, previews: previews)
+        printReference(r)
         if let mw = r.energyMw {
             let p = SceneChecker.powerProfile
             print("  energy       \(fmt(mw)) mW at \(p.fps) fps, \(Int(p.scale * 100)) % scale (battery profile; budget \(fmt(budgets.energyMaxMw)))")
@@ -110,6 +115,31 @@ enum SceneCommands {
             print("               heat map \(displayPath(shown)) (amber = moves most of the time, blue = sometimes, grey = still, " +
                   "red outline = flicker)")
         }
+    }
+
+    /// "  picture      like the reference: 0.93 (16:10 0.94 · 32:9 0.90 · 5:4 0.92)"
+    static func printReference(_ r: CheckReport) {
+        guard let ref = r.reference else { return }
+        var line = "  picture      "
+        if !ref.referencedInScene { line += "scene.js never loads \(ref.asset)" }
+        else if let median = ref.median {
+            line += "like the reference: \(fmt(median, 2)) (min \(fmt(CheckBudgets().reference.failBelow, 2)), aim \(fmt(CheckBudgets().reference.warnBelow, 2)))"
+            var groups: [(String, [Double])] = []
+            for (label, score) in ref.similarity.sorted(by: { $0.key < $1.key }) {
+                let size = String(label.split(separator: " ").first ?? "")
+                let name = ["1512x982@2": "16:10", "2560x720@1": "32:9", "1280x1024@1": "5:4"][size] ?? size
+                if let i = groups.firstIndex(where: { $0.0 == name }) { groups[i].1.append(score) } else { groups.append((name, [score])) }
+            }
+            let order = ["16:10", "32:9", "5:4"]
+            groups.sort { (order.firstIndex(of: $0.0) ?? 9, $0.0) < (order.firstIndex(of: $1.0) ?? 9, $1.0) }
+            if groups.count > 1 {
+                line += "  ·  " + groups.map { name, xs in "\(name) \(fmt(xs.sorted()[xs.count / 2], 2))" }.joined(separator: " · ")
+            }
+        } else {
+            line += "not compared"
+        }
+        if !ref.assetIntact { line += "  ·  \(ref.asset) was changed (LivePaper restores it)" }
+        print(line)
     }
 
     // MARK: - still / bench / live

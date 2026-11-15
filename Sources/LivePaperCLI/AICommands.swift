@@ -4,6 +4,10 @@
 // its events are streamed here; LivePaper runs `check` itself when the agent exits; a passing
 // candidate is added to the library (create) or replaces the scene (modify, previous version kept
 // in history/) after the user accepts it — or straight away with --yes.
+//
+// Reference images: `--ref <image|folder>` (repeatable) and `--animate <image>` are expanded,
+// checked and re-encoded here (ReferenceFolders / ReferenceImporter) before the session starts;
+// the agent gets copies in its workspace. A prompt that names image files without them gets a hint.
 import Darwin
 import Foundation
 import LivePaperCore
@@ -11,15 +15,17 @@ import LivePaperCore
 enum AICommands {
     static var all: [CLICommand] {
         [CLICommand(name: "ai",
-                    synopsis: "create \"<prompt>\" | modify <scene-id> \"<prompt>\" | harnesses   " +
+                    synopsis: "create [\"<prompt>\"] | modify <scene-id> [\"<prompt>\"] | harnesses   " +
+                              "[--ref <image|folder>]… [--animate <image>] " +
                               "[--harness claude|codex|kiro|custom] [--command <template>] [--model <name>] " +
                               "[--timeout <minutes>] [--yes] [--json]",
-                    summary: "create or modify a scene with an AI coding agent (Claude Code, Codex, Kiro CLI or a custom command)",
+                    summary: "create or modify a scene with an AI coding agent (Claude Code, Codex, Kiro CLI or a custom command); " +
+                             "--ref attaches reference images (up to \(ReferenceLimits.maxImages); folders expand), --animate one picture to bring to life",
                     run: ai)]
     }
 
     static let flags: Set<String> = ["yes", "json"]
-    static let options: Set<String> = ["harness", "command", "model", "timeout"]
+    static let options: Set<String> = ["harness", "command", "model", "timeout", "ref", "animate"]
 
     static func ai(_ argv: [String]) async throws -> Int32 {
         var args = try Arguments(argv, flags: flags, options: options)
@@ -27,17 +33,21 @@ enum AICommands {
             throw UsageError("missing action: create, modify or harnesses")
         }
         args.positional.removeFirst()
+        // With images the prompt may be left out (ReferencePrompts.defaultPrompt).
+        let hasImages = !args.strings("ref").isEmpty || !args.strings("animate").isEmpty
         switch action {
         case "create":
-            guard args.positional.count == 1, let prompt = args.positional.first?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !prompt.isEmpty else {
-                throw UsageError("ai create needs exactly one prompt argument (quote it)")
+            let prompt = args.positional.first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard args.positional.count <= 1, !prompt.isEmpty || hasImages else {
+                throw UsageError("ai create needs exactly one prompt argument (quote it), or images with --ref / --animate")
             }
-            return try await run(.create(prompt: prompt), args)
+            return try await run(prompt: prompt, request: { .create(prompt: $0) }, args)
         case "modify":
-            guard args.positional.count == 2 else { throw UsageError("ai modify needs a scene id and one prompt argument (quote it)") }
-            let id = args.positional[0], prompt = args.positional[1].trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !prompt.isEmpty else { throw UsageError("the prompt is empty") }
+            guard (1...2).contains(args.positional.count), args.positional.count == 2 || hasImages else {
+                throw UsageError("ai modify needs a scene id and one prompt argument (quote it)")
+            }
+            let id = args.positional[0], prompt = args.positional.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            guard !prompt.isEmpty || hasImages else { throw UsageError("the prompt is empty") }
             guard let scene = try CLIServices.live.library.scene(id: id) else {
                 throw LibraryError.notFound("\(id). Run `livepaper list` to see the scene ids.")
             }
@@ -48,7 +58,7 @@ enum AICommands {
             guard scene.manifest.kind == .web else {
                 throw LibraryError.invalid("\(id) is a video scene; AI sessions only modify web scenes.")
             }
-            return try await run(.modify(sceneID: id, prompt: prompt), args)
+            return try await run(prompt: prompt, request: { .modify(sceneID: id, prompt: $0) }, args)
         case "harnesses":
             guard args.positional.isEmpty else { throw UsageError("ai harnesses takes no arguments") }
             return await harnesses(json: args.flag("json"))
@@ -121,22 +131,89 @@ enum AICommands {
         return AIService.customHarness(template: t)
     }
 
+    // MARK: - Reference images
+
+    /// `~/x` → the home folder's x (the shell doesn't expand `--ref=~/x`).
+    static func expandingTilde(_ path: String) -> URL {
+        if path == "~" { return LPPaths.home }
+        if path.hasPrefix("~/") { return LPPaths.home.appendingPathComponent(String(path.dropFirst(2))) }
+        return URL(fileURLWithPath: path)
+    }
+
+    /// `--ref` / `--animate` → the inputs to prepare (validated, folders expanded, nothing decoded yet).
+    static func collectReferences(_ args: Arguments, out: SessionPrinter) throws -> [ReferenceInput] {
+        let animate = args.strings("animate")
+        guard animate.count <= 1 else { throw UsageError("--animate can be given once (one picture per session is animated)") }
+        let refs = args.strings("ref")
+        guard !refs.isEmpty || !animate.isEmpty else { return [] }
+        do {
+            let (inputs, leftOut) = try ReferenceFolders.collect(references: refs.map(expandingTilde), animate: animate.first.map(expandingTilde))
+            if let sentence = leftOut.sentence() { out.note("livepaper ai: \(sentence)") }
+            guard !inputs.isEmpty else { throw UsageError("--ref found no images in \(refs.joined(separator: ", "))") }
+            return inputs
+        } catch let e as ReferenceError {
+            // Asking for more than a session takes is a usage error; a bad file is the request's problem (exit 1).
+            switch e {
+            case .tooMany, .tooManyAnimated, .animateNeedsFile: throw UsageError(e.localizedDescription)
+            default: throw e
+            }
+        }
+    }
+
+    /// Notes for paths in the prompt the agent won't be able to open (no --ref / --animate given).
+    /// Paths in privacy-protected folders (Desktop, Documents, …) aren't looked up: the note is
+    /// syntax-based there, so the terminal never gets a privacy prompt for a hint.
+    static func pathHints(_ prompt: String) -> [String] {
+        PromptPaths.mentions(in: prompt).prefix(3).compactMap { m -> String? in
+            let kind: PromptPathMention.Kind
+            if PromptPaths.isPrivacyProtected(m.url) {
+                kind = m.kind
+            } else {
+                switch PromptPaths.resolve(m) {
+                case .image: kind = .image
+                case .folder: kind = .folder
+                case .missing, .notAnImage: return nil
+                }
+            }
+            let typed = m.text.replacingOccurrences(of: "\\ ", with: " ")
+            let arg = shellQuoted(typed.hasPrefix("file://") ? m.url.path : typed)
+            if kind == .folder {
+                return "livepaper ai: the prompt mentions \(typed) (a folder). The agent can't open files outside its workspace; " +
+                    "add --ref \(arg) to attach copies (or --animate <image> to animate one exactly)."
+            }
+            return "livepaper ai: the prompt mentions \(typed) (an image). The agent can't open files outside its workspace; " +
+                "add --ref \(arg) to attach a copy (or --animate \(arg) to animate it exactly)."
+        }
+    }
+
     // MARK: - Running a session
 
-    static func run(_ request: AISessionRequest, _ args: Arguments) async throws -> Int32 {
+    /// - Parameter typed: the prompt as given (may be empty when images are attached).
+    static func run(prompt typed: String, request make: (String) -> AISessionRequest, _ args: Arguments) async throws -> Int32 {
         let services = CLIServices.live
         let timeout = try args.int("timeout").map { minutes -> TimeInterval in
             guard (1...240).contains(minutes) else { throw UsageError("--timeout must be 1 … 240 minutes") }
             return TimeInterval(minutes * 60)
         }
+        let out = SessionPrinter(json: args.flag("json"))
+        let inputs = try collectReferences(args, out: out)
+        if inputs.isEmpty { pathHints(typed).forEach(out.note) }
         // --timeout needs its own AIService (the live one reads the timeout from the AI settings).
         let ai: AIServicing = timeout.map { AIService(library: services.library, checker: services.checker, timeout: $0) } ?? services.ai
         let harness = try await chooseHarness(args, service: ai as? AIService)
         let model = args.string("model")?.trimmingCharacters(in: .whitespaces)
-        let out = SessionPrinter(json: args.flag("json"))
 
-        let session = try ai.start(request, harness: harness, model: model?.isEmpty == false ? model : nil)
-        out.started(session: session, harness: harness, model: model, request: request)
+        // Decoded and re-encoded one at a time (a few hundred ms per photo).
+        var references: [PreparedReference] = []
+        if !inputs.isEmpty {
+            if !out.json { stderr("  \u{2026} preparing \(inputs.count == 1 ? "1 reference image" : "\(inputs.count) reference images")") }
+            for input in inputs { references.append(try ReferenceImporter.prepare(input)) }
+        }
+        let prompt = typed.isEmpty ? (ReferencePrompts.defaultPrompt(roles: references.map(\.role)) ?? typed) : typed
+        let request = make(prompt)
+
+        let session = try ai.start(request, references: references, harness: harness, model: model?.isEmpty == false ? model : nil)
+        out.started(session: session, harness: harness, model: model, request: request, references: references)
 
         // Ctrl-C cancels the agent (its whole process group); a second Ctrl-C quits at once, and
         // closing the terminal (SIGHUP) stops the agent synchronously before exiting.
@@ -214,12 +291,18 @@ final class SessionPrinter {
 
     init(json: Bool) { self.json = json }
 
-    func started(session: AISessionHandle, harness: AIHarness, model: String?, request: AISessionRequest) {
+    func started(session: AISessionHandle, harness: AIHarness, model: String?, request: AISessionRequest,
+                 references: [PreparedReference] = []) {
         workspace = session.workspace
         candidate = AIWorkspace(root: session.workspace).scene
+        let counts = references.isEmpty ? nil : ReferenceCounts(roles: references.map(\.role))
         if json {
-            emit(["event": "started", "session": session.id, "workspace": session.workspace.path, "harness": harness.kind.rawValue,
-                  "harnessName": harness.name, "executable": harness.executable, "model": model ?? NSNull()])
+            var o: [String: Any] = ["event": "started", "session": session.id, "workspace": session.workspace.path,
+                                    "harness": harness.kind.rawValue, "harnessName": harness.name, "executable": harness.executable,
+                                    "model": model ?? NSNull()]
+            // Counts only, like history.jsonl.
+            if let counts { o["references"] = ["reference": counts.reference, "animate": counts.animate] }
+            emit(o)
             return
         }
         let what: String
@@ -228,7 +311,13 @@ final class SessionPrinter {
         case .modify(let id, _): what = "modifying \(id)"
         }
         let version = harness.version.map { " \($0)" } ?? ""
-        print("livepaper ai: \(what) with \(harness.name)\(version)\(model.map { " (model \($0))" } ?? "")")
+        print("livepaper ai: \(what) with \(harness.name)\(version)\(model.map { " (model \($0))" } ?? "")" +
+              (counts.map { " \u{00B7} \($0.description)" } ?? ""))
+        // The user's own terminal: naming their files here is fine (they never reach the workspace).
+        for (i, ref) in references.enumerated() {
+            let origin = ref.requestedPath.map { displayPath(URL(fileURLWithPath: $0)) } ?? ref.displayName
+            print("  \(String(format: "ref-%02d", i + 1)) \u{2190} \(origin)\(ref.role == .animate ? " (animate)" : "")")
+        }
         print("  workspace \(displayPath(session.workspace))  ·  Ctrl-C cancels")
     }
 
