@@ -1,8 +1,10 @@
-// saverhost — loads build/Voltron.saver the way the screen-saver host does (NSBundle principal
+// saverhost — loads a .saver bundle the way the screen-saver host does (NSBundle principal
 // class -> ScreenSaverView(frame:isPreview:)), runs it in an off-screen window and snapshots the
-// web view. Also renders the Options sheet to a PNG. Used to verify the real bundle end to end.
+// web view. Also renders the Options sheet to a PNG. A minimal smoke test for any saver; for
+// LivePaper.saver use saverhost-lp.swift, which drives the full scenario (lock gate, clock hand-off,
+// video, fallback) in the same single launch.
 //
-//   saverhost <Voltron.saver> <out-dir> [--size 1512x982] [--wait 4] [--preview]
+//   saverhost <bundle.saver> <out-dir> [--size 1512x982] [--wait 4] [--preview]
 import AppKit
 import ScreenSaver
 import WebKit
@@ -27,7 +29,8 @@ func writePNG(_ rep: NSBitmapImageRep, _ name: String) {
 func findWebViews(_ v: NSView) -> [WKWebView] { (v as? WKWebView).map { [$0] } ?? v.subviews.flatMap(findWebViews) }
 
 let app = NSApplication.shared
-app.setActivationPolicy(.accessory)
+// .prohibited: the process can never become active, so it cannot steal focus.
+app.setActivationPolicy(.prohibited)
 try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
 
 DispatchQueue.main.async {
@@ -62,7 +65,7 @@ DispatchQueue.main.async {
         let webs = findWebViews(view)
         print("web views: \(webs.count), alpha: \(webs.map { $0.alphaValue })")
         guard let wv = webs.last else { fail("no WKWebView was created") }
-        wv.evaluateJavaScript("[document.documentElement.getAttribute('data-voltron'), document.title, (document.getElementById('voltron-errors')||{}).textContent||'', JSON.stringify(window.VOLTRON_CONFIG||null)]") { res, err in
+        wv.evaluateJavaScript("[document.documentElement.getAttribute('data-livepaper'), document.title, (document.getElementById('livepaper-errors')||{}).textContent||'', JSON.stringify(window.LIVEPAPER_CONFIG||null)]") { res, err in
             print("page state: \(String(describing: res)) \(err.map { "\($0)" } ?? "")")
             let sc = WKSnapshotConfiguration()
             wv.takeSnapshot(with: sc) { img, err in
