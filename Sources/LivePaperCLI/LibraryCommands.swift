@@ -254,7 +254,9 @@ func printTable(header: [String], rows: [[String]]) {
     let widths = header.indices.map { i in all.map { $0[i].count }.max() ?? 0 }
     for row in all {
         let cells = row.enumerated().map { i, cell in i == row.count - 1 ? cell : cell.padding(toLength: widths[i], withPad: " ", startingAt: 0) }
-        print(cells.joined(separator: "  ").trimmingCharacters(in: .whitespaces))
+        var line = cells.joined(separator: "  ")
+        while line.last == " " { line.removeLast() }
+        print(line)
     }
 }
 

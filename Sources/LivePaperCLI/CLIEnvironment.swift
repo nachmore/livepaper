@@ -105,11 +105,14 @@ enum CLIEnvironment {
     /// Asks a yes/no question on stderr and reads the answer from stdin. EOF (e.g. stdin is
     /// /dev/null) and anything but y/yes count as "no".
     static func confirm(_ question: String) -> Bool {
+        fflush(stdout)   // print() is buffered when stdout isn't a terminal; keep the order readable
         FileHandle.standardError.write(Data("\(question) [y/N] ".utf8))
         guard let answer = readLine(strippingNewline: true) else {
             FileHandle.standardError.write(Data("\n".utf8))
             return false
         }
+        // A piped answer isn't echoed by a terminal; show it so the transcript reads naturally.
+        if !stdinIsTerminal { FileHandle.standardError.write(Data("\(answer)\n".utf8)) }
         return ["y", "yes"].contains(answer.trimmingCharacters(in: .whitespaces).lowercased())
     }
 
@@ -176,7 +179,7 @@ enum CLIServices {
     static func installer(dryRun: Bool = false) -> InstallService {
         let live = (Self.live.install as? InstallService) ?? InstallService(publisher: Self.live.publish)
         if CLIEnvironment.noSystemCommands {
-            return InstallService(paths: live.paths, publisher: Self.live.publish, runner: RecordingCommandRunner(),
+            return InstallService(paths: live.paths, publisher: Self.live.publish, runner: sandboxRunner,
                                   loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun,
                                   accessibility: { false })
         }
@@ -188,4 +191,11 @@ enum CLIServices {
     static var preferences: PreferencesAccessing { CLIEnvironment.noSystemCommands ? sandboxPreferences : SystemPreferences() }
 
     private static let sandboxPreferences = InMemoryPreferences()
+
+    /// Records system commands; answers like a Mac where LivePaper's helper was never loaded
+    /// (`launchctl print` fails) and everything else succeeds silently.
+    private static let sandboxRunner = RecordingCommandRunner { executable, arguments in
+        executable == "/bin/launchctl" && arguments.first == "print"
+            ? CommandResult(status: 113, stderr: "Could not find service in domain") : nil
+    }
 }
