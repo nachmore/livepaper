@@ -281,7 +281,8 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
 * Reads `Playlist/playlist.json`; keeps entries whose file is a plain name with a supported
   extension (§4.3) that exists; picks a scene (shuffle with no-repeat across sessions and displays
   agreeing per 30 s epoch); crossfades every `cycleMinutes`; fallback scene when nothing plays.
-* **Web scenes:** `WKWebView` (`PassiveWebView`: no hit-testing), `loadHTMLString(baseURL: nil)`,
+* **Web scenes:** `WKWebView` (`PassiveWebView`: no hit-testing), `loadHTMLString(baseURL: nil)`
+  (the only navigation `SceneNavigationGate` lets through; no new windows or downloads),
   non-persistent data store, `window.LIVEPAPER_CONFIG = {clock, clockPosition, fps, scale, seed,
   power, lowPower, lockUI}` injected at document start, occlusion detection disabled, failure
   recovery with backoff.
@@ -347,6 +348,11 @@ connection; the server renders strictly one request at a time on the main thread
   every request: WebKit hides error details from opaque-origin scripts ("Script error."), and check
   must report syntax errors with message and line. Nothing can load through it, so scenes stay as
   offline as in the saver.
+* **Navigation policy** (`SceneNavigationGate`, also used by the app's previews and the saver): a
+  page may perform only the one load its host started. The scene setting `location`, links,
+  forms, subframes, `window.open` and downloads are cancelled — the CSP has no navigation
+  directive and the source scanner only sees literal URLs — and the attempt is reported as a
+  JavaScript error ("the scene tried to navigate to …"), so check fails the scene.
 * `devicePixelRatio` is emulated per request; App Nap is disabled while serving (else fps caps at 30).
 * **Outputs are confined** (`RenderOutputPolicy`): the server runs outside any agent's sandbox, so it
   writes a still only as a `.png` into the `.check` folder holding the request's html, a thumbnail

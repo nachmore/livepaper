@@ -277,7 +277,7 @@ fileprivate final class LivePreviewHostView: NSView {
             view.frame = bounds
             view.autoresizingMask = [.width, .height]
             addSubview(view)
-            view.loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+            view.loadScene(url)
             web = view
             webRelay = relay
         case .video(let url, let fit):
@@ -314,10 +314,18 @@ fileprivate final class LivePreviewHostView: NSView {
     }
 }
 
-/// A WKWebView that never takes mouse events and only loads local files.
-private final class PassiveWebView: WKWebView, WKNavigationDelegate {
+/// A WKWebView that never takes mouse events and only shows the one compiled scene it was given.
+private final class PassiveWebView: WKWebView, WKNavigationDelegate, WKUIDelegate {
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
     override var acceptsFirstResponder: Bool { false }
+
+    /// Lets through only the load `loadScene` starts (SceneNavigationGate).
+    private var navigationGate = SceneNavigationGate()
+
+    func loadScene(_ url: URL) {
+        navigationGate.expect(url)
+        loadFileURL(url, allowingReadAccessTo: url.deletingLastPathComponent())
+    }
 
     static func make(config: [String: Any], relay: ScriptMessageRelay) -> PassiveWebView {
         let configuration = WKWebViewConfiguration()
@@ -333,18 +341,41 @@ private final class PassiveWebView: WKWebView, WKNavigationDelegate {
         configuration.userContentController = controller
         let view = PassiveWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = view
+        view.uiDelegate = view
         view.underPageBackgroundColor = .black
         view.allowsMagnification = false
         view.allowsBackForwardNavigationGestures = false
         return view
     }
 
-    /// Scenes are offline by contract; anything but the local file (and in-page anchors) is refused.
+    /// Scenes are offline by contract: only the scene's own load goes through; the scene navigating
+    /// anywhere (another page, a file, the web), links, forms, subframes and new windows are refused.
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                  decisionHandler: @escaping @MainActor (WKNavigationActionPolicy) -> Void) {
-        let scheme = action.request.url?.scheme ?? ""
-        decisionHandler(scheme == "file" || scheme == "about" ? .allow : .cancel)
+        let kind: SceneNavigationGate.Kind
+        switch action.navigationType {
+        case .linkActivated: kind = .linkActivated
+        case .formSubmitted: kind = .formSubmitted
+        case .backForward: kind = .backForward
+        case .reload: kind = .reload
+        case .formResubmitted: kind = .formResubmitted
+        default: kind = .other
+        }
+        let allowed = navigationGate.decide(SceneNavigationGate.Request(
+            url: action.request.url, isMainFrame: action.targetFrame?.isMainFrame ?? false, opensNewWindow: action.targetFrame == nil,
+            kind: kind, isDownload: action.shouldPerformDownload))
+        decisionHandler(allowed ? .allow : .cancel)
     }
+
+    /// No downloads, nothing WebKit can't display.
+    func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(response.isForMainFrame && response.canShowMIMEType ? .allow : .cancel)
+    }
+
+    /// `window.open` never opens anything.
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for action: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
 }
 
 /// Receives `webkit.messageHandlers.livepaper` messages. The content controller retains the relay;
