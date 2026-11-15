@@ -49,8 +49,14 @@ public struct InstallPaths: Sendable, Equatable {
     public var installedSaver: URL { screenSaversDir.appendingPathComponent(LPPaths.saverName) }
     public var installedPlaylist: URL { installedSaver.appendingPathComponent("Contents/Resources").appendingPathComponent(LPPlaylist.directoryName) }
     public var backups: URL { supportRoot.appendingPathComponent("backups") }
-    /// Copy of the wallpaper store taken before LivePaper first changed the selection.
+    /// Copy of the wallpaper store taken before LivePaper first changed the selection (kept for
+    /// manual recovery; restore never puts the whole file back).
     public var wallpaperStoreBackup: URL { backups.appendingPathComponent("wallpaper-store-Index.plist") }
+    /// The Idle slots LivePaper replaced, with their originals (WallpaperSelectionManifest, JSON):
+    /// what uninstall restores.
+    public var wallpaperSelectionBackup: URL { backups.appendingPathComponent("wallpaper-selection.json") }
+    /// Held while LivePaper edits the wallpaper store, so two LivePaper processes never race.
+    public var wallpaperStoreLock: URL { supportRoot.appendingPathComponent("wallpaper-store.lock") }
     /// Previous values of system preferences LivePaper changed.
     public var defaultsBackup: URL { backups.appendingPathComponent("changed-defaults.json") }
     public var fallbackAgentPlist: URL { launchAgentsDir.appendingPathComponent("\(LPPaths.helperLabel).plist") }
@@ -113,6 +119,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     private let uid: uid_t
     private let osMajorVersion: Int
     private let store: WallpaperStore
+    private let wallpaperSystem: WallpaperSystem
+    private let wallpaperClock: WallpaperClock
+    private let wallpaperOptions: WallpaperApplyOptions
     private let lock = NSRecursiveLock()
     private var steps: [InstallStep] = []
     private let log = Logger(subsystem: LPPaths.bundleID, category: "install")
@@ -120,14 +129,25 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// - Parameters:
     ///   - publisher: publishes content after installSaver (nil: don't publish).
     ///   - dryRun: record every step instead of performing it.
+    ///   - wallpaperSystem: what selecting / restoring the screen saver may do to the running Mac.
+    ///     nil: the live system (it restarts WallpaperAgent) when `runner` really runs commands, and
+    ///     one that refuses everything when commands are only recorded.
+    ///   - wallpaperClock, wallpaperOptions: the timings of the store applier (tests: a fake clock).
     public init(paths: InstallPaths = .current(), publisher: PublishServicing?, runner: CommandRunning = SystemCommandRunner(),
                 loginItem: LoginItemRegistering = SMAppServiceAgent(), preferences: PreferencesAccessing = SystemPreferences(),
                 dryRun: Bool = false,
-                uid: uid_t = getuid(), osMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion) {
+                uid: uid_t = getuid(), osMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
+                wallpaperSystem: WallpaperSystem? = nil, wallpaperClock: WallpaperClock = SystemWallpaperClock(),
+                wallpaperOptions: WallpaperApplyOptions = WallpaperApplyOptions()) {
         self.paths = paths; self.publisher = publisher; self.runner = runner; self.loginItem = loginItem
         self.preferences = preferences; self.dryRun = dryRun; self.uid = uid
         self.osMajorVersion = osMajorVersion
-        self.store = WallpaperStore(url: paths.wallpaperStore)
+        self.store = WallpaperStore(url: paths.wallpaperStore, saver: paths.installedSaver)
+        self.wallpaperSystem = wallpaperSystem ?? (runner is SystemCommandRunner
+            ? LiveWallpaperSystem(storeURL: paths.wallpaperStore, runner: runner)
+            : UnavailableWallpaperSystem(reason: "system commands are only recorded"))
+        self.wallpaperClock = wallpaperClock
+        self.wallpaperOptions = wallpaperOptions
     }
 
     /// Every step performed (or, in a dry run, planned) by this instance, oldest first.
@@ -203,17 +223,46 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
     }
 
+    /// Makes LivePaper the screen saver for every display and Space by editing the wallpaper store
+    /// and restarting WallpaperAgent (WallpaperStoreApplier; only ever on an explicit user action).
+    /// The original of every replaced Idle slot is recorded in backups/ first.
+    ///
+    /// - Returns: true only when the selection is in place and confirmed after the agent restarted
+    ///   (or already was). false when LivePaper refused to touch the store — locked, System
+    ///   Settings open, MDM, an unknown store format, … (the reason is in the transcript) — so the UI
+    ///   shows the guided step.
+    /// - Throws: when the store was written but the change couldn't be confirmed or was rolled back.
     public func selectSaver() throws -> Bool {
-        if store.isSelected() {
-            record("Select LivePaper as the screen saver", .skipped("already selected"))
+        let title = "Select LivePaper as the screen saver"
+        // Nothing to change (also when it was picked by hand in System Settings). A selection of
+        // LivePaper.saver at another location still gets rewritten to the installed one.
+        if let document = try? store.read(), (try? document.planSelect(store.module, at: Date()))?.isEmpty == true {
+            record(title, .skipped("already selected"))
             return true
         }
-        var selected = false
-        try perform("Select LivePaper as the screen saver") {
-            selected = try store.select(backupTo: paths.wallpaperStoreBackup)
-            return selected ? nil : "needs the guided step in System Settings"
+        if dryRun { record(title, .planned); return false }
+        do {
+            let report = try wallpaperApplier.select(store.module, manifestURL: paths.wallpaperSelectionBackup,
+                                                     rawBackupURL: paths.wallpaperStoreBackup)
+            if report.outcome == .applied {
+                log.notice("selected LivePaper in \(report.changed.count, privacy: .public) Idle slot(s) after \(report.attempts, privacy: .public) attempt(s)")
+                record(title, .done)
+            } else {
+                record(title, .skipped("already selected"))
+            }
+            return true
+        } catch let error as WallpaperStoreError where !error.wroteStore {
+            record(title, .skipped("needs the guided step in System Settings: \(error.localizedDescription)"))
+            return false
+        } catch {
+            record(title, .failed(error.localizedDescription))
+            throw error
         }
-        return selected
+    }
+
+    /// Runs the live store sequence (WallpaperStoreApplier) with this installer's system and timings.
+    private var wallpaperApplier: WallpaperStoreApplier {
+        store.applier(system: wallpaperSystem, clock: wallpaperClock, options: wallpaperOptions, lockURL: paths.wallpaperStoreLock)
     }
 
     // MARK: - Helper
@@ -457,12 +506,22 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         let fm = FileManager.default
         // 1. The helper first, so nothing restarts the saver or reacts to the changes below.
         attempt { try unregisterHelper() }
-        // 2. The previous screen-saver choice, 3. the lock keys, 4. any other preference LivePaper changed.
+        // 2. The previous screen-saver choice (before the saver goes: the store must never point at a
+        //    missing module), 3. the lock keys, 4. any other preference LivePaper changed.
+        var saverStillChosen = false
         attempt {
             try perform("Restore the previous screen saver choice",
-                        skipIf: { FileOps.entryExists(paths.wallpaperStoreBackup) ? nil : "LivePaper didn't change it" }) {
-                try store.restore(from: paths.wallpaperStoreBackup)
-                return nil
+                        skipIf: { FileOps.entryExists(paths.wallpaperSelectionBackup) ? nil : "LivePaper didn't change it" }) {
+                do {
+                    let report = try wallpaperApplier.restore(store.module, manifestURL: paths.wallpaperSelectionBackup)
+                    return report.outcome == .applied ? nil : "the screen saver was changed since"
+                } catch let error as WallpaperStoreError where !error.isTransient {
+                    // Retrying can't help (unknown store format, …): say so and finish the uninstall.
+                    return "couldn't be restored automatically (\(error.localizedDescription)); choose a screen saver in System Settings › Wallpaper"
+                } catch {
+                    saverStillChosen = true   // e.g. System Settings is open: retry the uninstall
+                    throw error
+                }
             }
         }
         attempt { try restoreSystemDefault(domain: Self.lockKeysDomain, key: Self.lockKeysKey, title: Self.restoreLockKeysTitle) }
@@ -474,8 +533,10 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
         // 5. The saver bundle (renamed first so it leaves the screen-saver list atomically).
         attempt {
-            try perform("Remove \(paths.installedSaver.path)",
-                        skipIf: { FileOps.entryExists(paths.installedSaver) ? nil : "not installed" }) {
+            try perform("Remove \(paths.installedSaver.path)", skipIf: {
+                if !FileOps.entryExists(paths.installedSaver) { return "not installed" }
+                return saverStillChosen ? "kept while it is still the selected screen saver; run uninstall again" : nil
+            }) {
                 let doomed = FileOps.stagingURL(in: paths.screenSaversDir, tag: "uninstall")
                 try fm.moveItem(at: paths.installedSaver, to: doomed)
                 try fm.removeItem(at: doomed)

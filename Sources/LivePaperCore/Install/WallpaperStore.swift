@@ -1,90 +1,85 @@
-// WallpaperStore — the macOS 26 screen-saver selection, which lives in the "Idle" choices of
-// ~/Library/Application Support/com.apple.wallpaper/Store/Index.plist (ARCHITECTURE §1).
+// WallpaperStore — the macOS 26 screen-saver selection, which lives in the "Idle" slots of
+// ~/Library/Application Support/com.apple.wallpaper/Store/Index.plist (ARCHITECTURE §1,
+// docs/RESEARCH.md §5).
 //
-// All reading and writing of that file goes through this type so the rest of LivePaper doesn't
-// depend on its (undocumented) schema. Detection is implemented; writing a selection is pending
-// the wallpaper-store research and deliberately does nothing yet (see `select(backupTo:)`).
+// All reading and writing of that file goes through this type and the files in WallpaperStore/, so
+// the rest of LivePaper doesn't depend on its (undocumented) schema:
+//   PlistValue                  exact, lossless copy of a property list
+//   WallpaperStoreSchema        Codable mirror of WallpaperAgent's model (the decode check)
+//   WallpaperStoreDocument      records, Idle slots, edits that keep everything else intact
+//   WallpaperChoice             the payload that selects a .saver; recognising LivePaper's choice
+//   WallpaperStorePlanning      detection, select/restore plans, invariants, the backup manifest
+//   WallpaperStoreApplier       the live sequence (quiet wait, atomic replace, agent restart, confirm)
+//   WallpaperSystem             the system facts and the agent restart, behind a protocol
+//
+// Reading is always safe (no permission prompt; WallpaperAgent is never involved). Writing happens
+// only through WallpaperStoreApplier, only on an explicit user action.
 import Foundation
 
 public struct WallpaperStore: Sendable {
     /// The store plist (LPPaths.wallpaperStore; redirected in tests via LIVEPAPER_WALLPAPER_STORE).
     public let url: URL
-    /// Strings that identify the LivePaper saver inside an Idle choice: its bundle id and bundle
-    /// name (the configuration embeds the module's file URL, which contains the name).
-    public let needles: [String]
+    /// LivePaper's saver bundle as the store refers to it.
+    public let module: WallpaperSaverModule
 
-    public init(url: URL = LPPaths.wallpaperStore,
-                needles: [String] = [LPPaths.saverBundleID, LPPaths.saverName]) {
+    /// - Parameter saver: the installed LivePaper.saver (what a selection points at).
+    public init(url: URL = LPPaths.wallpaperStore, saver: URL = LPPaths.installedSaver) {
         self.url = url
-        self.needles = needles.filter { !$0.isEmpty }
+        self.module = WallpaperSaverModule(url: saver)
+    }
+
+    /// Reads and validates the store (it must decode with WallpaperAgent's model).
+    public func read() throws -> WallpaperStoreDocument {
+        guard let data = FileManager.default.contents(atPath: url.path) else { throw WallpaperStoreError.storeMissing(url.path) }
+        return try WallpaperStoreDocument(data: data)
+    }
+
+    /// Which Idle slots choose LivePaper; nil when the store is missing or not in the known format.
+    public func selection() -> WallpaperSelection? {
+        (try? read())?.selection(of: module)
     }
 
     /// True when any display's (or the default) screen-saver choice is the LivePaper saver.
     ///
-    /// The Idle choices carry their configuration as nested data blobs (often binary plists that in
-    /// turn contain the module path), so the scan descends into every dictionary, array, string and
-    /// decodable plist blob below an "Idle" key, and also matches raw bytes of undecodable blobs.
+    /// A store in an unknown format (a future macOS) falls back to a structural scan: any string or
+    /// nested plist blob below an "Idle" key that names the saver bundle.
     public func isSelected() -> Bool {
-        guard let data = try? Data(contentsOf: url),
-              let root = try? PropertyListSerialization.propertyList(from: data, format: nil) else { return false }
-        return containsSaver(root, inIdle: false, depth: 0)
+        if let selection = selection() { return selection.isSelected }
+        guard let data = FileManager.default.contents(atPath: url.path), let root = try? PlistValue.parse(data) else { return false }
+        return Self.mentions(root, needles: [module.url.lastPathComponent, LPPaths.saverBundleID], inIdle: false, depth: 0)
     }
 
-    /// Makes LivePaper the selected screen saver for every display.
-    ///
-    /// - Returns: false — automatic selection isn't implemented yet; the app then shows the one-click
-    ///   guided step (InstallService.openScreenSaverSettings()).
-    ///
-    /// TODO(wallpaper-store research): once the Idle choice schema and the way to make WallpaperAgent
-    /// pick up a change are known, implement as: (1) if `backup` doesn't exist yet, copy the current
-    /// store there (so uninstall restores the choice from *before* LivePaper, however often this is
-    /// called); (2) write the LivePaper Idle choice for all displays; (3) notify WallpaperAgent;
-    /// (4) return `isSelected()`.
-    public func select(backupTo backup: URL) throws -> Bool {
-        false
+    /// True when every display and Space resolves to LivePaper (WallpaperSelection.isSelectedEverywhere).
+    public func isSelectedEverywhere() -> Bool { selection()?.isSelectedEverywhere ?? false }
+
+    /// The applier that writes this store (LIVE PATH with a LiveWallpaperSystem).
+    public func applier(system: WallpaperSystem, clock: WallpaperClock = SystemWallpaperClock(),
+                        options: WallpaperApplyOptions = WallpaperApplyOptions(), lockURL: URL? = nil) -> WallpaperStoreApplier {
+        WallpaperStoreApplier(storeURL: url, system: system, clock: clock, options: options, lockURL: lockURL)
     }
 
-    /// Puts back the store saved by `select(backupTo:)`. A missing backup means LivePaper never
-    /// changed the selection, so there is nothing to do (idempotent).
-    ///
-    /// TODO(wallpaper-store research): WallpaperAgent keeps the store in memory and may rewrite the
-    /// file; restore only the Idle choices and notify the agent once that mechanism is known. Until
-    /// then no backup is ever written, so this only runs against redirected stores in tests.
-    public func restore(from backup: URL) throws {
-        guard FileManager.default.fileExists(atPath: backup.path) else { return }
-        let data = try Data(contentsOf: backup)
-        // Never replace the live store with something that isn't a property list.
-        _ = try PropertyListSerialization.propertyList(from: data, format: nil)
-        try FileOps.writeAtomically(data, to: url)
-    }
-
-    // MARK: - Scanning
+    // MARK: - Fallback scan
 
     /// Nested blobs are rarely more than a few levels deep; the cap guards against hostile input.
     private static let maxDepth = 32
 
-    private func containsSaver(_ value: Any, inIdle: Bool, depth: Int) -> Bool {
-        guard depth < Self.maxDepth else { return false }
+    private static func mentions(_ value: PlistValue, needles: [String], inIdle: Bool, depth: Int) -> Bool {
+        guard depth < maxDepth else { return false }
         switch value {
-        case let dict as [String: Any]:
-            return dict.contains { key, child in containsSaver(child, inIdle: inIdle || key == "Idle", depth: depth + 1) }
-        case let array as [Any]:
-            return array.contains { containsSaver($0, inIdle: inIdle, depth: depth + 1) }
-        case let string as String:
-            return inIdle && matches(string)
-        case let data as Data:
+        case .dictionary(let dict):
+            return dict.contains { key, child in mentions(child, needles: needles, inIdle: inIdle || key == "Idle", depth: depth + 1) }
+        case .array(let array):
+            return array.contains { mentions($0, needles: needles, inIdle: inIdle, depth: depth + 1) }
+        case .string(let string):
             guard inIdle else { return false }
-            if let inner = try? PropertyListSerialization.propertyList(from: data, format: nil) {
-                return containsSaver(inner, inIdle: true, depth: depth + 1)
-            }
+            let decoded = string.removingPercentEncoding ?? string
+            return needles.contains { string.contains($0) || decoded.contains($0) }
+        case .data(let data):
+            guard inIdle else { return false }
+            if let inner = try? PlistValue.parse(data) { return mentions(inner, needles: needles, inIdle: true, depth: depth + 1) }
             return needles.contains { data.range(of: Data($0.utf8)) != nil }
         default:
             return false
         }
-    }
-
-    private func matches(_ string: String) -> Bool {
-        let decoded = string.removingPercentEncoding ?? string
-        return needles.contains { string.contains($0) || decoded.contains($0) }
     }
 }
