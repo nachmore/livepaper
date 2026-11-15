@@ -480,7 +480,13 @@ final class AppModel {
     }
 
     /// Outcome of "Lock Now".
-    enum LockRoute: Equatable { case helper, screenSaverEngine, sample, failed }
+    enum LockRoute: Equatable {
+        case helper, screenSaverEngine, failed
+        /// Mock mode: nothing happens on the system.
+        case sample
+        /// A Lock Now is already in progress.
+        case busy
+    }
 
     /// Menu-bar "Lock Now": the helper runs its lock flow; without a helper LivePaper starts the
     /// screen saver itself. With "require password immediately" the saver locks, and loginwindow
@@ -491,7 +497,7 @@ final class AppModel {
             banners.post(.info, "Sample mode", message: "LivePaper would start the screen saver and lock now.")
             return .sample
         }
-        guard !isLocking else { return .failed }
+        guard !isLocking else { return .busy }
         isLocking = true
         defer { isLocking = false }
         if !installStatus.saverSelected {

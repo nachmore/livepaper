@@ -213,6 +213,6 @@ struct UninstallReport: Equatable, Sendable {
     var summary: String {
         let n = failures.count
         if n == 0 { return "LivePaper was removed and your previous settings are back." }
-        return (n == 1 ? "1 step" : "\(n) steps") + " didn\u{2019}t finish. Try again, or fix the problem below and retry; finished steps are skipped."
+        return (n == 1 ? "1 step" : "\(n) steps") + " didn\u{2019}t finish. Fix the problem below if you can, then try again \u{2014} finished steps are skipped."
     }
 }
