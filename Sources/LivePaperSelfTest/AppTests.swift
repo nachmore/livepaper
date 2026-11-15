@@ -301,8 +301,17 @@ extension SelfTests {
             st.install.saverSelected = true
             try expectEqual(SetupChecklist.firstIncompleteStep(state: st), .lock)
             try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.id), [.lockKeys, .password, .helper])
+            // A profile that manages only other screen-saver keys (idle time …) leaves the password
+            // delay to the user: still "needed", with the fix, never "managed".
             st.install.helperRunning = true; st.install.managedByMDM = true
+            try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.state), [.needed, .needed, .done])
+            let fixable = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .password })
+            try expect(fixable.detail.contains("Immediately") && !fixable.detail.contains("organisation"), fixable.detail)
+            // Only a profile that forces the password off or a delay makes it "managed".
+            st.install.passwordManagedByMDM = true
             try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.state), [.needed, .managed, .done])
+            let managed = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .password })
+            try expect(managed.detail.contains("organisation") && !managed.detail.contains("Locking still works"), managed.detail)
             try expect(!SetupChecklist.isComplete(.lock, state: st), "lock keys still off")
             st.install.lockKeysShowScene = true
             try expect(SetupChecklist.isComplete(.lock, state: st), "managed never blocks")

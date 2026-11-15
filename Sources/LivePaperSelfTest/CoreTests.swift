@@ -193,6 +193,9 @@ private final class FakeLoginItem: LoginItemRegistering, @unchecked Sendable {
 
 private final class FakePreferences: PreferencesAccessing, @unchecked Sendable {
     var values: [String: Any] = [:]
+    /// What a configuration profile forces, by "<domain>|<key>" (CFPreferencesAppValueIsForced).
+    var forced: [String: Any] = [:]
+    func forcedValue(domain: String, key k: String) -> Any? { forced["\(domain)|\(k)"] }
     private func key(_ d: String, _ k: String, _ h: Bool) -> String { "\(d)|\(k)|\(h)" }
     func value(domain: String, key k: String, currentHost: Bool) -> Any? { values[key(domain, k, currentHost)] }
     func set(_ value: Any?, domain: String, key k: String, currentHost: Bool) -> Bool {
@@ -1194,6 +1197,50 @@ extension SelfTests {
                 s = install().status()
                 try expect(!s.passwordImmediately, "sysadminctl wins over the profile")
                 try expect(system.mutatingCommands.isEmpty, "status() only reads: \(system.mutatingCommands)")
+            }
+        },
+        TestCase(name: "core.install.password-managed") {
+            // "Managed by your organisation" only when the profile forces the password off or a delay.
+            try CoreSandbox.with("password-managed") { sb in
+                let system = FakeSystem()
+                let managed = sb.root.appendingPathComponent("managed/com.apple.screensaver.plist")
+                let make = { (dict: [String: Any]) in
+                    try FileManager.default.createDirectory(at: managed.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    try PropertyListSerialization.data(fromPropertyList: dict, format: .xml, options: 0).write(to: managed)
+                }
+                let prefs = FakePreferences()
+                let status = {
+                    InstallService(paths: sb.installPaths(managed: [managed]), publisher: nil, runner: system.runner,
+                                   loginItem: FakeLoginItem(available: true), preferences: prefs).status()
+                }
+                system.screenLock = "2026-11-14 18:32:04.037 sysadminctl[1:2] screenLock delay is 300 seconds"
+                // A profile forcing only the idle time (a common corporate profile): the user can fix the delay.
+                try make(["idleTime": 900])
+                var s = status()
+                try expect(!s.passwordImmediately && s.managedByMDM && !s.passwordManagedByMDM, "\(s)")
+                // Forcing askForPassword = true says nothing about the delay.
+                try make(["idleTime": 900, "askForPassword": true])
+                try expect(!status().passwordManagedByMDM)
+                // CFPreferences reports a forced delay: that is the profile's doing.
+                prefs.forced["com.apple.screensaver|askForPasswordDelay"] = 300
+                try expect(status().passwordManagedByMDM)
+                prefs.forced = [:]
+                // …and so is a delay or "off" in the profile plist itself.
+                try make(["askForPasswordDelay": 600])
+                try expect(status().passwordManagedByMDM)
+                try make(["askForPassword": false])
+                try expect(status().passwordManagedByMDM)
+                // A profile forcing Immediately isn't why it isn't immediate.
+                try make(["askForPassword": true, "askForPasswordDelay": 0])
+                prefs.forced["com.apple.screensaver|askForPasswordDelay"] = 0
+                try expect(!status().passwordManagedByMDM)
+                // Immediately: nothing to manage.
+                try make(["askForPasswordDelay": 600])
+                prefs.forced = [:]
+                system.screenLock = "2026-11-14 18:32:04.037 sysadminctl[1:2] screenLock delay is immediate"
+                s = status()
+                try expect(s.passwordImmediately && !s.passwordManagedByMDM, "\(s)")
+                try expect(system.mutatingCommands.isEmpty)
             }
         },
         TestCase(name: "core.install.saver") {
