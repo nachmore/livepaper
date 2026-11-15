@@ -1,71 +1,38 @@
-// AIPreferences — the user's AI authoring defaults and prompt helpers (Foundation-only; also
+// AIPreferences — rules for the AI settings UI, and prompt helpers (Foundation-only; also
 // compiled into LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
 import Foundation
 import LivePaperCore
 
-/// Stored as one JSON value in the app's preferences (these are app-only preferences; the helper
-/// and saver never need them, so they don't belong in state.json).
-struct AIPreferences: Codable, Equatable, Sendable {
-    static let defaultsKey = "aiPreferences"
+/// UI rules for the AI settings. The settings themselves are `AISettings` (LivePaperCore), stored by
+/// AIServicing in ai-settings.json so the CLI and AI sessions use the same defaults as the app.
+enum AIPreferences {
     static let timeoutChoices = [5, 10, 20, 30, 45, 60]
-    static let defaultTimeoutMinutes = 20
 
-    /// `AIHarness.id` of the preferred harness; nil = first detected.
-    var defaultHarnessID: String?
-    /// Optional model name passed to the harness (empty = harness default).
-    var model: String = ""
-    var timeoutMinutes: Int = AIPreferences.defaultTimeoutMinutes
-    /// Template for a user-defined harness, e.g. `mytool --prompt {prompt_file} --dir {workspace}`.
-    var customCommand: String = ""
-
-    init(defaultHarnessID: String? = nil, model: String = "", timeoutMinutes: Int = AIPreferences.defaultTimeoutMinutes,
-         customCommand: String = "") {
-        self.defaultHarnessID = defaultHarnessID; self.model = model
-        self.timeoutMinutes = timeoutMinutes; self.customCommand = customCommand
-    }
-
-    // Tolerant decoding so adding fields later never resets the user's preferences.
-    init(from decoder: Decoder) throws {
-        let c = try decoder.container(keyedBy: CodingKeys.self)
-        defaultHarnessID = try c.decodeIfPresent(String.self, forKey: .defaultHarnessID)
-        model = try c.decodeIfPresent(String.self, forKey: .model) ?? ""
-        timeoutMinutes = try c.decodeIfPresent(Int.self, forKey: .timeoutMinutes) ?? AIPreferences.defaultTimeoutMinutes
-        customCommand = try c.decodeIfPresent(String.self, forKey: .customCommand) ?? ""
-    }
-
-    static func load(from defaults: PreferenceStore) -> AIPreferences {
-        guard let data = defaults.data(forKey: defaultsKey),
-              let prefs = try? JSONDecoder().decode(AIPreferences.self, from: data) else { return AIPreferences() }
-        return prefs
-    }
-
-    func save(to defaults: PreferenceStore) {
-        if let data = try? JSONEncoder().encode(self) { defaults.set(data, forKey: AIPreferences.defaultsKey) }
-    }
-
-    var timeout: TimeInterval { TimeInterval(max(1, timeoutMinutes)) * 60 }
-
-    /// The custom harness, when a valid template is configured.
-    var customHarness: AIHarness? {
-        let template = customCommand.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !template.isEmpty, AIPreferences.customCommandProblem(template) == nil,
-              let exe = template.split(separator: " ").first else { return nil }
-        return AIHarness(kind: .custom, name: "Custom command", executable: String(exe), customTemplate: template)
+    /// The picker's choices, including a value set elsewhere (e.g. by hand in ai-settings.json).
+    static func timeoutChoices(including current: Int) -> [Int] {
+        timeoutChoices.contains(current) || current <= 0 ? timeoutChoices : (timeoutChoices + [current]).sorted()
     }
 
     /// Placeholders understood by the custom-command adapter.
-    static let placeholders = ["{prompt_file}", "{prompt}", "{workspace}", "{model}"]
+    static var placeholders: [String] { CustomAdapter.placeholders }
 
-    /// Why a custom command can't be used, or nil when it's fine.
+    /// Why a custom command can't be used, or nil when it's fine (an empty command means "none").
     static func customCommandProblem(_ template: String) -> String? {
         let t = template.trimmingCharacters(in: .whitespacesAndNewlines)
-        if t.isEmpty { return nil }
-        if !t.contains("{prompt_file}") && !t.contains("{prompt}") {
-            return "Include {prompt_file} or {prompt} so the agent receives the instructions."
-        }
-        let unknown = t.matches(of: #/\{[a-z_]+\}/#).map { String($0.output) }.filter { !placeholders.contains($0) }
-        if let first = unknown.first { return "Unknown placeholder \(first). Use \(placeholders.joined(separator: ", "))." }
-        return nil
+        return t.isEmpty ? nil : CustomAdapter.templateProblem(t)
+    }
+
+    /// The custom harness, when a usable template is configured.
+    static func customHarness(_ settings: AISettings) -> AIHarness? {
+        guard let template = settings.customTemplate?.trimmingCharacters(in: .whitespacesAndNewlines), !template.isEmpty,
+              customCommandProblem(template) == nil else { return nil }
+        return AIHarness.custom(template: template)
+    }
+
+    /// Detected harnesses plus the configured custom command. Any custom entry from detection is
+    /// replaced, so editing the command in Settings takes effect without detecting again.
+    static func availableHarnesses(detected: [AIHarness], settings: AISettings) -> [AIHarness] {
+        detected.filter { $0.kind != .custom } + (customHarness(settings).map { [$0] } ?? [])
     }
 
     /// Picks the harness to preselect: the preferred one if still installed, else the first.

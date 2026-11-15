@@ -477,10 +477,12 @@ private struct LockPage: View {
             CheckCard(checks: SetupChecklist.checks(for: .lock, state: model.setupState)) { check in
                 switch (check.id, check.state) {
                 case (.lockKeys, .needed):
-                    Button("Turn On") { model.setLockKeysShowScene(true) }
+                    Button("Turn On") { Task { await model.setLockKeysShowScene(true) } }
                         .buttonStyle(.borderedProminent)
                 case (.password, .needed):
                     Button("Open Lock Screen Settings") { SystemActions.openLockScreenSettings() }
+                case (.helper, .needed) where model.setupState.helperNeedsApproval:
+                    Button("Open Login Items") { SystemActions.openLoginItemsSettings() }
                 case (.helper, .needed):
                     Button("Start Helper") { Task { await model.registerHelper() } }
                         .disabled(model.isInstallBusy)

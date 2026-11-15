@@ -1,6 +1,6 @@
 // SnapshotHarness — renders key screens with mock data to PNGs for design review (debug builds).
 //
-//   swift build --target LivePaperApp && .build/debug/LivePaper --snapshot /tmp/lp-shots [--only library,create]
+//   swift build --product LivePaperApp && .build/debug/LivePaperApp --snapshot /tmp/lp-shots [--only library,create]
 //
 // Focus-safety: the process uses the `.prohibited` activation policy (no Dock icon, can never become
 // the active app or take key focus), the Dock-icon policy is disabled, live previews (WebKit/AV) are
@@ -92,7 +92,10 @@ enum SnapshotHarness {
         if let done { model.section = .session(done.id) }
         shoot("session-done-light", main, dark: false, MainWindowView())
 
-        // An explicit playlist: per-card markers and the ordered list with remove buttons.
+        // An explicit playlist: per-card markers and the ordered list with remove buttons; one scene
+        // is left out of the publish (PublishResult.skipped).
+        (services.publish as? MockPublishService)?.simulatedSkips =
+            ["neon-rain": "neon-rain: scene.js has a syntax error on line 42 (Unexpected token ')')."]
         wait {
             await model.useAsScreenSaver("paper-lanterns")
             await model.addToPlaylist("neon-rain")
@@ -110,10 +113,32 @@ enum SnapshotHarness {
         shoot("sheet-delete-light", shortSheet, dark: false, SceneActionSheet(action: .delete("neon-rain")))
         shoot("settings-saver-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .screenSaver))
         shoot("settings-lock-light", CGSize(width: 640, height: 600), dark: false, SettingsView(initialTab: .lock))
+        (services.install as? MockInstallService)?.simulateHelperApprovalPending()
+        wait {
+            await model.setLockKeysShowScene(true)
+            await model.refreshInstallStatus()
+        }
+        shoot("settings-lock-approval-dark", CGSize(width: 640, height: 600), dark: true, SettingsView(initialTab: .lock))
+        shoot("onboarding-lock-approval-light", sheet, dark: false, OnboardingView(initialStep: .lock))
         shoot("settings-performance-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .performance))
-        shoot("settings-ai-dark", CGSize(width: 640, height: 560), dark: true, SettingsView(initialTab: .ai))
+        model.aiSettings.setModel("opus", for: .claude)
+        model.aiSettings.customTemplate = "mytool --task {prompt_file} --cwd {workspace} --model {nope}"
+        shoot("settings-ai-dark", CGSize(width: 640, height: 720), dark: true, SettingsView(initialTab: .ai))
         shoot("settings-about-dark", CGSize(width: 640, height: 440), dark: true, SettingsView(initialTab: .about))
         shoot("uninstall-dark", CGSize(width: 520, height: 470), dark: true, UninstallSheet())
+        let home = NSHomeDirectory()
+        let log: [InstallStep] = [
+            InstallStep(title: "Unregister the helper login item", outcome: .done),
+            InstallStep(title: "Restore the previous screen saver choice", outcome: .done),
+            InstallStep(title: InstallService.restoreLockKeysTitle, outcome: .done),
+            InstallStep(title: "Restore changed system settings", outcome: .skipped("nothing changed")),
+            InstallStep(title: "Remove \(home)/Library/Screen Savers/LivePaper.saver", outcome: .done),
+            InstallStep(title: "Delete LivePaper's caches, workspaces and backups (keeping the scene library)", outcome: .done),
+        ]
+        shoot("uninstall-done-light", CGSize(width: 520, height: 470), dark: false, UninstallSheet(report: .make(log)))
+        var failed = log
+        failed[4].outcome = .failed("\u{201C}LivePaper.saver\u{201D} couldn\u{2019}t be moved because you don\u{2019}t have permission to access \u{201C}Screen Savers\u{201D}.")
+        shoot("uninstall-failed-dark", CGSize(width: 520, height: 520), dark: true, UninstallSheet(report: .make(failed)))
 
         running?.cancel()
         print("snapshot: wrote PNGs to \(dir.path)")

@@ -221,7 +221,6 @@ struct DescribeCreateCard: View {
         .card()
         .onAppear {
             if harnessID == nil { harnessID = model.preferredHarness?.id }
-            if modelName.isEmpty { modelName = model.aiPreferences.model }
         }
     }
 

@@ -1,18 +1,18 @@
-// wkd — one long-lived, off-screen WebKit render server for the Voltron tools.
+// wkd — one long-lived, off-screen WebKit render server for the Prototype tools.
 //
 // Why: launching a fresh AppKit/WebKit process for every screenshot registers a new app with the
 // window server each time, which the user perceives as focus stealing when it happens many times a
 // minute. wkd is launched once (by the first client) and then serves every request; the clients
 // (tools/bin/wkshot, tools/bin/powertest) are plain scripts that never touch the window server.
 //
-// Protocol: clients drop JSON requests into /tmp/voltron-wkd/req/<id>.json and wait for
-// /tmp/voltron-wkd/resp/<id>.json. Requests are served one at a time (so live power measurements
+// Protocol: clients drop JSON requests into /tmp/prototype-wkd/req/<id>.json and wait for
+// /tmp/prototype-wkd/resp/<id>.json. Requests are served one at a time (so live power measurements
 // are attributable). Exits after 15 minutes without requests.
 import AppKit
 import Darwin
 import WebKit
 
-let base = URL(fileURLWithPath: "/tmp/voltron-wkd")
+let base = URL(fileURLWithPath: "/tmp/prototype-wkd")
 let reqDir = base.appendingPathComponent("req")
 let respDir = base.appendingPathComponent("resp")
 let pidFile = base.appendingPathComponent("pid")
@@ -141,7 +141,7 @@ final class Server: NSObject, WKNavigationDelegate {
         if let wv = webView {
             wv.navigationDelegate = nil
             wv.stopLoading()
-            wv.configuration.userContentController.removeScriptMessageHandler(forName: "voltron")
+            wv.configuration.userContentController.removeScriptMessageHandler(forName: "prototype")
             wv.removeFromSuperview()
         }
         window.contentView = nil
@@ -176,11 +176,11 @@ final class Server: NSObject, WKNavigationDelegate {
         conf.suppressesIncrementalRendering = true
         let ucc = conf.userContentController
         // Emulate the requested pixel density regardless of which display is currently main.
-        ucc.addUserScript(WKUserScript(source: "Object.defineProperty(window,'devicePixelRatio',{get:function(){return \(dpr)},configurable:true});window.VOLTRON_CONFIG=\(json);",
+        ucc.addUserScript(WKUserScript(source: "Object.defineProperty(window,'devicePixelRatio',{get:function(){return \(dpr)},configurable:true});window.PROTOTYPE_CONFIG=\(json);",
                                        injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let h = Handler()
         h.onMessage = { [weak self] body in self?.message(body, gen: gen) }
-        ucc.add(h, name: "voltron")
+        ucc.add(h, name: "prototype")
         handler = h
         let rect = NSRect(x: 0, y: 0, width: req.width, height: req.height)
         let wv = WKWebView(frame: rect, configuration: conf)
@@ -242,11 +242,11 @@ final class Server: NSObject, WKNavigationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + warm) { [weak self] in
             guard let self, self.generation == gen else { return }
             let pids = ourPids()
-            self.js("Voltron.stats().frame") { f0 in
+            self.js("Prototype.stats().frame") { f0 in
                 let c0 = cpuSample(pids), t0 = Date()
                 DispatchQueue.main.asyncAfter(deadline: .now() + secs) {
                     guard self.generation == gen else { return }
-                    self.js("Voltron.stats().frame") { f1 in
+                    self.js("Prototype.stats().frame") { f1 in
                         let pids2 = Array(Set(pids + ourPids()))
                         let c1 = cpuSample(pids2)
                         let dt = Date().timeIntervalSince(t0)
@@ -278,7 +278,7 @@ final class Server: NSObject, WKNavigationDelegate {
 let app = NSApplication.shared
 app.setActivationPolicy(.prohibited)
 // Opt out of App Nap / timer throttling, otherwise live scenes are capped at 30 fps and measurements lie.
-let napGuard = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled], reason: "Voltron render server")
+let napGuard = ProcessInfo.processInfo.beginActivity(options: [.userInitiated, .latencyCritical, .idleSystemSleepDisabled], reason: "Prototype render server")
 let server = Server()
 logLine("serving as pid \(getpid())")
 DispatchQueue.main.async { server.start() }

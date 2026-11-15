@@ -43,6 +43,9 @@ public enum LPVideoFit: String, Codable, Sendable { case fill, fit }
 
 public struct LPPlaylistEntry: Codable, Sendable, Equatable, Identifiable {
     public enum Kind: String, Codable, Sendable { case web, video }
+    /// File extensions the saver plays, per kind (it skips entries with any other extension).
+    public static let webExtensions: Set<String> = ["html", "htm"]
+    public static let videoExtensions: Set<String> = ["mov", "mp4", "m4v"]
     public var id: String
     public var name: String
     public var kind: Kind
@@ -96,10 +99,18 @@ public enum LPNotification {
     /// Saver/anyone → helper: please open the LivePaper app (the sandboxed saver can't).
     public static let openApp = "com.nachmore.livepaper.openApp"
     /// App → helper: run the LivePaper lock flow now (menu-bar "Lock Now").
+    /// userInfo[requestIDKey]: String, echoed in `lockNowAccepted`.
     public static let lockNow = "com.nachmore.livepaper.lockNow"
-    /// App → helper: the hotkey recorder is active (userInfo["active"]: Bool); suspend the shortcut
+    /// Helper → app: a `lockNow` request was received and the lock flow is running.
+    /// userInfo[requestIDKey]: the request's id. The app falls back to starting ScreenSaverEngine
+    /// itself when no answer arrives within a second (no helper running).
+    public static let lockNowAccepted = "com.nachmore.livepaper.lockNowAccepted"
+    /// App → helper: the hotkey recorder is active (userInfo[activeKey]: Bool); suspend the shortcut
     /// meanwhile so pressing the current shortcut while re-recording doesn't lock the Mac.
     public static let hotkeyRecording = "com.nachmore.livepaper.hotkeyRecording"
+    /// userInfo keys of the notifications above.
+    public static let requestIDKey = "requestID"
+    public static let activeKey = "active"
     /// App → saver (preview instances): playlist was republished.
     public static let published = "com.nachmore.livepaper.published"
     /// System (distributed; object = the user's uid as a string; verified on macOS 26.7): loginwindow

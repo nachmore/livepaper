@@ -129,7 +129,25 @@ public struct KiroAdapter: HarnessAdapter {
 /// chosen. Quoting follows POSIX shell rules ('…', "…", backslash), but no shell ever runs it.
 /// TASK.md is also connected to stdin.
 public struct CustomAdapter: HarnessAdapter {
+    /// Every placeholder a template may use.
+    public static let placeholders = ["{prompt_file}", "{workspace}", "{scene}", "{model}", "{instructions}"]
+
     public init() {}
+
+    /// Why `template` can't be used as a custom command, as a sentence for the settings UI, or nil
+    /// when it's fine. (Whether the program exists is only known when a session starts.)
+    public static func templateProblem(_ template: String) -> String? {
+        let t = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !t.isEmpty else { return "Enter the command to run." }
+        let tokens: [String]
+        do { tokens = try CommandTemplate.tokenize(t) } catch { return error.localizedDescription }
+        guard let program = tokens.first, !program.isEmpty, !program.contains("{") else {
+            return "Start with the program to run, e.g. mytool {prompt_file}."
+        }
+        let unknown = t.matches(of: #/\{[A-Za-z_]+\}/#).map { String($0.output) }.filter { !placeholders.contains($0) }
+        if let first = unknown.first { return "Unknown placeholder \(first). Use \(placeholders.joined(separator: ", "))." }
+        return nil
+    }
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         let template = harness.customTemplate ?? harness.executable

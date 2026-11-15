@@ -68,11 +68,38 @@ public struct PlaylistSettings: Codable, Sendable, Equatable {
     }
 }
 
+/// Outcome of a publish, including scenes that were left out (the saver still gets the rest).
+public struct PublishResult: Sendable, Equatable {
+    /// One scene that couldn't be published, and why (an actionable sentence).
+    public struct Skipped: Sendable, Equatable, Identifiable {
+        public var id: String
+        public var reason: String
+        public init(id: String, reason: String) { self.id = id; self.reason = reason }
+    }
+    /// What the saver now plays (already written into the installed bundle).
+    public var playlist: LPPlaylist
+    /// Scene id → why it was skipped (compile error, missing or unsupported video, …).
+    public var skipped: [String: String]
+    public init(playlist: LPPlaylist, skipped: [String: String] = [:]) { self.playlist = playlist; self.skipped = skipped }
+
+    /// `skipped` as a list, in a stable order (by id) for display.
+    public var skippedScenes: [Skipped] {
+        skipped.sorted { $0.key < $1.key }.map { Skipped(id: $0.key, reason: $0.value) }
+    }
+}
+
 public protocol PublishServicing: AnyObject, Sendable {
     func loadSettings() -> PlaylistSettings
     func saveSettings(_ s: PlaylistSettings) throws
     /// Compiles the selected scenes and atomically swaps them into the installed saver bundle.
-    @discardableResult func publish() throws -> LPPlaylist
+    /// Scenes that can't be published are skipped (and reported) as long as at least one can;
+    /// otherwise it throws `PublishError` and the previously published playlist stays in place.
+    @discardableResult func publishReport() throws -> PublishResult
+}
+
+public extension PublishServicing {
+    /// `publishReport()` for callers that don't show skipped scenes (install, CLI scripts).
+    @discardableResult func publish() throws -> LPPlaylist { try publishReport().playlist }
 }
 
 // MARK: - Rendering / validation
@@ -138,6 +165,14 @@ public struct AIHarness: Identifiable, Codable, Sendable, Equatable, Hashable {
     public init(kind: Kind, name: String, executable: String, version: String? = nil, customTemplate: String? = nil) {
         self.kind = kind; self.name = name; self.executable = executable; self.version = version; self.customTemplate = customTemplate
     }
+
+    /// The harness for a user-defined command template (Settings › AI › Custom command). The
+    /// executable is the template's first word; placeholders are listed in `CustomAdapter.placeholders`.
+    public static func custom(template: String, name: String = "Custom command") -> AIHarness {
+        let trimmed = template.trimmingCharacters(in: .whitespacesAndNewlines)
+        let program = (try? CommandTemplate.tokenize(trimmed))?.first ?? trimmed
+        return AIHarness(kind: .custom, name: name, executable: program, customTemplate: trimmed)
+    }
 }
 
 public enum AISessionRequest: Sendable, Equatable {
@@ -162,12 +197,74 @@ public protocol AISessionHandle: AnyObject, Sendable {
     func cancel()
 }
 
+/// AI preferences (Settings › AI), persisted as JSON in the support directory (`ai-settings.json`).
+/// Shared by the app (which edits them) and the AI service / CLI (which use them for sessions).
+public struct AISettings: Codable, Sendable, Equatable {
+    public static let defaultTimeoutMinutes = 20
+
+    /// `AIHarness.id` of the harness the user picked last.
+    public var preferredHarness: String?
+    /// Harness kind (`AIHarness.Kind.rawValue`) → model name. Missing = the harness's default.
+    public var models: [String: String]
+    /// Harness kind → extra command-line options (advanced; e.g. a cheaper reasoning effort).
+    public var extraArguments: [String: [String]]
+    /// The user-defined command template (`AIHarness.customTemplate`), if any.
+    public var customTemplate: String?
+    public var timeoutMinutes: Int
+
+    public init(preferredHarness: String? = nil, models: [String: String] = [:], extraArguments: [String: [String]] = [:],
+                customTemplate: String? = nil, timeoutMinutes: Int = AISettings.defaultTimeoutMinutes) {
+        self.preferredHarness = preferredHarness; self.models = models; self.extraArguments = extraArguments
+        self.customTemplate = customTemplate; self.timeoutMinutes = timeoutMinutes
+    }
+
+    // Tolerant decoding: settings written by other versions must not reset everything.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        preferredHarness = try? c.decodeIfPresent(String.self, forKey: .preferredHarness)
+        models = (try? c.decodeIfPresent([String: String].self, forKey: .models)) ?? [:]
+        extraArguments = (try? c.decodeIfPresent([String: [String]].self, forKey: .extraArguments)) ?? [:]
+        customTemplate = try? c.decodeIfPresent(String.self, forKey: .customTemplate)
+        timeoutMinutes = (try? c.decodeIfPresent(Int.self, forKey: .timeoutMinutes)) ?? AISettings.defaultTimeoutMinutes
+    }
+
+    /// The session timeout, clamped to 1 minute … 4 hours.
+    public var timeout: TimeInterval { TimeInterval(min(max(timeoutMinutes, 1), 240)) * 60 }
+
+    /// The configured model for a harness kind (nil when unset or blank: the harness's default).
+    public func model(for kind: AIHarness.Kind) -> String? {
+        guard let m = models[kind.rawValue]?.trimmingCharacters(in: .whitespacesAndNewlines), !m.isEmpty else { return nil }
+        return m
+    }
+
+    /// Sets (or, with a blank name, clears) the default model of a harness kind.
+    public mutating func setModel(_ name: String?, for kind: AIHarness.Kind) {
+        let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        models[kind.rawValue] = trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 public protocol AIServicing: AnyObject, Sendable {
+    /// Installed harnesses (login-shell PATH), plus the custom command when one is configured.
     func detectHarnesses() async -> [AIHarness]
+    /// `model` nil = the model configured in the settings for that harness (else its default).
     func start(_ request: AISessionRequest, harness: AIHarness, model: String?) throws -> AISessionHandle
+    /// The stored settings, or defaults when there are none (never throws: a damaged file reads as defaults).
+    func loadSettings() -> AISettings
+    func saveSettings(_ settings: AISettings) throws
 }
 
 // MARK: - Install / system integration
+
+/// Registration state of a login item, mirroring SMAppService.Status.
+public enum LoginItemStatus: String, Sendable, Equatable {
+    case notRegistered
+    case enabled
+    /// Registered, but the user has to allow it in System Settings › General › Login Items.
+    case requiresApproval
+    /// The agent plist isn't in the app bundle (development builds use a LaunchAgent instead).
+    case notFound
+}
 
 public struct InstallStatus: Sendable, Equatable {
     public var saverInstalled: Bool
@@ -175,20 +272,47 @@ public struct InstallStatus: Sendable, Equatable {
     /// The LivePaper saver is the selected screen saver (any display).
     public var saverSelected: Bool
     public var helperRunning: Bool
+    /// The helper's SMAppService login item (`.notFound` when it runs from the LaunchAgent fallback).
+    public var helperLoginItem: LoginItemStatus
     /// "Require password after screen saver begins" is Immediately.
     public var passwordImmediately: Bool
-    public var accessibilityTrusted: Bool
     /// True when idle time / password settings are enforced by a configuration profile.
     public var managedByMDM: Bool
+    /// `com.apple.loginwindow immediateLockLaunchesScreenSaver` is on: ⌃⌘Q, Apple menu › Lock
+    /// Screen and the Touch ID / lock key start the screen saver (the scene) before locking.
+    public var lockKeysShowScene: Bool
+    /// LivePaper changed that preference and keeps its previous value; uninstall puts it back.
+    public var lockKeysChangedByLivePaper: Bool
+
     public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverSelected: Bool = false, helperRunning: Bool = false,
-                passwordImmediately: Bool = false, accessibilityTrusted: Bool = false, managedByMDM: Bool = false) {
+                helperLoginItem: LoginItemStatus = .notRegistered, passwordImmediately: Bool = false, managedByMDM: Bool = false,
+                lockKeysShowScene: Bool = false, lockKeysChangedByLivePaper: Bool = false) {
         self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverSelected = saverSelected
-        self.helperRunning = helperRunning; self.passwordImmediately = passwordImmediately
-        self.accessibilityTrusted = accessibilityTrusted; self.managedByMDM = managedByMDM
+        self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.passwordImmediately = passwordImmediately
+        self.managedByMDM = managedByMDM; self.lockKeysShowScene = lockKeysShowScene
+        self.lockKeysChangedByLivePaper = lockKeysChangedByLivePaper
     }
 }
 
+/// One logged installer step (what the uninstall sheet and `livepaper doctor` show).
+public struct InstallStep: Sendable, Equatable {
+    public enum Outcome: Sendable, Equatable {
+        case done
+        /// Dry run: would have been done.
+        case planned
+        /// Nothing to do (already in the desired state).
+        case skipped(String)
+        case failed(String)
+    }
+    public var title: String
+    public var outcome: Outcome
+    public init(title: String, outcome: Outcome) { self.title = title; self.outcome = outcome }
+
+    public var isFailure: Bool { if case .failed = outcome { return true }; return false }
+}
+
 public protocol InstallServicing: AnyObject, Sendable {
+    /// Blocking (runs read-only system probes): call it off the main thread.
     func status() -> InstallStatus
     /// Copies the saver template into ~/Library/Screen Savers (idempotent) and publishes content.
     func installSaver() throws
@@ -197,8 +321,23 @@ public protocol InstallServicing: AnyObject, Sendable {
     func selectSaver() throws -> Bool
     func registerHelper() throws
     func unregisterHelper() throws
+    /// Turns the lock-keys takeover on or off (`immediateLockLaunchesScreenSaver`). The value from
+    /// before LivePaper's first change is backed up; uninstall restores it.
+    func setLockKeysShowScene(_ on: Bool) throws
     func openScreenSaverSettings()
-    func openAccessibilitySettings()
-    /// Removes helper + saver, restores backed-up settings, optionally deletes the library.
-    func uninstall(removeLibrary: Bool) throws
+    /// Runs every uninstall step — helper, previous screen saver, changed preferences (including
+    /// the lock keys), the saver bundle, LivePaper's data (optionally the library) — continuing past
+    /// failures, and returns the step log. Running it again retries what failed.
+    @discardableResult func performUninstall(removeLibrary: Bool) -> [InstallStep]
+}
+
+public extension InstallServicing {
+    /// `performUninstall` that throws `InstallError.uninstallIncomplete` if any step failed.
+    func uninstall(removeLibrary: Bool) throws {
+        let failed = performUninstall(removeLibrary: removeLibrary).compactMap { step -> String? in
+            if case .failed(let why) = step.outcome { return "\(step.title): \(why)" }
+            return nil
+        }
+        if !failed.isEmpty { throw InstallError.uninstallIncomplete(failed) }
+    }
 }

@@ -40,30 +40,26 @@ enum SystemActions {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
-    /// "Lock now": start the screen saver; with "require password immediately" the saver locks,
-    /// and loginwindow draws the lock UI over the running scene (ARCHITECTURE §1, §7).
-    static func lockNow(_ model: AppModel) {
-        if model.environment.isMock {
-            model.banners.post(.info, "Sample mode", message: "LivePaper would start the screen saver and lock now.")
-            return
-        }
-        if !model.installStatus.saverSelected {
-            model.banners.post(.warning, "LivePaper isn't your screen saver yet",
-                               message: "Locking will show the regular lock screen.",
-                               actions: [.init(title: "Set Up") { Task { await model.makeLivePaperScreenSaver() } }])
-        }
+    /// Lock Now's fallback when no helper answers: start the screen saver. With "require password
+    /// immediately" the saver locks, and loginwindow draws the lock UI over the running scene
+    /// (ARCHITECTURE §1, §7). Only ever called for an explicit "Lock Now".
+    static func startScreenSaverEngine() async throws {
         let engine = URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
-        NSWorkspace.shared.openApplication(at: engine, configuration: config) { _, error in
-            guard let error else { return }
-            Task { @MainActor in model.banners.error("Couldn't start the screen saver", error) }
-        }
+        _ = try await NSWorkspace.shared.openApplication(at: engine, configuration: config)
     }
 
     /// System Settings › Lock Screen (for "Require password after screen saver begins").
     static func openLockScreenSettings() {
         if let url = URL(string: "x-apple.systempreferences:com.apple.Lock-Screen-Settings.extension") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// System Settings › General › Login Items (where macOS asks the user to allow the helper).
+    static func openLoginItemsSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.LoginItems-Settings.extension") {
             NSWorkspace.shared.open(url)
         }
     }

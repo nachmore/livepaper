@@ -27,14 +27,43 @@ public struct LPHotkey: Codable, Sendable, Equatable {
 }
 
 public struct LPLockSettings: Codable, Sendable, Equatable {
-    /// LivePaper's own lock hotkey (Carbon hotkey, no permissions needed). nil = disabled.
+    /// LivePaper's own lock shortcut (Carbon hotkey registered by the helper, no permissions
+    /// needed). nil = no shortcut. Optional extra: the system lock keys already show the scene
+    /// when `lockKeysShowScene` is on.
     public var hotkey: LPHotkey?
-    /// Take over ⌃⌘Q (needs Accessibility; see docs/RESEARCH.md).
-    public var takeOverSystemLock: Bool
-    /// Take over the Touch ID / lock key, if supported on this Mac.
-    public var takeOverLockKey: Bool
-    public init(hotkey: LPHotkey? = .controlCommandL, takeOverSystemLock: Bool = false, takeOverLockKey: Bool = false) {
-        self.hotkey = hotkey; self.takeOverSystemLock = takeOverSystemLock; self.takeOverLockKey = takeOverLockKey
+    /// Mirror of `com.apple.loginwindow immediateLockLaunchesScreenSaver` (⌃⌘Q, Apple menu › Lock
+    /// Screen and the Touch ID / lock key start the scene before locking), written by the app when it
+    /// changes the preference through `InstallServicing.setLockKeysShowScene`. Informational: the
+    /// system preference is the source of truth and loginwindow acts on it by itself.
+    public var lockKeysShowScene: Bool
+
+    public init(hotkey: LPHotkey? = .controlCommandL, lockKeysShowScene: Bool = false) {
+        self.hotkey = hotkey; self.lockKeysShowScene = lockKeysShowScene
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case hotkey, lockKeysShowScene
+        // Before the single toggle: two flags for the same preference.
+        case takeOverSystemLock, takeOverLockKey
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        // Absent (or null) = no shortcut, as the synthesized coding always wrote it.
+        hotkey = try c.decodeIfPresent(LPHotkey.self, forKey: .hotkey)
+        if let on = try c.decodeIfPresent(Bool.self, forKey: .lockKeysShowScene) {
+            lockKeysShowScene = on
+        } else {
+            let system = try c.decodeIfPresent(Bool.self, forKey: .takeOverSystemLock) ?? false
+            let key = try c.decodeIfPresent(Bool.self, forKey: .takeOverLockKey) ?? false
+            lockKeysShowScene = system || key
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encodeIfPresent(hotkey, forKey: .hotkey)
+        try c.encode(lockKeysShowScene, forKey: .lockKeysShowScene)
     }
 }
 

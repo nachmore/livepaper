@@ -70,7 +70,7 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate {
         let webConfig = SaverWebConfig(showClock: context.showClock, clockPosition: context.clockPosition, profile: context.profile,
                                        seed: context.seed, power: context.power)
         config.userContentController.addUserScript(
-            WKUserScript(source: webConfig.userScript, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            WKUserScript(source: webConfig.userScript + "window.LIVEPAPER_CONFIG.lockUI = \(context.lockUIShowing);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let proxy = WeakMessageProxy()
         config.userContentController.add(proxy, name: Self.messageHandlerName)
 

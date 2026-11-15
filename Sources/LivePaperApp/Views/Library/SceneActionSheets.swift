@@ -125,7 +125,6 @@ private struct ModifySheet: View {
         }
         .onAppear {
             harnessID = model.preferredHarness?.id
-            modelName = model.aiPreferences.model
         }
     }
 
@@ -209,6 +208,7 @@ struct HarnessPickerRow: View {
 
     var body: some View {
         let harnesses = model.availableHarnesses
+        let selected = harnesses.first { $0.id == harnessID }
         Grid(alignment: .leading, horizontalSpacing: 10, verticalSpacing: 8) {
             GridRow {
                 Text("Agent").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
@@ -238,15 +238,15 @@ struct HarnessPickerRow: View {
             }
             GridRow {
                 Text("Model").foregroundStyle(.secondary).gridColumnAlignment(.trailing)
-                TextField("Model", text: $modelName, prompt: Text("Default"))
+                TextField("Model", text: $modelName, prompt: Text(model.defaultModel(for: selected) ?? "Default"))
                     .textFieldStyle(.roundedBorder)
                     .frame(maxWidth: 220)
-                    .help("Optional. Passed to the agent as its model name; leave empty for its default.")
+                    .help("Optional. Passed to the agent as its model name; leave empty for the default from Settings \u{203A} AI.")
             }
         }
         .onChange(of: harnesses) { _, list in
             if harnessID == nil || !list.contains(where: { $0.id == harnessID }) {
-                harnessID = AIPreferences.preferredHarness(in: list, preferredID: model.aiPreferences.defaultHarnessID)?.id
+                harnessID = AIPreferences.preferredHarness(in: list, preferredID: model.aiSettings.preferredHarness)?.id
             }
         }
     }
