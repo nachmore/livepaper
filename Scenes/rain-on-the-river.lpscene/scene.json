@@ -4,14 +4,14 @@
     "position" : "top"
   },
   "created" : "2026-11-15T02:43:45Z",
-  "description" : "A hazy night skyline of varied towers in soft, steady rain, its lights stretched into long, softly rippling columns across a wide black river.",
+  "description" : "A night skyline in soft, steady rain, with drifting mist, softly changing windows and slow rooftop lights. Paired headlights and red tail lights cross the bridge while dim cars pass along the far shore. A low, lit barge crosses the river in alternating directions, trailing a fading V-shaped wake and long, wavering reflections.",
   "id" : "rain-on-the-river",
   "kind" : "web",
   "name" : "Rain on the River",
   "performance" : {
-    "benchMs" : 2.0419999999999998,
-    "checkedAt" : "2026-11-15T03:03:08Z",
-    "energyMw" : 56
+    "benchMs" : 2.7749999999999999,
+    "checkedAt" : "2026-11-15T17:29:31Z",
+    "energyMw" : 64
   },
   "runtime" : 1,
   "schema" : 1,
@@ -22,5 +22,5 @@
     "river",
     "calm"
   ],
-  "updated" : "2026-11-15T02:56:10Z"
+  "updated" : "2026-11-15T17:15:51Z"
 }

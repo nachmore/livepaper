@@ -1,11 +1,10 @@
 /*
  * Rain on the River — a generic night skyline in soft, steady rain, seen across a wide black river.
  *
- * Everything static (sky, buildings, windows, bridge, streetlights, the reflection light-map) is
- * built in resize(). draw() only composites: sky, drifting clouds, the city layer, a far-shore mist
- * band, a few fading windows, aviation lights, the blurred reflection cut into ~34 wobbling strips,
- * a ripple mask, river mist, a few rain rings and three scrolled rain tiles. The picture is a pure
- * function of lp.t.
+ * Architecture, weather tiles and light sprites are cached in resize(). Clouds pass behind the
+ * towers, rain haze veils the distant city, and shore mist slides past the waterfront. Sparse
+ * windows, a rooftop beacon, bridge traffic and a small river barge give the city its own rhythm.
+ * Every moving element is a bounded, deterministic function of lp.t.
  */
 const U = LivePaper.util;
 
@@ -45,31 +44,20 @@ LivePaper.scene({
     // Sky + water base (opaque).
     ctx.drawImage(S.sky.canvas, 0, 0, w, h);
 
-    // Low clouds, drifting very slowly back and forth.
-    const cdx = -S.cloudPad * (0.5 + 0.5 * Math.sin((t % 1400) / 1400 * U.TAU));
-    ctx.drawImage(S.clouds, cdx, 0, w + S.cloudPad, Y);
+    // Three depths of weather, tiled seamlessly rather than reversing at their edges.
+    drawWeather(ctx, S.clouds, t, w, 0.82 + 0.18 * Math.sin(t * U.TAU / 47));
 
-    // City.
+    // Distant city; the near waterfront stays crisp in front of the passing rain haze.
     ctx.drawImage(S.city.canvas, 0, S.cityTop, w, Y - S.cityTop);
 
-    // Faint mist band drifting along the far shore.
-    const fdx = -S.farPad * (0.5 + 0.5 * Math.sin((t % 1700) / 1700 * U.TAU + 0.4));
-    ctx.drawImage(S.farMist, fdx, S.farMistY, w + S.farPad, S.farMistH);
-
-    // Windows that slowly fade on/off.
-    const fl = S.flick;
-    let lastC = -1;
-    for (let i = 0; i < fl.length; i++) {
-      const f = fl[i];
-      const p = U.fract(t / f.period + f.ph);
-      const e = 3.5 / f.period;
-      const a = U.smoothstep(0, e, p) * (1 - U.smoothstep(f.duty, f.duty + e, p));
-      if (a < 0.004) continue;
-      if (f.c !== lastC) { ctx.fillStyle = WIN_COLORS[f.c]; lastC = f.c; }
-      ctx.globalAlpha = a * f.alpha;
-      ctx.fillRect(f.x, f.y, f.w, f.h);
-    }
-    ctx.globalAlpha = 1;
+    drawWindows(ctx, S, t, false);
+    drawBeacon(ctx, S, t, H);
+    drawWeather(ctx, S.cityHaze, t, w, 0.74 + 0.26 * Math.sin(t * U.TAU / 39 + 0.8));
+    ctx.drawImage(S.nearCity.canvas, 0, S.cityTop, w, Y - S.cityTop);
+    drawWindows(ctx, S, t, true);
+    ctx.drawImage(S.waterfront.canvas, 0, S.cityTop, w, Y - S.cityTop);
+    drawTraffic(ctx, S, t, H, false);
+    drawWeather(ctx, S.shoreHaze, t, w, 0.8 + 0.2 * Math.sin(t * U.TAU / 57 + 2.4));
 
     // Water reflections: strips of the blurred, mirrored light map, wobbling sideways.
     const R = S.refl, waterH = h - Y;
@@ -86,9 +74,9 @@ LivePaper.scene({
       const fm = (y0 - Y) / waterH;
       const y1 = Math.min(h, y0 + sh0 + (sh1 - sh0) * fm);
       const u = (y0 - Y) / H;
-      const amp = (0.25 + 2.2 * fm) * ampK;
+      const amp = (0.35 + 3.1 * fm) * ampK;
       const dx = amp * (0.6 * Math.sin(u * 55 + ph * 0.45) + 0.4 * Math.sin(u * 131 - ph * 0.71));
-      const a = 1 - (0.05 + 0.16 * fm) * (0.5 + 0.5 * Math.sin(u * 83 + ph * 0.38));
+      const a = 1 - (0.08 + 0.22 * fm) * (0.5 + 0.5 * Math.sin(u * 83 + ph * 0.46));
       const sy0 = fm * R.h, sy1 = (y1 - Y) / waterH * R.h;
       ctx.globalAlpha = a;
       ctx.drawImage(R.canvas, 0, sy0, R.w, Math.max(0.01, sy1 - sy0), dx - pad, y0, w + pad * 2, y1 - y0 + 0.5);
@@ -96,6 +84,7 @@ LivePaper.scene({
     }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
+    drawTraffic(ctx, S, t, H, true);
 
     // Aviation lights (and their soft reflections).
     for (const L of S.avi) {
@@ -132,13 +121,14 @@ LivePaper.scene({
     ctx.restore();
 
     // Mist hugging the river.
-    const mdx = -S.mistPad * (0.5 + 0.5 * Math.sin((t % 900) / 900 * U.TAU + 1.3));
-    ctx.drawImage(S.mist, mdx, Y - S.mistAbove, w + S.mistPad, S.mistAbove + S.mistBelow);
+    drawWeather(ctx, S.riverMist, t, w, 0.85 + 0.15 * Math.sin(t * U.TAU / 43 + 1.3));
+
+    drawBargePasses(ctx, S, t, w, H, lp.quality);
 
     // Rain-drop rings on the near water.
     ctx.strokeStyle = '#a8b8d0';
     ctx.lineWidth = Math.max(0.6, H / 1100);
-    for (let k = 0; k < S.ringCount; k++) {
+    for (let k = 0; k < Math.floor(S.ringCount * lp.quality); k++) {
       const P = 2.1 + k * 0.37;
       const tt = (t + k * 1.91) % (P * 1000);
       const cyc = Math.floor(tt / P), f = tt / P - cyc;
@@ -147,7 +137,7 @@ LivePaper.scene({
       const ry = Y + waterH * fy;
       const rmax = (0.006 + 0.03 * fy * fy) * H;
       const r = rmax * U.ease.outCubic(f);
-      const a = (1 - f) * (1 - f) * 0.32 * fy;
+      const a = U.smoothstep(0, 0.12, f) * (1 - f) * (1 - f) * 0.46 * fy;
       if (a < 0.01) continue;
       ctx.globalAlpha = a;
       ctx.beginPath();
@@ -172,6 +162,143 @@ LivePaper.scene({
 
 function mod(a, m) { return ((a % m) + m) % m; }
 
+function drawWeather(ctx, layer, t, w, alpha) {
+  const x = -mod(t * layer.speed, layer.w);
+  const y = layer.y + layer.sway * Math.sin(t * U.TAU / layer.period + layer.phase);
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(layer.canvas, x, y, layer.w, layer.h);
+  if (x + layer.w < w) ctx.drawImage(layer.canvas, x + layer.w, y, layer.w, layer.h);
+  ctx.globalAlpha = 1;
+}
+
+function drawWindows(ctx, s, t, near) {
+  for (const f of s.flick) {
+    if ((f.layer === 2) !== near) continue;
+    const p = mod(t + f.ph, f.period);
+    const a = U.smoothstep(0, 1.25, p) * (1 - U.smoothstep(f.onTime, f.onTime + 1.25, p));
+    if (a < 0.004) continue;
+    ctx.fillStyle = WIN_COLORS[f.c];
+    ctx.globalAlpha = a * f.alpha;
+    ctx.fillRect(f.x, f.y, f.w, f.h);
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBeacon(ctx, s, t, H) {
+  if (!s.beacon) return;
+  const b = s.beacon;
+  const angle = -0.62 + 0.34 * Math.sin(t * U.TAU / 61 + 0.7);
+  ctx.save();
+  ctx.translate(b.x, b.y);
+  ctx.rotate(angle);
+  ctx.globalAlpha = 0.08 + 0.045 * (0.5 + 0.5 * Math.sin(t * U.TAU / 37));
+  ctx.drawImage(s.beaconSprite.canvas, 0, -H * 0.035, H * 0.17, H * 0.07);
+  ctx.restore();
+}
+
+function drawTraffic(ctx, s, t, H, reflection) {
+  const b = s.bridge, span = b.x1 - b.x0;
+  for (const car of s.traffic) {
+    const p = mod(t + car.phase, car.period) / car.period;
+    const a = U.smoothstep(0, 0.055, p) * (1 - U.smoothstep(0.945, 1, p));
+    const x = b.x0 + (car.dir > 0 ? p : 1 - p) * span;
+    const y = b.y - H * (car.dir > 0 ? 0.0105 : 0.0075);
+    if (reflection) {
+      const sprite = car.dir > 0 ? s.headReflection : s.tailReflection;
+      ctx.globalAlpha = a * (car.dir > 0 ? 0.23 : 0.27);
+      const ry = s.Y + (s.Y - y) * s.stretch;
+      const sway = H * 0.0014 * Math.sin(t * 0.65 + car.phase);
+      ctx.drawImage(sprite.canvas, x - H * 0.007 + sway, ry - H * 0.019, H * 0.014, H * 0.072);
+    } else {
+      const sprite = car.dir > 0 ? s.headlights : s.taillights;
+      ctx.globalAlpha = a * 0.96;
+      ctx.drawImage(sprite.canvas, x - H * 0.00875, y - H * 0.004, H * 0.0175, H * 0.008);
+    }
+  }
+  // Two much farther lights pass through the haze along the left waterfront.
+  for (const car of s.shoreTraffic) {
+    const p = mod(t + car.phase, car.period) / car.period;
+    const a = U.smoothstep(0, 0.06, p) * (1 - U.smoothstep(0.94, 1, p));
+    const x = H * 0.025 + (car.dir > 0 ? p : 1 - p) * Math.max(0, b.x0 - H * 0.06);
+    if (reflection) {
+      ctx.globalAlpha = a * 0.11;
+      ctx.drawImage(s.headReflection.canvas, x - H * 0.0035, s.Y + H * 0.022, H * 0.007, H * 0.033);
+    } else {
+      ctx.globalAlpha = a * 0.32;
+      ctx.drawImage(s.headlights.canvas, x - H * 0.0035, s.Y - H * 0.018, H * 0.007, H * 0.0032);
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+function drawBargePasses(ctx, s, t, w, H, quality) {
+  const trip = Math.floor((t + 12) / 118), phase = mod(t + 12, 118);
+  // The previous wake lives into the next passage, so the quiet interval still has a trace.
+  for (let i = 1; i >= 0; i--) {
+    const age = phase + i * 118, cycle = trip - i;
+    if (age >= 126) continue;
+    const dir = mod(cycle, 2) ? -1 : 1;
+    const p = Math.min(1, age / 100), edge = 0.075;
+    let travel = p;
+    if (p < edge) travel = 2 * p * p / edge - p * p * p / (edge * edge);
+    else if (p > 1 - edge) {
+      const q = 1 - p;
+      travel = 1 - (2 * q * q / edge - q * q * q / (edge * edge));
+    }
+    const x = (dir > 0 ? travel : 1 - travel) * w * 1.12 - w * 0.06;
+    const y = s.Y + (H - s.Y) * 0.32 + H * 0.0008 * Math.sin(t * U.TAU / 11);
+    const wakeAlpha = U.smoothstep(0, 6, age) * (1 - U.smoothstep(100, 126, age));
+    drawWake(ctx, s, t, x, y, dir, wakeAlpha, Math.max(0, age - 100), w, H);
+    const alpha = U.smoothstep(0, 0.065, p) * (1 - U.smoothstep(0.935, 1, p));
+    if (alpha > 0.002) drawBoat(ctx, s, t, x, y, dir, alpha, w, H, quality);
+  }
+}
+
+function drawWake(ctx, s, t, x, y, dir, alpha, age, w, H) {
+  if (alpha < 0.002) return;
+  const length = w * 0.053;
+  const wakeLength = length * (3.6 + age * 0.035);
+  const spread = H * (0.043 + age * 0.0006) * (1 + 0.06 * Math.sin(t * U.TAU / 13));
+  ctx.save();
+  ctx.translate(x + dir * age * H * 0.00035, y + age * H * 0.00015);
+  ctx.scale(dir, 1);
+  ctx.globalAlpha = alpha * 0.82;
+  ctx.drawImage(s.wake.canvas, -length * 0.45 - wakeLength, -spread / 2, wakeLength, spread);
+  ctx.restore();
+}
+
+function drawLightStreak(ctx, sprite, t, x, y, width, height, alpha, phase, quality) {
+  const strips = quality < 0.8 ? 6 : 9;
+  for (let i = 0; i < strips; i++) {
+    const f = i / strips, f1 = (i + 1) / strips;
+    const sway = width * (0.12 + f * 0.22) *
+      (0.65 * Math.sin(t * 0.63 + f * 8 + phase) + 0.35 * Math.sin(t * 0.39 - f * 15 + phase));
+    ctx.globalAlpha = alpha * (0.84 + 0.16 * Math.sin(t * 0.51 + f * 11 + phase));
+    ctx.drawImage(sprite.canvas, 0, f * sprite.h, sprite.w, (f1 - f) * sprite.h,
+      x - width / 2 + sway, y + f * height, width, height / strips + 0.35);
+  }
+}
+
+function drawBoat(ctx, s, t, x, y, dir, alpha, w, H, quality) {
+  const length = w * 0.053, height = H * 0.032;
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.scale(dir, 1);
+  ctx.globalCompositeOperation = 'lighter';
+  drawLightStreak(ctx, s.warmReflection, t, -length * 0.2854, H * 0.001,
+    H * 0.013, H * 0.115, alpha * 0.55, 0.4, quality);
+  drawLightStreak(ctx, s.warmReflection, t, -length * 0.2104, H * 0.001,
+    H * 0.011, H * 0.098, alpha * 0.45, 1.3, quality);
+  drawLightStreak(ctx, s.whiteReflection, t, -length * 0.0917, H * 0.002,
+    H * 0.011, H * 0.145, alpha * 0.48, 2.1, quality);
+  drawLightStreak(ctx, dir > 0 ? s.redReflection : s.greenReflection, t, length * 0.3125, H * 0.001,
+    H * 0.009, H * 0.105, alpha * 0.56, 3.8, quality);
+  ctx.globalCompositeOperation = 'source-over';
+  ctx.globalAlpha = alpha;
+  ctx.drawImage(s.boats[dir > 0 ? 0 : 1].canvas, -length / 2, -height * 72 / 88, length, height);
+  ctx.restore();
+}
+
 // ======================================================================================= build
 
 function build(lp) {
@@ -195,15 +322,21 @@ function build(lp) {
   s.cityTop = Math.floor(Y - 0.5 * H);
   const city = U.layer(w, Y - s.cityTop, dpr);
   s.city = city;
-  const g = city.ctx;
+  let g = city.ctx;
   g.translate(0, -s.cityTop);
 
   const winPaths = LAYERS.map(() => WIN_COLORS.map(() => [new Path2D(), new Path2D()]));
   const flick = [];
   const avi = [];
+  const beaconCandidates = [];
   const silhouettes = [];
 
   LAYERS.forEach((L, li) => {
+    if (li === 2) {
+      s.nearCity = U.layer(w, Y - s.cityTop, dpr);
+      g = s.nearCity.ctx;
+      g.translate(0, -s.cityTop);
+    }
     const lr = U.mulberry32(SEED + L.seed * 101);
     const near = L.name === 'near', far = L.name === 'far';
     const sil = new Path2D();
@@ -289,6 +422,9 @@ function build(lp) {
         if (tall) avi.push({ x: mx + mw / 2, y: b.top - mh, layer: li, h: b.bh + mh * 0.6 });
       }
       sil.addPath(bp);
+      if (!near && b.bh > 0.14 * H && Math.abs(b.x + b.bw / 2 - qc) > qHalf + H * 0.1) {
+        beaconCandidates.push({ x: b.x + b.bw / 2, y: b.top, h: b.bh });
+      }
 
       const gr = g.createLinearGradient(0, b.top - 0.02 * H, 0, Y);
       gr.addColorStop(0, L.top);
@@ -364,7 +500,7 @@ function build(lp) {
             if (li > 0 && q < 0.0032) {
               let c = floorColor;
               if (type === 'grid' && floorLit < 0.5) c = 2;
-              flick.push({ x: xx, y: yy, w: ww, h: wh, c, alpha: L.winAlpha * 0.95 });
+              flick.push({ x: xx, y: yy, w: ww, h: wh, c, alpha: L.winAlpha * 0.95, layer: li });
               continue;
             }
             if (lr() >= floorLit) continue;
@@ -426,16 +562,22 @@ function build(lp) {
     }
   });
 
-  // Flickering windows: period scales with count so ~0.4 changes per second overall.
+  // Keep only a few dynamic windows, spread across the existing skyline. Preserve the seeded
+  // architecture above: selecting these never consumes the building generator's randomness.
   const fr = U.mulberry32(SEED + 55);
-  const meanPeriod = Math.max(60, flick.length * 5);
-  for (const f of flick) {
-    f.period = meanPeriod * (0.6 + 0.8 * fr());
-    f.ph = fr();
-    f.duty = 0.3 + 0.45 * fr();
+  flick.sort((a, b) => a.x - b.x);
+  const windowCount = Math.min(flick.length, Math.max(6, Math.min(12, Math.round(w / H * 5))));
+  s.flick = [];
+  for (let i = 0; i < windowCount; i++) {
+    const f = flick[Math.floor((i + 0.5) * flick.length / windowCount)];
+    f.period = windowCount * (19 + fr() * 10);
+    f.ph = fr() * f.period;
+    f.onTime = f.period * (0.38 + fr() * 0.24);
+    s.flick.push(f);
   }
-  flick.sort((a, b) => a.c - b.c);
-  s.flick = flick;
+  s.waterfront = U.layer(w, Y - s.cityTop, dpr);
+  g = s.waterfront.ctx;
+  g.translate(0, -s.cityTop);
 
   // Embankment along the waterline, with a row of warm streetlights.
   g.fillStyle = '#05060a';
@@ -456,6 +598,17 @@ function build(lp) {
 
   // Bridge
   const deckY = Y - 0.034 * H, deckT = Math.max(2, 0.0065 * H);
+  s.bridge = { x0: bx0, x1: bx1, y: deckY };
+  s.traffic = [];
+  const tr = U.mulberry32(SEED + 61);
+  for (let i = 0; i < 6; i++) {
+    const period = 28 + tr() * 10;
+    s.traffic.push({ dir: i % 2 ? -1 : 1, period, phase: period * (Math.floor(i / 2) / 3 + tr() * 0.12) });
+  }
+  s.shoreTraffic = [
+    { dir: 1, period: 77, phase: 16 },
+    { dir: -1, period: 93, phase: 55 },
+  ];
   const bPath = new Path2D();
   bPath.rect(bx0, deckY, bx1 - bx0, deckT);
   const piers = 6;
@@ -511,9 +664,22 @@ function build(lp) {
   avi.sort((a, b) => b.h - a.h);
   s.avi = avi.filter((a) => Math.abs(a.x - qc) > qHalf * 0.9).slice(0, nAvi).map((a) => ({
     x: a.x, y: a.y, r: (a.layer === 0 ? 0.011 : 0.016) * H, s: Math.max(1.2, 0.0028 * H),
-    period: 2.4 + aviR() * 0.8, ph: aviR() * 3,
+    period: 6 + aviR() * 3, ph: aviR() * 9,
   }));
   s.redSprite = U.glowSprite('#ff4030');
+  s.headlights = buildTrafficLights('#ffd9a2', '#fff5e5');
+  s.taillights = buildTrafficLights('#ff4939', '#ff9c80');
+  s.headReflection = buildLightReflection('#ffe0b0', true);
+  s.tailReflection = buildLightReflection('#ff6650', true);
+  s.warmReflection = buildLightReflection('#ffd392', false);
+  s.whiteReflection = buildLightReflection('#fff0d8', false);
+  s.redReflection = buildLightReflection('#ff5844', false);
+  s.greenReflection = buildLightReflection('#65d5b0', false);
+  beaconCandidates.sort((a, b) => b.h - a.h);
+  s.beacon = beaconCandidates[0] || null;
+  s.beaconSprite = buildBeacon();
+  s.boats = [buildBoat('#ff5844', '#ffa080'), buildBoat('#65d5b0', '#acf0cb')];
+  s.wake = buildWake();
 
   // ---------------------------------------------------------------- sky + water base
   const sky = U.layer(w, h, dpr), sg = sky.ctx;
@@ -544,8 +710,17 @@ function build(lp) {
   dither(sg, w, h);
 
   // ---------------------------------------------------------------- clouds
-  s.cloudPad = Math.round(0.08 * w);
-  s.clouds = buildClouds(w + s.cloudPad, Y, H, qc, qHalf);
+  const weatherW = Math.max(w * 1.25, H * 2);
+  const weatherSpeed = w / 1512;
+  s.clouds = {
+    canvas: buildClouds(weatherW, Y, H), w: weatherW, h: Y, y: 0,
+    speed: 1.9 * weatherSpeed, sway: H * 0.003, period: 53, phase: 0.3,
+  };
+  s.cityHaze = {
+    canvas: buildMist(weatherW, H * 0.21, H * 0.12, H, '#585368', 0.6, 83),
+    w: weatherW, h: H * 0.33, y: Y - H * 0.33,
+    speed: -4.8 * weatherSpeed, sway: H * 0.006, period: 41, phase: 1.2,
+  };
 
   // ---------------------------------------------------------------- reflection map
   // City lights mirrored and stretched into a small canvas, smeared into long columns,
@@ -627,8 +802,8 @@ function build(lp) {
   rg.fillRect(0, 0, RW, RH);
   rg.globalCompositeOperation = 'source-over';
   s.refl = { canvas: rc, w: RW, h: RH };
-  s.sliceH0 = Math.max(0.5, 0.0035 * H); // slice thickness at the shore …
-  s.sliceH1 = Math.max(1, 0.009 * H);    // … and at the bottom edge
+  s.sliceH0 = Math.max(0.5, 0.0045 * H); // slice thickness at the shore …
+  s.sliceH1 = Math.max(1, 0.011 * H);    // … and at the bottom edge
 
   // ---------------------------------------------------------------- ripple mask (device px)
   {
@@ -649,16 +824,18 @@ function build(lp) {
   }
 
   // ---------------------------------------------------------------- mist
-  s.mistPad = Math.round(0.1 * w);
-  s.mistAbove = 0.035 * H; s.mistBelow = 0.06 * H;
-  s.mist = buildMist(w + s.mistPad, s.mistAbove, s.mistBelow, H, '#8a8aa6', 0.3, 50);
-  // far-shore band, in front of the far towers
-  s.farPad = Math.round(0.14 * w);
-  const fa = 0.03 * H, fb = 0.02 * H;
-  s.farMistY = Y - 0.025 * H - fa; s.farMistH = fa + fb;
-  s.farMist = buildMist(w + s.farPad, fa, fb, H, '#7c7f98', 0.2, 120);
+  s.riverMist = {
+    canvas: buildMist(weatherW, H * 0.035, H * 0.06, H, '#8a8aa6', 0.27, 50),
+    w: weatherW, h: H * 0.095, y: Y - H * 0.035,
+    speed: 6.7 * weatherSpeed, sway: H * 0.002, period: 59, phase: 1.8,
+  };
+  s.shoreHaze = {
+    canvas: buildMist(weatherW, H * 0.033, H * 0.021, H, '#7c7f98', 0.22, 120),
+    w: weatherW, h: H * 0.054, y: Y - H * 0.06,
+    speed: 7.8 * weatherSpeed, sway: H * 0.003, period: 49, phase: 0.6,
+  };
 
-  s.ringCount = Math.max(5, Math.min(16, Math.round(w / H * 5)));
+  s.ringCount = Math.max(7, Math.min(18, Math.round(w / H * 7)));
 
   // ---------------------------------------------------------------- rain tiles (device px)
   s.rain = [
@@ -700,7 +877,7 @@ function buildRain(spec, idx, H, dpr, ctx) {
   return { pat: ctx.createPattern(c, 'repeat'), size, speed: spec.speed * H, slant: spec.slant };
 }
 
-function buildClouds(W, Y, H, qc, qHalf) {
+function buildClouds(W, Y, H) {
   const k = 6;
   const cw = Math.max(8, Math.ceil(W / k)), ch = Math.max(8, Math.ceil(Y / k));
   const c = document.createElement('canvas');
@@ -712,12 +889,13 @@ function buildClouds(W, Y, H, qc, qHalf) {
     const band = U.smoothstep(0.38, 0.72, yn) * (1 - 0.6 * U.smoothstep(0.9, 1, yn));
     const lit = Math.pow(U.smoothstep(0.4, 1.0, yn), 1.5);
     for (let x = 0; x < cw; x++) {
-      const X = x * k / H;
-      const n = U.fbm2(X * 2.0 + 11.3, yn * 5.5 + X * 0.25, 4);
-      const n2 = U.fbm2(X * 6.5 + 3.1, yn * 14.0, 2);
+      const angle = x / cw * U.TAU, radius = W / H / U.TAU;
+      const X = Math.cos(angle) * radius, Z = Math.sin(angle) * radius;
+      const n = U.fbm2(X * 2.0 + 11.3, yn * 5.5 + Z * 2, 4);
+      const n2 = U.fbm2(X * 6.5 + 3.1, yn * 14.0 + Z * 6.5, 2);
       let dens = U.smoothstep(0.42, 0.78, n * 0.8 + n2 * 0.25) * band;
       // lit undersides: brighter where the cloud thins out below
-      const under = U.smoothstep(0.3, 0.9, U.fbm2(X * 2.0 + 11.3, (yn + 0.06) * 5.5 + X * 0.25, 3));
+      const under = U.smoothstep(0.3, 0.9, U.fbm2(X * 2.0 + 11.3, (yn + 0.06) * 5.5 + Z * 2, 3));
       const shade = lit * (0.55 + 0.45 * (1 - under));
       const i4 = (y * cw + x) * 4;
       d[i4] = top[0] + (low[0] - top[0]) * shade;
@@ -748,8 +926,9 @@ function buildMist(W, above, below, H, color, alpha, seedX) {
     const yn = y / (mh - 1);
     const prof = yn < cy ? U.smoothstep(0, cy, yn) : 1 - U.smoothstep(cy, 1, yn);
     for (let x = 0; x < mw; x++) {
-      const n = U.fbm2(x * k / H * 4.0 + seedX, yn * 2.0, 3);
-      const a = prof * (0.3 + 0.7 * U.smoothstep(0.35, 0.75, n)) * alpha;
+      const angle = x / mw * U.TAU, radius = W / H * 4 / U.TAU;
+      const n = U.fbm2(Math.cos(angle) * radius + seedX, yn * 2.0 + Math.sin(angle) * radius, 3);
+      const a = prof * (0.08 + 0.92 * U.smoothstep(0.3, 0.7, n)) * alpha;
       const i4 = (y * mw + x) * 4;
       d[i4] = col[0]; d[i4 + 1] = col[1]; d[i4 + 2] = col[2];
       d[i4 + 3] = a * 255;
@@ -757,6 +936,124 @@ function buildMist(W, above, below, H, color, alpha, seedX) {
   }
   g.putImageData(img, 0, 0);
   return c;
+}
+
+function buildBeacon() {
+  const layer = U.layer(128, 48, 1), g = layer.ctx;
+  const glow = g.createLinearGradient(0, 0, 128, 0);
+  glow.addColorStop(0, 'rgba(170,192,205,0.7)');
+  glow.addColorStop(0.3, 'rgba(145,168,192,0.3)');
+  glow.addColorStop(1, 'rgba(120,149,178,0)');
+  g.fillStyle = glow;
+  for (let i = 0; i < 8; i++) {
+    g.globalAlpha = 0.18;
+    g.beginPath();
+    g.moveTo(0, 24);
+    g.lineTo(128, 24 - 3 - i * 2.5);
+    g.lineTo(128, 24 + 3 + i * 2.5);
+    g.closePath();
+    g.fill();
+  }
+  return layer;
+}
+
+function buildTrafficLights(color, core) {
+  const layer = U.layer(128, 64, 1), g = layer.ctx;
+  for (const x of [44, 84]) {
+    U.glow(g, x, 32, 28, color, 0.8);
+    g.fillStyle = core;
+    g.beginPath();
+    g.ellipse(x, 32, 8.5, 6.5, 0, 0, U.TAU);
+    g.fill();
+  }
+  return layer;
+}
+
+function buildLightReflection(color, pair) {
+  const layer = U.layer(48, 192, 1), g = layer.ctx;
+  const img = g.createImageData(48, 192), d = img.data, rgb = U.hexToRgb(color);
+  for (let y = 0; y < 192; y++) {
+    const v = y / 191;
+    const fade = U.smoothstep(0, 0.025, v) * Math.pow(1 - v, 1.7);
+    const ripple = 0.45 + 0.55 * Math.pow(0.5 + 0.5 * Math.sin(y * 0.49 + Math.sin(y * 0.17)), 2);
+    const shift = 1.1 * Math.sin(y * 0.12) + 0.7 * Math.sin(y * 0.31);
+    const spread = (pair ? 2.8 : 4) + v * (pair ? 3.2 : 5);
+    for (let x = 0; x < 48; x++) {
+      const dx = x - 24 - shift;
+      let body;
+      if (pair) {
+        body = Math.exp(-Math.pow((dx - 8) / spread, 2)) + Math.exp(-Math.pow((dx + 8) / spread, 2));
+      } else body = Math.exp(-Math.pow(dx / spread, 2)) + 0.12 * Math.exp(-Math.pow(dx / (spread * 2.3), 2));
+      const i = (y * 48 + x) * 4;
+      d[i] = rgb[0]; d[i + 1] = rgb[1]; d[i + 2] = rgb[2];
+      d[i + 3] = Math.min(255, body * fade * ripple * 210);
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return layer;
+}
+
+function buildBoat(sideColor, sideCore) {
+  const layer = U.layer(240, 88, 1), g = layer.ctx;
+  g.fillStyle = '#070a11';
+  g.beginPath();
+  g.moveTo(8, 58); g.lineTo(232, 58); g.lineTo(216, 72); g.lineTo(26, 72);
+  g.closePath(); g.fill();
+  g.fillStyle = '#17202a';
+  g.fillRect(40, 34, 62, 24);
+  g.fillStyle = '#10161e';
+  g.fillRect(112, 47, 78, 11);
+  g.fillStyle = '#2e3943';
+  g.fillRect(37, 32, 68, 3);
+  g.fillRect(97, 12, 2.5, 22);
+  g.fillStyle = 'rgba(153,173,184,0.3)';
+  g.fillRect(15, 57, 210, 1.8);
+  g.fillStyle = 'rgba(68,89,105,0.4)';
+  g.fillRect(28, 69, 185, 1.5);
+  U.glow(g, 61, 46, 24, '#ffc982', 0.42);
+  U.glow(g, 98, 11, 17, '#fff0d8', 0.65);
+  U.glow(g, 195, 53, 18, sideColor, 0.62);
+  g.fillStyle = '#ffe0ac';
+  g.fillRect(48, 43, 7, 7); g.fillRect(66, 43, 7, 7);
+  g.fillStyle = '#fff8e9';
+  g.fillRect(95.5, 8.5, 5, 5);
+  g.fillStyle = sideCore;
+  g.fillRect(192, 50.5, 6, 5);
+  return layer;
+}
+
+function buildWake() {
+  const layer = U.layer(384, 128, 1), g = layer.ctx;
+  const fade = g.createLinearGradient(0, 0, 384, 0);
+  fade.addColorStop(0, 'rgba(5,8,14,0)');
+  fade.addColorStop(0.35, 'rgba(5,8,14,0.12)');
+  fade.addColorStop(1, 'rgba(5,8,14,0.38)');
+  g.fillStyle = fade;
+  g.beginPath();
+  g.moveTo(380, 64); g.lineTo(0, 8); g.lineTo(0, 120);
+  g.closePath(); g.fill();
+  const edge = g.createLinearGradient(0, 0, 384, 0);
+  edge.addColorStop(0, 'rgba(126,148,163,0)');
+  edge.addColorStop(0.28, 'rgba(126,148,163,0.06)');
+  edge.addColorStop(0.72, 'rgba(126,148,163,0.26)');
+  edge.addColorStop(1, 'rgba(126,148,163,0.12)');
+  g.strokeStyle = edge;
+  g.lineJoin = 'round';
+  const path = new Path2D();
+  for (const side of [-1, 1]) {
+    path.moveTo(380, 64);
+    for (let x = 368; x >= 0; x -= 8) {
+      const spread = (380 - x) * 0.147;
+      path.lineTo(x, 64 + side * spread + Math.sin(x * 0.09) * 1.2);
+    }
+  }
+  g.lineWidth = 5;
+  g.globalAlpha = 0.3;
+  g.stroke(path);
+  g.lineWidth = 1.8;
+  g.globalAlpha = 1;
+  g.stroke(path);
+  return layer;
 }
 
 function dither(g, w, h) {

@@ -20,9 +20,12 @@ const U = LivePaper.util;
 const DOWNSCALE = 3.4;
 const CAUSTIC_DOWNSCALE = 7.0;       // at dpr 2; scaled with dpr so the softness is in CSS px
 const BLOBS = 7;
-const CAUSTIC_PERIOD = 300;          // seconds for the caustic phase to go round once
+const FLOW = 3.0;                    // colour-field speed multiplier
+const CAUSTIC_PERIOD = 70;           // seconds for the caustic phase to go round once
 const STREAK1_PERIOD = 110;          // seconds for a specular streak to cross the frame
 const STREAK2_PERIOD = 150;
+const REFL_PERIOD = 80;              // second reflection drifting across the upper part
+const GLINT_PERIOD = 55;             // glint sliding along the first streak
 
 // Palette: midnight blue, ink violet, deep teal. The ember is no longer a blob but a ribbon.
 const PALETTE = [
@@ -109,7 +112,10 @@ float caustic(vec2 x) {
 void main() {
   vec2 p = vec2(v_uv.x * u_aspect, 1.0 - v_uv.y);
   // Slightly stretched horizontally, as a pool floor seen at an angle.
-  float c = caustic(p * vec2(9.5, 14.0) + u_cd);
+  vec2 cp = p * vec2(9.5, 14.0) + u_cd;
+  float c = caustic(cp);
+  // Soft shimmer: a slow travelling brightness swell over the net.
+  c *= 0.80 + 0.55 * vnoise(cp * 0.42 + u_cw.yz * 0.5 + vec2(u_cd.y, -u_cd.x) * 0.6);
   gl_FragColor = vec4(vec3(c * 0.4), 1.0);
 }
 `;
@@ -129,6 +135,11 @@ uniform vec4 u_st;                // streaks: x1, alpha1, x2, alpha2
 uniform vec4 u_wob;               // refraction wobble phases (bounded)
 uniform sampler2D u_caus;         // low-res caustic texture
 uniform vec2 u_ctx;               // one caustic texel in uv
+uniform vec4 u_wisp;              // top wisps: bounded warp offsets
+uniform vec4 u_wisp2;             // top wisps: scroll x, scroll y, fold phase, unused
+uniform vec4 u_rip;               // ripple phases (wrapped), glint phase, ribbon wave phase
+uniform vec4 u_mote;              // motes: drift x (wrapped), drift y, phase, unused
+uniform vec4 u_rf;                // second reflection x, alpha; streak glint x, unused
 ${NOISE_GLSL}
 float field(vec2 q, out vec3 col) {
   float d = 0.0, cs = 0.0; vec3 c = vec3(0.0);
@@ -170,6 +181,9 @@ void main() {
   // Very gentle large-scale refraction wobble of the thick sheet: boundaries bend slowly.
   q += 0.040 * vec2(sin(p.y * 1.7 + p.x * 0.45 + u_wob.x), sin(p.x * 1.25 - p.y * 0.6 + u_wob.y))
      + 0.022 * vec2(sin(p.x * 0.9 - p.y * 1.1 + u_wob.z), sin(p.y * 1.4 + p.x * 0.7 + u_wob.w));
+  // Finer ripples running across the whole pane.
+  q += 0.011 * vec2(sin(dot(p, vec2(5.2, 3.1)) - u_rip.x), sin(dot(p, vec2(-3.4, 4.6)) - u_rip.y))
+     + 0.006 * vec2(sin(dot(p, vec2(-7.9, 2.3)) - u_rip.y * 2.0), sin(dot(p, vec2(2.7, 8.4)) - u_rip.x * 2.0));
 
   vec3 fc;
   float d = field(q, fc);
@@ -181,12 +195,15 @@ void main() {
   // Ember ribbon: a long, thin, flowing band that bends with the fields' flow.
   vec2 rq = q - u_rib.xy + grad * 0.012;
   float u = rq.x;
-  float cy = 0.10 * sin(u * 2.3 + u_rib.z) + 0.05 * sin(u * 4.7 - u_rib.w) - 0.22 * u;
+  float cy = 0.10 * sin(u * 2.3 + u_rib.z) + 0.05 * sin(u * 4.7 - u_rib.w) - 0.22 * u
+           + 0.020 * sin(u * 6.5 - u_rip.w) + 0.008 * sin(u * 11.0 + u_rip.w * 2.0);
   float th = 0.022 + 0.026 * (0.5 + 0.5 * sin(u * 2.6 + u_rib.w + 1.0));
   float dy = (rq.y - cy) / th;
   float ul = u / u_ribLen;
   float rib = exp(-dy * dy) * exp(-ul * ul * ul * ul * 1.5);
   float ribHalo = exp(-dy * dy * 0.08) * exp(-ul * ul * 2.0);
+  // Flow along the ribbon: soft brighter pulses travelling its length.
+  rib *= 0.78 + 0.30 * (0.5 + 0.5 * sin(u * 9.0 - u_rip.w * 2.0));
 
   vec3 base = mix(vec3(0.012, 0.014, 0.034), fc * 0.55, clamp(d * 0.85, 0.0, 1.0));
   float m = smoothstep(0.25, 1.45, d);
@@ -209,7 +226,9 @@ void main() {
     float a = k == 0 ? 1.0 : 0.7;
     rim += a * arc * (vec3(0.30, 0.12, 0.05) * exp(-wa * wa) + vec3(0.05, 0.13, 0.32) * exp(-wb * wb));
   }
-  rim *= smoothstep(0.5, 1.4, gl);
+  // Specular glints sliding slowly along the edge arcs.
+  float glide = pow(0.5 + 0.5 * sin(q.x * 6.0 + q.y * 2.5 - u_rip.z), 6.0);
+  rim *= smoothstep(0.5, 1.4, gl) * (0.55 + 2.2 * glide);
   col += rim * 0.20 * (0.4 + 0.6 * smoothstep(0.1, 0.7, p.y));
 
   // Fade the top band, darkest at top centre where the clock sits.
@@ -218,6 +237,45 @@ void main() {
   float clockDark = 1.0 - 0.55 * exp(-cdx * cdx * 2.0) * (1.0 - smoothstep(0.0, 0.5, p.y));
   float shade = mix(0.30, 1.0, topFade) * clockDark;
   col *= shade;
+
+  // Top band: faint dark colour wisps far behind the glass, drifting and folding.
+  float wmask = 1.0 - smoothstep(0.20, 0.58, p.y);
+  if (wmask > 0.0) {
+    vec2 wp = p * vec2(1.25, 2.6);
+    vec2 wa = vec2(fbm(wp * 0.8 + u_wisp.xy), fbm(wp * 0.8 + u_wisp.zw + 3.1)) - 0.5;
+    float n = vnoise(wp * 1.7 + 2.2 * wa + u_wisp2.xy + vec2(0.0, 0.35 * sin(wp.x * 1.3 + u_wisp2.z)));
+    float ridge = 1.0 - abs(2.0 * n - 1.0);
+    ridge = ridge * ridge * ridge;
+    float n2 = vnoise(wp * 1.1 - 1.6 * wa.yx - u_wisp2.yx * 0.7 + 7.0);
+    float ridge2 = 1.0 - abs(2.0 * n2 - 1.0);
+    ridge2 *= ridge2 * ridge2 * ridge2;
+    vec3 wc = mix(vec3(0.16, 0.06, 0.30), vec3(0.03, 0.20, 0.24), smoothstep(0.3, 0.7, wa.x + 0.5));
+    float wClock = 1.0 - 0.55 * exp(-cdx * cdx * 2.0);
+    col += (wc * ridge * 0.42 + vec3(0.06, 0.08, 0.20) * ridge2 * 0.30) * wmask * wClock;
+  }
+
+  // A faint second reflection drifting across the upper part.
+  float r2a = u_rf.y * smoothstep(0.10, 0.24, p.y) * (1.0 - smoothstep(0.42, 0.62, p.y));
+  if (r2a > 0.001) {
+    float rx2 = p.x - u_rf.x + 0.45 * (p.y - 0.35) + 0.08 * sin(p.y * 6.0);
+    float rr = exp(-rx2 * rx2 / 0.0040) * 0.7 + exp(-(rx2 - 0.07) * (rx2 - 0.07) / 0.0004) * 0.5;
+    col += vec3(0.42, 0.50, 0.75) * rr * r2a * 0.10 * clockDark * clockDark;
+  }
+
+  // Tiny warm motes suspended in the glass around the ember ribbon, drifting along it.
+  float mdy = (rq.y - cy) / 0.085;
+  float mm = exp(-mdy * mdy) * exp(-ul * ul * 1.5);
+  if (mm > 0.02) {
+    vec2 mg = rq * vec2(15.0, 21.0) + u_mote.xy;
+    vec2 mc = floor(mg), mf = fract(mg);
+    vec2 mh = hash2(vec2(mod(mc.x, 64.0), mc.y));
+    vec2 mj = hash2(vec2(mod(mc.x, 64.0), mc.y) + 31.7);
+    vec2 mp = 0.25 + 0.5 * mj + 0.12 * vec2(sin(u_mote.z + 6.2831 * mh.x), cos(2.0 * u_mote.z + 6.2831 * mh.y));
+    vec2 md = mf - mp;
+    float tw = 0.5 + 0.5 * sin(u_mote.z * 3.0 + 6.2831 * mh.y);
+    float mote = exp(-dot(md, md) / 0.008) * step(0.62, mh.x) * (0.3 + 0.7 * tw);
+    col += vec3(0.95, 0.55, 0.26) * mote * mm * 0.45;
+  }
 
   // Caustics over the whole lower half: a soft low-res texture (tent-filtered here), refracted
   // with the glass, at low opacity under a slow noise mask that strengthens and fades it in places.
@@ -228,13 +286,14 @@ void main() {
   float lower = smoothstep(0.40, 0.92, p.y);
   float patch = smoothstep(0.32, 0.80, fbm(p * vec2(0.8, 1.3) + u_off.yx * 0.25 + 3.0));
   float lum = dot(fc, vec3(0.3, 0.5, 0.2));
-  col += cs * lower * (0.12 + 0.68 * patch) * (0.08 + 0.80 * lum) * (0.6 + 0.4 * smoothstep(0.3, 1.2, d)) * (fc * 1.3 + 0.14);
+  col += cs * lower * (0.22 + 0.68 * patch) * (0.08 + 0.80 * lum) * (0.6 + 0.4 * smoothstep(0.3, 1.2, d)) * (fc * 1.3 + 0.14);
 
   // Specular streaks: window reflections on the curved pane, slowly sliding, fading at path ends.
   float sm = smoothstep(0.30, 0.55, p.y) * clockDark;
   float s1 = streak(p, vec2(u_st.x, 0.56 + 1.7), 1.7, 0.75, 0.010, 0.060, 1.0);
   float s2 = streak(p, vec2(u_st.z, 0.84 + 2.4), 2.4, 0.95, 0.008, 0.045, -1.0);
-  float s = s1 * u_st.y * 0.16 + s2 * u_st.w * 0.11;
+  float g1 = (p.x - u_rf.z) / 0.16;
+  float s = s1 * u_st.y * 0.16 * (0.7 + 1.6 * exp(-g1 * g1)) + s2 * u_st.w * 0.11 * (0.7 + 0.9 * glide);
   col += vec3(0.78, 0.85, 1.0) * s * (0.55 + 0.45 * m) * sm;
 
   // Soft vignette, lighter along x so ultra-wide ends stay rich.
@@ -337,9 +396,9 @@ LivePaper.scene({
     // Blob positions: slow Lissajous drift around their base layout (aspect space, y down).
     for (let i = 0; i < BLOBS; i++) {
       const L = LAYOUT[i];
-      const ax = 0.07 * Math.max(1, aspect * 0.5);
-      blobData[i * 4] = L.x * aspect + ax * Math.sin(t * L.sx + L.p) + 0.03 * Math.sin(t * L.sx * 2.3 + L.p * 1.7);
-      blobData[i * 4 + 1] = L.y + 0.07 * Math.sin(t * L.sy + L.p * 2.1) + 0.02 * Math.cos(t * L.sy * 2.7 + L.p);
+      const ax = 0.07 * Math.max(1, aspect * 0.5), sx = L.sx * FLOW, sy = L.sy * FLOW;
+      blobData[i * 4] = L.x * aspect + ax * Math.sin(t * sx + L.p) + 0.03 * Math.sin(t * sx * 2.3 + L.p * 1.7);
+      blobData[i * 4 + 1] = L.y + 0.07 * Math.sin(t * sy + L.p * 2.1) + 0.02 * Math.cos(t * sy * 2.7 + L.p);
       blobData[i * 4 + 2] = L.r * (0.9 + 0.25 * Math.max(0, aspect - 1.6)) * (0.92 + 0.08 * Math.sin(t * 0.017 + L.p * 3.0));
       blobData[i * 4 + 3] = 0;
     }
@@ -368,11 +427,11 @@ LivePaper.scene({
     gl.uniform1f(cu.u_aspect, aspect);
     gl.uniform1f(cu.u_T, T);
     gl.uniform4f(cu.u_cw,
-      4.0 * Math.sin(t * 0.0061), 4.0 * Math.cos(t * 0.0053 + 0.7),
-      4.0 * Math.sin(t * 0.0047 + 2.2), 4.0 * Math.cos(t * 0.0069 + 1.4));
+      4.0 * Math.sin(t * 0.021), 4.0 * Math.cos(t * 0.018 + 0.7),
+      4.0 * Math.sin(t * 0.016 + 2.2), 4.0 * Math.cos(t * 0.024 + 1.4));
     gl.uniform2f(cu.u_cd,
-      6.0 * Math.sin(t * 0.0021 + 0.5),
-      5.0 * Math.sin(t * 0.0027 + 2.0) - 1.2 * Math.cos(t * 0.004));
+      9.0 * Math.sin(t * 0.0061 + 0.5) + 4.0 * Math.sin(t * 0.0043 + 2.6),
+      7.0 * Math.sin(t * 0.0057 + 2.0) - 1.2 * Math.cos(t * 0.011));
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
     // Pass 1: the scene into the small framebuffer.
@@ -384,11 +443,22 @@ LivePaper.scene({
     gl.uniform4fv(u.u_blob, blobData);
     gl.uniform3fv(u.u_col, colData);
     gl.uniform4f(u.u_off,
-      3.0 * Math.sin(t * 0.011), 3.0 * Math.cos(t * 0.009),
-      3.0 * Math.sin(t * 0.008 + 2.0), 3.0 * Math.cos(t * 0.012 + 1.0));
+      3.0 * Math.sin(t * 0.027), 3.0 * Math.cos(t * 0.023),
+      3.0 * Math.sin(t * 0.021 + 2.0), 3.0 * Math.cos(t * 0.029 + 1.0));
     gl.uniform1f(u.u_T, T);
     gl.uniform3f(u.u_ember, EMBER[0], EMBER[1], EMBER[2]);
-    gl.uniform4f(u.u_rib, rx, ry, t * 0.021 % U.TAU, t * 0.015 % U.TAU);
+    gl.uniform4f(u.u_rib, rx, ry, t * 0.060 % U.TAU, t * 0.043 % U.TAU);
+    gl.uniform4f(u.u_wisp,
+      9.0 * Math.sin(t * 0.0013 + 0.4) + 3.0 * Math.sin(t * 0.0041), 7.0 * Math.cos(t * 0.0011 + 1.2),
+      8.0 * Math.sin(t * 0.0009 + 2.5), 6.0 * Math.cos(t * 0.0017 + 0.3) + 2.0 * Math.sin(t * 0.0053));
+    gl.uniform4f(u.u_wisp2,
+      14.0 * Math.sin(t * 0.0008 + 0.9) + 5.0 * Math.sin(t * 0.0023 + 2.0),
+      4.0 * Math.sin(t * 0.0019 + 0.2), t * 0.09 % U.TAU, 0);
+    gl.uniform4f(u.u_rip, t * 0.24 % U.TAU, t * 0.19 % U.TAU, t * 0.16 % U.TAU, t * 0.32 % U.TAU);
+    gl.uniform4f(u.u_mote, -(t * 0.28 % 64), 0.5 * Math.sin(t * 0.07), t * 0.25 % U.TAU, 0);
+    const sr = (t / REFL_PERIOD + 0.15) % 1, sg = (t / GLINT_PERIOD + 0.5) % 1;
+    gl.uniform4f(u.u_rf, -0.5 + sr * (aspect + 1.0), Math.pow(Math.sin(Math.PI * sr), 2),
+      -0.4 + sg * (aspect + 0.8), 0);
     gl.uniform1f(u.u_ribLen, ribLen);
     gl.uniform4f(u.u_st, x1, a1, x2, a2);
     gl.uniform4f(u.u_wob, t * 0.029 % U.TAU, t * 0.023 % U.TAU, t * 0.017 % U.TAU, t * 0.021 % U.TAU);
