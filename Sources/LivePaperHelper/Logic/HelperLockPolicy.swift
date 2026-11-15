@@ -26,6 +26,8 @@ struct HelperLockSituation: Equatable, Sendable {
     var sessionLocked: Bool
     /// The helper already asked Launch Services to start the engine and hasn't heard back.
     var launchInFlight: Bool
+    /// "Require password after screen saver begins", read just before deciding.
+    var password: HelperPasswordPolicy.Requirement
 }
 
 enum HelperLockDecision: Equatable, Sendable {
@@ -33,6 +35,8 @@ enum HelperLockDecision: Equatable, Sendable {
     case startScreenSaver
     /// Do nothing (the reason is logged).
     case skip(String)
+    /// Starting the saver wouldn't lock the Mac: start nothing and tell the user why.
+    case refuse(LPLockRefusal)
     /// Can't lock (the reason is logged as an error).
     case fail(String)
 }
@@ -40,12 +44,44 @@ enum HelperLockDecision: Equatable, Sendable {
 enum HelperLockPolicy {
     /// LivePaper's lock is "saver first, the saver locks". Never start a saver once the session is
     /// locked: loginwindow only shows a saver that was running when the lock began (see main.swift).
+    /// And never start one as a "lock" unless the password is required immediately: otherwise the
+    /// Mac would stay unlocked behind a saver that looks locked. No private lock API is used instead.
     static func decide(_ situation: HelperLockSituation) -> HelperLockDecision {
         if situation.sessionLocked { return .skip("the session is already locked") }
         if situation.screenSaverRunning { return .skip("a screen saver is already running") }
         if situation.launchInFlight { return .skip("the screen saver is already being started") }
+        if let refusal = refusal(for: situation.password) { return .refuse(refusal) }
         if !situation.engineExists { return .fail("ScreenSaverEngine.app is missing") }
         return .startScreenSaver
+    }
+
+    /// nil when the saver locks the Mac as it starts. An unreadable setting also refuses: the lock
+    /// must fail safe (⌃⌘Q always works).
+    static func refusal(for requirement: HelperPasswordPolicy.Requirement) -> LPLockRefusal? {
+        switch requirement {
+        case .immediate: return nil
+        case .delayed: return .passwordDelayed
+        case .off: return .passwordOff
+        case .unknown: return .passwordUnknown
+        }
+    }
+}
+
+/// The helper's answer to LPNotification.lockNow (ARCHITECTURE §4.5, §7): LPNotification.lockNowAccepted,
+/// posted with deliverImmediately as soon as the request arrives, echoing the request's id. The app
+/// starts ScreenSaverEngine itself when no answer arrives within a second, so the helper answers
+/// every request it handles — also when its lock flow then decides to do nothing or to refuse.
+enum HelperLockNowReply {
+    /// The request id of a lockNow notification (nil when absent or not a string).
+    static func requestID(from userInfo: [AnyHashable: Any]?) -> String? {
+        guard let id = userInfo?[LPNotification.requestIDKey] as? String, !id.isEmpty else { return nil }
+        return id
+    }
+
+    /// userInfo of the matching lockNowAccepted. Without an id the answer carries none, which the
+    /// app treats as answering every request it is waiting for.
+    static func acceptedUserInfo(requestID: String?) -> [String: String]? {
+        requestID.map { [LPNotification.requestIDKey: $0] }
     }
 }
 
@@ -116,6 +152,28 @@ struct HelperRequestGate: Sendable {
         if let last = lastAccepted, now.timeIntervalSince(last) < minimumInterval, now >= last { return false }
         lastAccepted = now
         return true
+    }
+}
+
+// MARK: - Launch
+
+/// Whether the agent may start at all.
+enum HelperLaunchDecision: Equatable, Sendable {
+    case run
+    /// LivePaper was uninstalled (`LPPaths.uninstallMarker` exists). The agent exits 0 before it
+    /// creates anything: a login item that is still registered (a terminal uninstall can't
+    /// unregister it) must not recreate LivePaper's data folder or register the default shortcut.
+    /// launchd's KeepAlive {SuccessfulExit: false} restarts the job only after a crash, so a clean
+    /// exit keeps it stopped until the next login, where the same check stops it again.
+    case exitUninstalled
+}
+
+enum HelperLaunchPolicy {
+    /// Checked first thing in agent mode, before the single-instance file (which would create the
+    /// support folder). Reads one path; creates nothing.
+    static func decide(uninstallMarker: URL,
+                       fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }) -> HelperLaunchDecision {
+        fileExists(uninstallMarker.path) ? .exitUninstalled : .run
     }
 }
 

@@ -5,6 +5,8 @@
 // helper's LPNotification.lockNowAccepted. The helper owns the lock flow (start the saver unless
 // one is running; the saver locks — ARCHITECTURE §7). When no helper answers, AppModel falls back
 // to starting ScreenSaverEngine itself, which is allowed because the user explicitly asked to lock.
+// Neither route runs when the password isn't required immediately: AppModel.lockNow refuses first,
+// and the helper refuses too (LPNotification.lockRefused) if the app's status was stale.
 import Foundation
 import LivePaperCore
 

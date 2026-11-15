@@ -201,17 +201,156 @@ extension SelfTests {
             // WallpaperAgent's hidden prewarm instance: started, session unlocked → nothing loads.
             var gate = SaverRunGate(preview: false, sessionLocked: false)
             gate.animating = true
-            try expect(!gate.mayLoad && !gate.shouldRun, "a non-preview instance must not load before the session locks")
+            try expect(!gate.mayLoad && !gate.shouldRun, "a non-preview instance must not load before a saver is up")
             gate.apply(.screenLocked)
-            try expect(gate.mayLoad && gate.shouldRun)
+            try expect(gate.mayLoad && gate.shouldRun && gate.openedBy == "locked")
             gate.apply(.screensDidSleep)
-            try expect(gate.mayLoad && !gate.shouldRun, "loaded but paused while the displays sleep")
+            try expect(gate.active && !gate.shouldRun && !gate.mayLoad && !gate.shouldRelease,
+                       "kept but paused while the displays sleep; nothing new loads in the dark")
             gate.apply(.screensDidWake)
             try expect(gate.shouldRun)
             gate.apply(.screenUnlocked)
-            try expect(!gate.shouldRun, "pause as soon as the user is back at the desktop")
+            try expect(!gate.shouldRun && gate.shouldRelease, "pause as soon as the user is back at the desktop, then release")
             gate.apply(.lockUIShown)
             try expect(!gate.sessionLocked, "lock UI events don't change the lock state")
+        },
+        TestCase(name: "saver.gate.explicit-start-renders-while-unlocked") {
+            // A saver started while the session stays unlocked (password delay or "Never", hot
+            // corner, System Settings' full-screen preview) used to stay black until a lock.
+            try expect(SaverSystemEvent.distributedNames.contains(LPNotification.saverDidStart), "observes didstart")
+            try expect(SaverSystemEvent.distributedNames.contains(LPNotification.saverDidStop), "observes didstop")
+            var gate = SaverRunGate(preview: false, sessionLocked: false)
+            gate.animating = true
+            if let start = SaverSystemEvent(notificationName: LPNotification.saverDidStart) { gate.apply(start) }
+            try expect(gate.mayLoad && gate.shouldRun, "loginwindow's didstart opens the gate while unlocked")
+            // The password delay passes: still running, now also locked.
+            gate.apply(.screenLocked)
+            try expect(gate.shouldRun)
+            gate.apply(.screenUnlocked)
+            try expect(!gate.shouldRun && !gate.saverStarted, "an unlock ends the run")
+            // didstop and willstop end it too; a later didstart opens it again.
+            gate.apply(.saverDidStart)
+            try expect(gate.shouldRun)
+            gate.apply(.saverDidStop)
+            try expect(!gate.shouldRun)
+            gate.apply(.saverDidStart)
+            gate.apply(.willStop)
+            try expect(!gate.shouldRun)
+            // didstart may arrive before startAnimation (presented prewarm): remembered.
+            var early = SaverRunGate(preview: false, sessionLocked: false)
+            early.apply(.saverDidStart)
+            try expect(!early.shouldRun, "nothing before startAnimation")
+            early.animating = true
+            try expect(early.shouldRun && early.openedBy == "didstart")
+            // A running ScreenSaverEngine (LivePaper's lock) opens it as well.
+            var engine = SaverRunGate(preview: false, sessionLocked: false)
+            engine.animating = true
+            engine.apply(.engineLaunched)
+            try expect(engine.shouldRun && engine.openedBy == "engine")
+            engine.apply(.engineTerminated)
+            try expect(!engine.shouldRun)
+            // Names the relay forwards for NSWorkspace's app notifications.
+            try expectEqual(SaverSystemEvent(notificationName: SaverSystemEvent.engineLaunchedName), .engineLaunched)
+            try expectEqual(SaverSystemEvent(notificationName: SaverSystemEvent.previewHostDeactivatedName), .previewHostDeactivated)
+            try expectEqual(SaverSystemEvent(notificationName: SaverSystemEvent.windowChangedName), .windowChanged)
+        },
+        TestCase(name: "saver.gate.no-load-while-displays-asleep") {
+            // Lid-close and display-sleep locks happen with the displays off: a prewarmed instance
+            // must not load its scene in the dark (it waits for wake).
+            var gate = SaverRunGate(preview: false, sessionLocked: false)
+            gate.animating = true
+            gate.apply(.screensDidSleep)
+            gate.apply(.screenLocked)
+            try expect(!gate.mayLoad && !gate.shouldRun, "nothing loads while the displays sleep")
+            gate.apply(.screensDidWake)
+            try expect(gate.mayLoad && gate.shouldRun)
+        },
+        TestCase(name: "saver.gate.release") {
+            var gate = SaverRunGate(preview: false, sessionLocked: true)
+            try expect(gate.shouldRelease, "not started: nothing may stay loaded")
+            gate.animating = true
+            try expect(!gate.shouldRelease)
+            gate.animating = false
+            try expect(gate.shouldRelease, "stopAnimation releases")
+            gate.animating = true
+            gate.exiting = true
+            try expect(!gate.shouldRelease, "about to exit: keep the last frame for the fade-out")
+            var preview = SaverRunGate(preview: true, sessionLocked: true)
+            try expect(!preview.shouldRelease, "previews only pause")
+            preview.animating = true
+            try expect(!preview.shouldRelease)
+        },
+        TestCase(name: "saver.gate.policy") {
+            // sessionLockOpens off: a direct lock (no saver started) keeps the prewarm dark.
+            var strict = SaverRunGate(preview: false, sessionLocked: false, policy: SaverGatePolicy(sessionLockOpens: false))
+            strict.animating = true
+            strict.apply(.screenLocked)
+            try expect(!strict.shouldRun && strict.waitingFor?.contains("didstart") == true, strict.summary)
+            strict.apply(.saverDidStart)
+            try expect(strict.shouldRun)
+            var noDidStart = SaverRunGate(preview: false, sessionLocked: false, policy: SaverGatePolicy(didStartOpens: false))
+            noDidStart.animating = true
+            noDidStart.apply(.saverDidStart)
+            try expect(!noDidStart.shouldRun)
+            var noEngine = SaverRunGate(preview: false, sessionLocked: false, policy: SaverGatePolicy(engineOpens: false))
+            noEngine.animating = true
+            noEngine.apply(.engineLaunched)
+            try expect(!noEngine.shouldRun)
+            // The shipped policy: any of the three opens the gate.
+            try expectEqual(SaverGatePolicy.standard, SaverGatePolicy(sessionLockOpens: true, didStartOpens: true, engineOpens: true, previewFPS: 15))
+            try expect(SaverRunGate(preview: false, sessionLocked: false).summary.contains("wait for"))
+        },
+        TestCase(name: "saver.gate.start-latch") {
+            // A view created after didstart in the same host process still knows a run is on.
+            var latch = SaverStartLatch()
+            latch.apply(.saverDidStart)
+            try expect(latch.started)
+            latch.apply(.screenLocked)
+            try expect(latch.started)
+            for end in [SaverSystemEvent.saverDidStop, .willStop, .screenUnlocked] {
+                latch.apply(.saverDidStart)
+                latch.apply(end)
+                try expect(!latch.started, end.rawValue)
+            }
+        },
+        TestCase(name: "saver.gate.previews-pause") {
+            // System Settings previews: render at once, but not while locked, asleep, hidden or
+            // while System Settings isn't in front.
+            var preview = SaverRunGate(preview: true, sessionLocked: false)
+            preview.animating = true
+            try expect(preview.shouldRun)
+            preview.apply(.screenLocked)
+            try expect(!preview.shouldRun, "a preview pauses while the Mac is locked")
+            preview.apply(.screenUnlocked)
+            try expect(preview.shouldRun)
+            preview.apply(.screensDidSleep)
+            try expect(!preview.shouldRun)
+            preview.apply(.screensDidWake)
+            preview.apply(.previewHostDeactivated)
+            try expect(!preview.shouldRun && preview.waitingFor?.contains("System Settings") == true, preview.summary)
+            preview.apply(.previewHostActivated)
+            try expect(preview.shouldRun)
+            preview.windowVisible = false
+            try expect(!preview.shouldRun)
+            preview.windowVisible = true
+            // didstart / willstop / the engine don't concern previews.
+            preview.apply(.saverDidStart)
+            preview.apply(.willStop)
+            try expect(preview.shouldRun)
+            // Which app counts as the preview host.
+            try expect(SaverPreviewHost.isActive(frontmostBundleIdentifier: "com.apple.systempreferences"))
+            try expect(!SaverPreviewHost.isActive(frontmostBundleIdentifier: "com.apple.Terminal"))
+            try expect(SaverPreviewHost.isActive(frontmostBundleIdentifier: nil), "unknown: don't pause on a guess")
+        },
+        TestCase(name: "saver.gate.window-visibility") {
+            var v = SaverWindowVisibility()
+            // A host that always reports "occluded" (macOS 26's saver host) or "not ordered in".
+            try expect(v.isVisible(orderedIn: false, miniaturized: false, occlusionVisible: false), "never trusted, never paused")
+            try expect(!v.isVisible(orderedIn: true, miniaturized: true, occlusionVisible: false), "miniaturised")
+            try expect(v.isVisible(orderedIn: true, miniaturized: false, occlusionVisible: false))
+            try expect(!v.isVisible(orderedIn: false, miniaturized: false, occlusionVisible: false), "ordered out after being in")
+            try expect(v.isVisible(orderedIn: true, miniaturized: false, occlusionVisible: true))
+            try expect(!v.isVisible(orderedIn: true, miniaturized: false, occlusionVisible: false), "occluded after being visible")
         },
         TestCase(name: "saver.gate.preview-and-stop") {
             var preview = SaverRunGate(preview: true, sessionLocked: false)
@@ -288,7 +427,8 @@ extension SelfTests {
             try expectEqual(SaverPerformance.resolve(.automatic, power: ac, preview: false), .init(fps: 60, scale: 1))
             try expectEqual(SaverPerformance.resolve(.automatic, power: SaverPowerState(onBattery: false, lowPowerMode: true), preview: false),
                             .init(fps: 30, scale: 0.75))
-            try expectEqual(SaverPerformance.resolve(.best, power: battery, preview: true), .init(fps: 30, scale: 1))
+            try expectEqual(SaverPerformance.resolve(.best, power: battery, preview: true), .init(fps: 15, scale: 1))
+            try expectEqual(SaverPerformance.resolve(.automatic, power: ac, preview: true), .init(fps: 15, scale: 1))
         },
 
         // MARK: options sheet

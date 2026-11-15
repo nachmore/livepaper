@@ -301,8 +301,17 @@ extension SelfTests {
             st.install.saverSelected = true
             try expectEqual(SetupChecklist.firstIncompleteStep(state: st), .lock)
             try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.id), [.lockKeys, .password, .helper])
+            // A profile that manages only other screen-saver keys (idle time …) leaves the password
+            // delay to the user: still "needed", with the fix, never "managed".
             st.install.helperRunning = true; st.install.managedByMDM = true
+            try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.state), [.needed, .needed, .done])
+            let fixable = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .password })
+            try expect(fixable.detail.contains("Immediately") && !fixable.detail.contains("organisation"), fixable.detail)
+            // Only a profile that forces the password off or a delay makes it "managed".
+            st.install.passwordManagedByMDM = true
             try expectEqual(SetupChecklist.checks(for: .lock, state: st).map(\.state), [.needed, .managed, .done])
+            let managed = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .password })
+            try expect(managed.detail.contains("organisation") && !managed.detail.contains("Locking still works"), managed.detail)
             try expect(!SetupChecklist.isComplete(.lock, state: st), "lock keys still off")
             st.install.lockKeysShowScene = true
             try expect(SetupChecklist.isComplete(.lock, state: st), "managed never blocks")
@@ -649,6 +658,44 @@ extension SelfTests {
                 try awaitMain { route = await failing.lockNow() }
                 try expectEqual(route, .failed)
                 try expect(failing.banners.banners.contains { $0.style == .error })
+            }
+        },
+        TestCase(name: "app.model.lock-now-refuses-without-immediate-password") {
+            // Starting the saver only locks with "Require password … Immediately". Without it, Lock
+            // Now must not start anything that looks like a lock — neither through the helper nor
+            // the fallback — and must say why.
+            try withModel("lock-now-refused") { _, fx in
+                let install = try unwrap(fx.services.install as? MockInstallService)
+                try install.registerHelper()
+                install.simulatePasswordDelay()
+                let answering = FixedHelperLockChannel(answers: true)
+                var started = 0, openedSettings = 0
+                var env = testEnvironment(root: fx.root, saved: SavedStates(), mock: false, helperLock: answering,
+                                          startScreenSaver: { started += 1 })
+                env.openLockScreenSettings = { openedSettings += 1 }
+                let live = AppModel(services: fx.services, environment: env)
+                try expect(live.lockRefusal == nil, "nothing is known before the first status read")
+                var route: AppModel.LockRoute?
+                try awaitMain { route = await live.lockNow() }
+                try expectEqual(route, .refused)
+                try expect(answering.requests == 0 && started == 0, "no lock request, no screen saver")
+                let banner = try unwrap(live.banners.banners.first { $0.title == LPLockRefusal.passwordNotImmediate.title })
+                try expectEqual(banner.style, .warning)
+                try expect(banner.message?.contains("Immediately") == true)
+                try expectEqual(banner.actions.map(\.title), ["Open Lock Screen Settings"])
+                banner.actions.first?.perform()
+                try expectEqual(openedSettings, 1)
+                // The menu disables Lock Now and explains, from the status read.
+                try expectEqual(live.lockRefusal, .passwordNotImmediate)
+                // Fixed in System Settings: Lock Now reads the status again and locks.
+                try install.registerHelper()
+                try awaitMain { route = await live.lockNow() }
+                try expectEqual(route, .helper)
+                try expect(live.lockRefusal == nil && answering.requests == 1)
+                // The helper's refusal (hotkey path) is shown the same way.
+                let other = AppModel(services: fx.services, environment: env)
+                other.showLockRefusal(.passwordOff)
+                try expect(other.banners.banners.contains { $0.message == LPLockRefusal.passwordOff.message })
             }
         },
         TestCase(name: "app.model.run-check") {

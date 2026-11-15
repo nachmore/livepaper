@@ -118,7 +118,8 @@ enum InstallCommands {
             add(lock, "password", .ok, "required immediately when the screen saver starts")
         } else {
             add(lock, "password", .problem, "\u{201C}Require password after screen saver begins\u{201D} isn't Immediately, so starting the " +
-                "screen saver doesn't lock the Mac. Set it in System Settings › Lock Screen.")
+                "screen saver doesn't lock the Mac and LivePaper's lock shortcut and Lock Now refuse to run. " +
+                (status.passwordManagedByMDM ? "A configuration profile enforces it." : "Set it in System Settings › Lock Screen."))
         }
         let lockKeys = (CLIServices.preferences.value(domain: InstallService.lockTakeoverDomain, key: InstallService.lockTakeoverKey,
                                                       currentHost: false) as? NSNumber)?.boolValue == true

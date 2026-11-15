@@ -317,6 +317,8 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     func registerHelper() throws { mutate { $0.helperRunning = true; $0.helperLoginItem = .enabled; $0.passwordImmediately = true } }
     func unregisterHelper() throws { mutate { $0.helperRunning = false; $0.helperLoginItem = .notRegistered } }
     func openScreenSaverSettings() { mutate { $0.saverSelected = $0.saverInstalled } }
+    /// Test hook: "Require password after screen saver begins" isn't Immediately.
+    func simulatePasswordDelay() { mutate { $0.passwordImmediately = false } }
     /// Snapshot/test hook: the helper is registered but macOS waits for approval in Login Items.
     func simulateHelperApprovalPending() { mutate { $0.helperRunning = false; $0.helperLoginItem = .requiresApproval } }
 

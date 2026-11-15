@@ -70,7 +70,8 @@ enum ServiceFactory {
         let startScreenSaver: @MainActor () async throws -> Void = mock ? {} : { try await SystemActions.startScreenSaverEngine() }
         return AppEnvironment(isMock: mock, defaults: defaults, stateURL: stateURL, saveState: { try $0.save(to: stateURL) },
                               helperLock: helperLock, startScreenSaver: startScreenSaver, previewCacheDirectory: cache,
-                              appVersion: version, appBundlePath: appPath)
+                              appVersion: version, appBundlePath: appPath,
+                              openLockScreenSettings: mock ? {} : { SystemActions.openLockScreenSettings() })
     }
 }
 

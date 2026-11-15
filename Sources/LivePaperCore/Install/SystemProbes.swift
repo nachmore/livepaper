@@ -28,6 +28,32 @@ enum SystemProbes {
         settings.keys.contains(where: managedKeys.contains)
     }
 
+    static let screenSaverDomain = "com.apple.screensaver"
+    /// The keys behind "Require password after screen saver begins".
+    static let passwordKeys = ["askForPassword", "askForPasswordDelay"]
+
+    /// What a configuration profile forces for the password keys: the profile plists, overridden by
+    /// what CFPreferences reports as forced (`CFPreferencesAppValueIsForced`, the authority; the
+    /// plists are what tests can set up). Other managed keys (idleTime, moduleDict, …) say nothing
+    /// about the password and are left out.
+    static func enforcedPasswordSettings(managed: [String: Any], forcedValue: (String) -> Any?) -> [String: Any] {
+        var enforced = managed.filter { passwordKeys.contains($0.key) }
+        for key in passwordKeys { if let value = forcedValue(key) { enforced[key] = value } }
+        return enforced
+    }
+
+    /// The profile itself keeps the password from being required immediately: it forces
+    /// `askForPassword = false` or a non-zero `askForPasswordDelay`. Only then can't the user fix it
+    /// in System Settings; a profile forcing only idle time, the module or `askForPassword = true`
+    /// leaves the delay to the user.
+    static func passwordEnforcedNotImmediately(_ enforced: [String: Any]) -> Bool {
+        if let ask = enforced["askForPassword"] as? NSNumber, !ask.boolValue { return true }
+        if let delay = enforced["askForPasswordDelay"] as? NSNumber, CFGetTypeID(delay) != CFBooleanGetTypeID() {
+            return delay.doubleValue > 0
+        }
+        return false
+    }
+
     /// Parses `sysadminctl -screenLock status` (it logs to stderr), e.g.
     /// "2026-11-14 18:32:04.037 sysadminctl[8213:4276522] screenLock delay is immediate".
     /// nil when the output isn't recognised.

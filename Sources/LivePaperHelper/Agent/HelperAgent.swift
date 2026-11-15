@@ -134,7 +134,19 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
     }
 
     @objc nonisolated private func lockNowNotification(_ note: Notification) {
-        onMain { $0.lock(.lockNowNotification) }
+        let requestID = HelperLockNowReply.requestID(from: note.userInfo)
+        onMain { agent in
+            // Answer first, so the app never starts a second screen saver after its 1 s timeout.
+            agent.acceptLockNow(requestID: requestID)
+            agent.lock(.lockNowNotification)
+        }
+    }
+
+    private func acceptLockNow(requestID: String?) {
+        DistributedNotificationCenter.default().postNotificationName(
+            .init(LPNotification.lockNowAccepted), object: nil,
+            userInfo: HelperLockNowReply.acceptedUserInfo(requestID: requestID), deliverImmediately: true)
+        log.info("lockNow \(requestID ?? "(no id)", privacy: .public) accepted")
     }
 
     @objc nonisolated private func openAppNotification(_ note: Notification) {
@@ -233,18 +245,34 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
 
     // MARK: - Lock flow
 
+    /// Reads the password policy (sysadminctl, ~20 ms, off the main thread) right before every lock —
+    /// the user may have changed it a moment ago — then decides on the main thread.
     private func lock(_ trigger: HelperLockTrigger) {
+        probes.async {
+            let policy = HelperSystem.passwordPolicy()
+            self.onMain { $0.lock(trigger, password: policy) }
+        }
+    }
+
+    private func lock(_ trigger: HelperLockTrigger, password: HelperPasswordPolicy) {
         let now = Date()
         let situation = HelperLockSituation(
             engineExists: FileManager.default.fileExists(atPath: HelperProcesses.screenSaverEngineApp.path),
             screenSaverRunning: HelperProcesses.isScreenSaverEngineRunning,
             sessionLocked: Self.sessionLocked,
-            launchInFlight: launchStartedAt.map { now.timeIntervalSince($0) < Self.launchTimeout } ?? false)
+            launchInFlight: launchStartedAt.map { now.timeIntervalSince($0) < Self.launchTimeout } ?? false,
+            password: password.requirement)
         switch HelperLockPolicy.decide(situation) {
         case .skip(let why):
             log.info("lock (\(trigger.rawValue, privacy: .public)): \(why, privacy: .public); nothing to do")
         case .fail(let why):
             log.error("lock (\(trigger.rawValue, privacy: .public)) failed: \(why, privacy: .public)")
+        case .refuse(let refusal):
+            log.warning("""
+                lock (\(trigger.rawValue, privacy: .public)) refused: \(refusal.rawValue, privacy: .public) \
+                [\(password.source.rawValue, privacy: .public)]; starting the screen saver wouldn't lock the Mac
+                """)
+            reportRefusal(refusal)
         case .startScreenSaver:
             log.notice("lock (\(trigger.rawValue, privacy: .public)): starting the screen saver")
             launchStartedAt = now
@@ -258,8 +286,17 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
                     if let failure { agent.log.error("couldn't start ScreenSaverEngine: \(failure, privacy: .public)") }
                 }
             }
-            // Only the saver locks the Mac, and only with "require password immediately".
-            checkPasswordPolicy(context: "lock")
+        }
+    }
+
+    /// Makes the refusal visible: the app shows LPNotification.lockRefused; when the app isn't
+    /// running, the helper opens it with the reason (an explicit lock request, so bringing LivePaper
+    /// forward is the expected response — the user must not walk away from an unlocked Mac).
+    private func reportRefusal(_ refusal: LPLockRefusal) {
+        DistributedNotificationCenter.default().postNotificationName(
+            .init(LPNotification.lockRefused), object: nil, userInfo: refusal.userInfo, deliverImmediately: true)
+        if NSRunningApplication.runningApplications(withBundleIdentifier: LPPaths.bundleID).isEmpty {
+            openApp(arguments: refusal.launchArguments)
         }
     }
 
@@ -269,7 +306,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
     }
 
-    /// Logs a warning when the LivePaper lock wouldn't lock (password not required immediately).
+    /// Logs a warning at launch when the LivePaper lock would refuse (password not required immediately).
     private func checkPasswordPolicy(context: String) {
         probes.async {
             let policy = HelperSystem.passwordPolicy()
@@ -284,7 +321,8 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
 
     // MARK: - Open the app
 
-    private func openApp() {
+    /// - Parameter arguments: passed to a newly launched app (ignored by one that is already running).
+    private func openApp(arguments: [String] = []) {
         guard openAppGate.accept(at: Date()) else {
             log.info("openApp repeated within a second; ignored")
             return
@@ -299,6 +337,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         // Already running: Launch Services sends a reopen event and the app shows its main window.
         configuration.activates = true
         configuration.addsToRecentItems = false
+        configuration.arguments = arguments
         NSWorkspace.shared.openApplication(at: url, configuration: configuration) { _, error in
             guard let failure = error?.localizedDescription else { return }
             HelperLog.main.error("couldn't open LivePaper: \(failure, privacy: .public)")

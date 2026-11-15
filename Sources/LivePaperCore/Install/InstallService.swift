@@ -121,6 +121,14 @@ public protocol PreferencesAccessing: Sendable {
     func value(domain: String, key: String, currentHost: Bool) -> Any?
     /// nil removes the key. Returns false if the value couldn't be stored.
     func set(_ value: Any?, domain: String, key: String, currentHost: Bool) -> Bool
+    /// The value a configuration profile forces for `key` (`CFPreferencesAppValueIsForced`), or nil
+    /// when the user may change it. Read-only.
+    func forcedValue(domain: String, key: String) -> Any?
+}
+
+extension PreferencesAccessing {
+    /// Stand-ins know of no configuration profile unless they say so.
+    public func forcedValue(domain: String, key: String) -> Any? { nil }
 }
 
 /// CFPreferences for the current user; goes through cfprefsd, like `defaults`.
@@ -132,6 +140,11 @@ public struct SystemPreferences: PreferencesAccessing {
     public func set(_ value: Any?, domain: String, key: String, currentHost: Bool) -> Bool {
         CFPreferencesSetValue(key as CFString, value as CFPropertyList?, domain as CFString, kCFPreferencesCurrentUser, Self.host(currentHost))
         return CFPreferencesSynchronize(domain as CFString, kCFPreferencesCurrentUser, Self.host(currentHost))
+    }
+    public func forcedValue(domain: String, key: String) -> Any? {
+        guard CFPreferencesAppValueIsForced(key as CFString, domain as CFString) else { return nil }
+        // Forced values win over the user's, so the app-level lookup returns the profile's value.
+        return CFPreferencesCopyAppValue(key as CFString, domain as CFString)
     }
     private static func host(_ current: Bool) -> CFString { current ? kCFPreferencesCurrentHost : kCFPreferencesAnyHost }
 }
@@ -199,6 +212,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         let helperRunning = [helperService, fallbackService].contains { service in
             (try? runner.run("/bin/launchctl", ["print", service], timeout: 10)).map(SystemProbes.helperRunning) ?? false
         }
+        let immediate = SystemProbes.passwordImmediately(sysadminctlOutput: sysadminctl?.combinedOutput, managed: managed)
         return InstallStatus(
             saverInstalled: installed,
             // Without a template (development builds) there is nothing newer to install.
@@ -206,8 +220,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             saverSelected: store.isSelected(),
             helperRunning: helperRunning,
             helperLoginItem: loginItem.status,
-            passwordImmediately: SystemProbes.passwordImmediately(sysadminctlOutput: sysadminctl?.combinedOutput, managed: managed),
+            passwordImmediately: immediate,
             managedByMDM: SystemProbes.isManaged(managed),
+            passwordManagedByMDM: !immediate && SystemProbes.passwordEnforcedNotImmediately(
+                SystemProbes.enforcedPasswordSettings(managed: managed) {
+                    preferences.forcedValue(domain: SystemProbes.screenSaverDomain, key: $0)
+                }),
             lockKeysShowScene: lockKeysShowScene,
             lockKeysChangedByLivePaper: loadDefaultsChanges().contains(where: Self.isLockKeysChange))
     }

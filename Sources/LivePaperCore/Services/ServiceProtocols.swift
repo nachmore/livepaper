@@ -276,8 +276,11 @@ public struct InstallStatus: Sendable, Equatable {
     public var helperLoginItem: LoginItemStatus
     /// "Require password after screen saver begins" is Immediately.
     public var passwordImmediately: Bool
-    /// True when idle time / password settings are enforced by a configuration profile.
+    /// True when a configuration profile manages any screen-saver setting (idle time, password, module).
     public var managedByMDM: Bool
+    /// The password isn't required immediately *because* a configuration profile forces it off or
+    /// forces a delay, so the user can't fix it in System Settings. False whenever the user can.
+    public var passwordManagedByMDM: Bool
     /// `com.apple.loginwindow immediateLockLaunchesScreenSaver` is on: ⌃⌘Q, Apple menu › Lock
     /// Screen and the Touch ID / lock key start the screen saver (the scene) before locking.
     public var lockKeysShowScene: Bool
@@ -286,10 +289,10 @@ public struct InstallStatus: Sendable, Equatable {
 
     public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverSelected: Bool = false, helperRunning: Bool = false,
                 helperLoginItem: LoginItemStatus = .notRegistered, passwordImmediately: Bool = false, managedByMDM: Bool = false,
-                lockKeysShowScene: Bool = false, lockKeysChangedByLivePaper: Bool = false) {
+                passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false, lockKeysChangedByLivePaper: Bool = false) {
         self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverSelected = saverSelected
         self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.passwordImmediately = passwordImmediately
-        self.managedByMDM = managedByMDM; self.lockKeysShowScene = lockKeysShowScene
+        self.managedByMDM = managedByMDM; self.passwordManagedByMDM = passwordManagedByMDM; self.lockKeysShowScene = lockKeysShowScene
         self.lockKeysChangedByLivePaper = lockKeysChangedByLivePaper
     }
 }

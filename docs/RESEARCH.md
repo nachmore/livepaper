@@ -64,10 +64,23 @@ something, and falls back to a guided manual step.
   is never shown, ready for the next lock. It does this only for the screen saver that is
   actually selected.
 * With WebKit's occlusion detection turned off (see §4), such an instance would animate forever
-  at roughly half a CPU core. So LivePaper's saver renders nothing until the session is locked:
-  * It waits until `CGSSessionScreenIsLocked` appears in `CGSessionCopyCurrentDictionary()`, or the
-    `com.apple.screenIsLocked` notification arrives.
-  * It pauses again on `com.apple.screenIsUnlocked`.
+  at roughly half a CPU core. So LivePaper's saver renders nothing until a saver is actually up:
+  * the session is locked (`CGSSessionScreenIsLocked` in `CGSessionCopyCurrentDictionary()`, or the
+    `com.apple.screenIsLocked` notification), or
+  * loginwindow posted `com.apple.screensaver.didstart`, or ScreenSaverEngine is running;
+  * it pauses again on `com.apple.screenIsUnlocked`, `didstop` and display sleep, and frees its
+    scene a few seconds after the unlock.
+* **Verified** in disassembly: `-[ScreenSaverDaemon _screenSaverStart:]` in loginwindow posts
+  `com.apple.screensaver.didlaunch` (object = a UUID, options 3) and then
+  `com.apple.screensaver.didstart` (object `"runFromPref"` or `""`, userInfo `{runFromPref: Bool}`,
+  options 1 = deliver immediately) on the distributed notification center, for every saver start.
+  `_screenSaverStop` posts `willstop` / `didstop`. ScreenSaverEngine quits on `didstop`.
+* **Inferred:** WallpaperAgent calls `startAnimation` on the hidden instance (from the prototype's
+  CPU use; never logged), and a presented run adds a second view to the prewarmed process (two
+  ViewBridge "did terminate" lines per exit).
+* **Unknown:** whether `didstart` (which carries a userInfo) reaches the sandboxed host, and when
+  relative to `startAnimation` and `screenIsLocked`. The saver logs its whole lifecycle (category
+  `lifecycle`) so real lock cycles can settle this; see Saver/README.md, "The run gate".
 * Replacing the `.saver` bundle on disk ends the prewarmed host. WallpaperAgent then builds a new
   one (Verified).
 

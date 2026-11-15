@@ -10,7 +10,12 @@ struct MenuBarContent: View {
 
     var body: some View {
         Button(lockTitle) { Task { await model.lockNow() } }
-            .disabled(model.isLocking)
+            .disabled(model.isLocking || model.lockRefusal != nil)
+        // Starting the saver wouldn't lock the Mac: say so instead of offering a lock that isn't one.
+        if let refusal = model.lockRefusal {
+            Text(refusal.menuNote)
+            Button("Open Lock Screen Settings\u{2026}") { SystemActions.openLockScreenSettings() }
+        }
         Divider()
         Text("Screen saver: \(model.playlistSummary)")
         Button("Next Scene") { Task { await model.advanceScene() } }

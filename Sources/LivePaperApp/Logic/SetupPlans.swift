@@ -84,12 +84,14 @@ enum SetupChecklist {
                            state: s.saverSelected ? .done : .needed),
             ]
         case .lock:
-            let passwordState: SetupCheck.State = s.passwordImmediately ? .done : (s.managedByMDM ? .managed : .needed)
+            // "Managed" only when the profile itself forces the password off or a delay; a profile
+            // that manages other screen-saver keys (idle time …) leaves this to the user.
+            let passwordState: SetupCheck.State = s.passwordImmediately ? .done : (s.passwordManagedByMDM ? .managed : .needed)
             let passwordDetail: String
             switch passwordState {
             case .done: passwordDetail = "Your Mac locks as soon as the screen saver starts."
-            case .managed: passwordDetail = "Your organisation manages this setting, so LivePaper can't change it. Locking still works, but the scene may start before the password is required."
-            default: passwordDetail = "In System Settings \u{203A} Lock Screen, set \u{201C}Require password after screen saver begins\u{201D} to Immediately."
+            case .managed: passwordDetail = "Your organisation sets this, so LivePaper can't change it. Starting the screen saver doesn't lock your Mac, so LivePaper's Lock Now and shortcut are turned off; \u{2303}\u{2318}Q still locks."
+            default: passwordDetail = "In System Settings \u{203A} Lock Screen, set \u{201C}Require password after screen saver begins\u{201D} to Immediately. Until then LivePaper's Lock Now and shortcut won't lock your Mac."
             }
             return [
                 SetupCheck(id: .lockKeys, title: "Your lock keys show the scene",
