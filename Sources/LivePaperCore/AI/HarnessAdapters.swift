@@ -46,11 +46,12 @@ public enum HarnessAdapters {
     public static let bootstrapInstruction = "Read TASK.md in the current directory and carry out the task it describes, following AGENTS.md."
 
     /// - Parameter kiroStreamJSON: whether this kiro-cli supports `--output-format stream-json`.
-    public static func adapter(for harness: AIHarness, kiroStreamJSON: Bool = true) -> HarnessAdapter {
+    /// - Parameter kiroTrustWorkspace: whether it has `--trust-workspace` (V3 engine).
+    public static func adapter(for harness: AIHarness, kiroStreamJSON: Bool = true, kiroTrustWorkspace: Bool = false) -> HarnessAdapter {
         switch harness.kind {
         case .claude: return ClaudeAdapter()
         case .codex: return CodexAdapter()
-        case .kiro: return KiroAdapter(streamJSON: kiroStreamJSON)
+        case .kiro: return KiroAdapter(streamJSON: kiroStreamJSON, trustWorkspace: kiroTrustWorkspace)
         case .custom: return CustomAdapter()
         }
     }
@@ -104,15 +105,21 @@ public struct CodexAdapter: HarnessAdapter {
     public func makeParser(workspaceRoot: URL) -> HarnessStreamParser { CodexStreamParser(workspaceRoot: workspaceRoot) }
 }
 
-/// Kiro CLI: `kiro-cli chat --no-interactive` takes the first message as an argument.
+/// Kiro CLI: `kiro-cli chat --no-interactive` takes the first message as an argument. The session
+/// runs as the workspace's own agent (KiroAgentConfig: writes only in ./scene, the shell only for
+/// the livepaper scene commands) and trusts nothing on the command line.
 public struct KiroAdapter: HarnessAdapter {
-    public static let trustedTools = "fs_read,fs_write,execute_bash"
     /// `--output-format stream-json` (kiro-cli 3.x); older versions only print text.
     public let streamJSON: Bool
-    public init(streamJSON: Bool) { self.streamJSON = streamJSON }
+    /// `--trust-workspace` (V3 engine): load the workspace's agent without the "Trust this
+    /// workspace?" prompt a non-interactive run can't answer. Only LivePaper writes the workspace's
+    /// .kiro/ (the agent itself may write only in ./scene).
+    public let trustWorkspace: Bool
+    public init(streamJSON: Bool, trustWorkspace: Bool = false) { self.streamJSON = streamJSON; self.trustWorkspace = trustWorkspace }
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
-        var args = ["chat", "--no-interactive", "--trust-tools=\(Self.trustedTools)"]
+        var args = ["chat", "--no-interactive", "--agent", KiroAgentConfig.name]
+        if trustWorkspace { args.append("--trust-workspace") }
         // Text mode would otherwise wrap long lines at an assumed terminal width.
         args += streamJSON ? ["--output-format", "stream-json"] : ["--wrap", "never"]
         if let model = context.model { args += ["--model", model] }
@@ -129,6 +136,11 @@ public struct KiroAdapter: HarnessAdapter {
     /// Whether `kiro-cli chat --help` advertises stream-json output.
     public static func supportsStreamJSON(helpOutput: String) -> Bool {
         helpOutput.contains("--output-format") && helpOutput.contains("stream-json")
+    }
+
+    /// Whether `kiro-cli chat --help` offers `--trust-workspace`.
+    public static func supportsTrustWorkspace(helpOutput: String) -> Bool {
+        helpOutput.contains("--trust-workspace")
     }
 }
 

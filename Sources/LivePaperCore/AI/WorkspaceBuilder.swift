@@ -107,6 +107,8 @@ public final class WorkspaceBuilder: @unchecked Sendable {
             try buildSDK(in: ws.sdk, excluding: modified?.id)
             // bin/livepaper
             try writeShim(for: ws, sessionID: sessionID)
+            // .kiro/agents/: the restricted agent Kiro sessions run as (harmless for other harnesses).
+            try KiroAgentConfig.write(in: ws)
             // AGENTS.md == CLAUDE.md, TASK.md
             let instructions = guideText.trimmingCharacters(in: .whitespacesAndNewlines) + "\n\n" + Self.taskSection(for: request, scene: modified)
             for name in ["AGENTS.md", "CLAUDE.md"] {

@@ -597,6 +597,7 @@ extension SelfTests {
                 try expect(read(ws.taskFile).contains("'quotes' and $(dollars) stay text."), "prompt verbatim in TASK.md")
                 try expectEqual(read(ws.scene.appendingPathComponent("scene.js")), CoreSandbox.templateJS)
                 try expectEqual(children(ws.sdk), ["SCENE_API.md", "examples", "livepaper.d.ts", "templates"])
+                try expectKiroAgent(ws)
                 try expectEqual(children(ws.sdk.appendingPathComponent("examples")), ["aurora", "orbit", "waves"])   // web only, first 3
                 try expect(exists(ws.sdk.appendingPathComponent("templates/web/scene.js")))
 
@@ -713,16 +714,22 @@ extension SelfTests {
             let codexModel = try CodexAdapter().invocation(for: AIHarness(kind: .codex, name: "Codex", executable: "/bin/codex"), context: ctx)
             try expectEqual(Array(codexModel.arguments.suffix(5)), ["-m", "haiku", "--x", "1", "-"])
 
+            // Kiro runs as the workspace's own restricted agent (.kiro/agents, written by WorkspaceBuilder)
+            // and trusts nothing beyond what that agent allows: no --trust-tools, which would trust
+            // a tool "on any path, outside the workspace too".
             let kiroHarness = AIHarness(kind: .kiro, name: "Kiro CLI", executable: "/bin/kiro-cli")
-            let kiro = try KiroAdapter(streamJSON: true).invocation(for: kiroHarness, context: ctx)
-            try expectEqual(kiro.arguments, ["chat", "--no-interactive", "--trust-tools=fs_read,fs_write,execute_bash", "--output-format", "stream-json",
-                                             "--model", "haiku", "--x", "1", HarnessAdapters.bootstrapInstruction])
+            let kiro = try KiroAdapter(streamJSON: true, trustWorkspace: true).invocation(for: kiroHarness, context: ctx)
+            try expectEqual(kiro.arguments, ["chat", "--no-interactive", "--agent", KiroAgentConfig.name, "--trust-workspace",
+                                             "--output-format", "stream-json", "--model", "haiku", "--x", "1", HarnessAdapters.bootstrapInstruction])
             try expectEqual(kiro.stdinFile, nil)
-            let kiroText = try KiroAdapter(streamJSON: false).invocation(for: kiroHarness, context: HarnessContext(workspace: ws, model: nil, searchPath: []))
-            try expectEqual(kiroText.arguments, ["chat", "--no-interactive", "--trust-tools=fs_read,fs_write,execute_bash", "--wrap", "never",
+            let kiroText = try KiroAdapter(streamJSON: false, trustWorkspace: false).invocation(for: kiroHarness, context: HarnessContext(workspace: ws, model: nil, searchPath: []))
+            try expectEqual(kiroText.arguments, ["chat", "--no-interactive", "--agent", KiroAgentConfig.name, "--wrap", "never",
                                                  HarnessAdapters.bootstrapInstruction])
+            try expect(!(kiro.arguments + kiroText.arguments).contains { $0.hasPrefix("--trust-tools") || $0 == "--trust-all-tools" || $0 == "-a" })
             try expect(KiroAdapter.supportsStreamJSON(helpOutput: "      --output-format <OUTPUT_FORMAT>\n          - stream-json: The run's ACP events"))
             try expect(!KiroAdapter.supportsStreamJSON(helpOutput: "  -v, --verbose"))
+            try expect(KiroAdapter.supportsTrustWorkspace(helpOutput: "      --trust-workspace\n          Skip the \"Trust this workspace?\" prompt"))
+            try expect(!KiroAdapter.supportsTrustWorkspace(helpOutput: "      --trust-tools <TOOL_NAMES>"))
             try expect(HarnessAdapters.adapter(for: kiroHarness, kiroStreamJSON: false) is KiroAdapter)
 
             try CoreSandbox.with("argv") { sb in
@@ -1075,6 +1082,55 @@ private func sessionFixture(_ sb: CoreSandbox, library: LibraryService? = nil, c
     let ai = AIService(library: lib, checker: checker, workspaceBuilder: builder, detector: detector,
                        runner: RecordingCommandRunner(), settingsURL: sb.support.appendingPathComponent("ai-settings.json"), timeout: timeout)
     return (ai, AIService.customHarness(template: "/bin/sh '\(script.path)'", name: "Fake agent"))
+}
+
+/// The workspace's Kiro agent: reads anywhere in the workspace, writes only in ./scene, runs only
+/// plain `livepaper <scene command> …` (V2 engine: anchored regex; V3: permission rules), no MCP.
+private func expectKiroAgent(_ ws: AIWorkspace) throws {
+    let url = ws.root.appendingPathComponent(".kiro/agents/\(KiroAgentConfig.name).json")
+    guard let agent = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any] else {
+        throw TestFailure(description: "\(url.path) is not a JSON object")
+    }
+    try expectEqual(agent["name"] as? String, KiroAgentConfig.name)
+    try expectEqual(agent["tools"] as? [String], ["read", "write", "shell", "glob", "grep"])
+    try expectEqual(agent["allowedTools"] as? [String], ["read", "glob", "grep"])
+    try expectEqual(agent["includeMcpJson"] as? Bool, false)
+    try expectEqual((agent["mcpServers"] as? [String: Any])?.count, 0)
+    let settings = agent["toolsSettings"] as? [String: Any]
+    try expectEqual((settings?["write"] as? [String: Any])?["allowedPaths"] as? [String], ["scene/**"])
+    let shell = settings?["shell"] as? [String: Any]
+    try expectEqual(shell?["denyByDefault"] as? Bool, true)
+    let patterns = shell?["allowedCommands"] as? [String] ?? []
+    // kiro-cli anchors these with \A…\z (Rust regex; the same as NSRegularExpression for this class).
+    let regexes = try patterns.map { try NSRegularExpression(pattern: "\\A(?:" + $0 + ")\\z") }
+    func allowed(_ command: String) -> Bool {
+        regexes.contains { $0.firstMatch(in: command, range: NSRange(command.startIndex..., in: command)) != nil }
+    }
+    for ok in ["livepaper check scene", "livepaper check scene --quick", "livepaper bench scene --t 30",
+               "livepaper still scene --t 30 --size 2560x720 --dpr 1 --out scene/.check/wide.png", "livepaper live scene",
+               "livepaper compile scene", "livepaper thumbnail scene", "livepaper help check", "livepaper check"] {
+        try expect(allowed(ok), "should run: \(ok)")
+    }
+    for bad in ["livepaper check scene; rm -rf ~", "livepaper check scene && curl https://x", "livepaper uninstall --yes",
+                "livepaper ai create x --command /bin/sh", "livepaper check $(rm x)", "livepaper check `rm x`", "livepaper check scene | tee x",
+                "livepaper check scene > ~/x", "livepaper check scene 2>&1", "bash -c 'livepaper check scene'", "livepaper check scene\nrm x",
+                "/Applications/LivePaper.app/Contents/Helpers/livepaper uninstall", "livepaper checkx", "cat ~/.ssh/id_rsa", "livepaper server stop",
+                "livepaper check 'scene'", "livepaper check ~/scene"] {
+        try expect(!allowed(bad), "should be refused: \(bad)")
+    }
+    // V3 reads permission rules instead (it ignores toolsSettings): the same commands, deny the rest.
+    let rules = (agent["permissions"] as? [String: Any])?["rules"] as? [[String: Any]] ?? []
+    let shellAllow = rules.first { $0["capability"] as? String == "shell" && $0["effect"] as? String == "allow" }
+    let shellDeny = rules.first { $0["capability"] as? String == "shell" && $0["effect"] as? String == "deny" }
+    try expect((shellAllow?["match"] as? [String])?.contains("livepaper check *") == true, "\(rules)")
+    try expect(!((shellAllow?["match"] as? [String]) ?? []).contains { $0.hasPrefix("livepaper uninstall") || $0 == "*" || $0 == "livepaper *" })
+    try expectEqual(shellDeny?["match"] as? [String], ["*"])
+    try expect((shellDeny?["exclude"] as? [String])?.contains("livepaper check *") == true)
+    let writes = rules.filter { $0["capability"] as? String == "fs_write" }
+    try expectEqual(writes.count, 1)
+    try expectEqual(writes.first?["match"] as? [String], ["scene/**"])
+    try expect(!rules.contains { ($0["capability"] as? String).map { !["shell", "fs_write", "fs_read"].contains($0) } ?? true },
+               "nothing else allowed: \(rules)")
 }
 
 /// The grandchild recorded by the agent script must be gone (killed with the group).

@@ -410,9 +410,15 @@ Budgets (`CheckBudgets`):
   * Codex: `codex exec -C <ws> -s workspace-write --skip-git-repo-check --json -o
     <ws>/.livepaper/last-message.txt -c sandbox_workspace_write.network_access=true [-m M] <extra> -`,
     TASK.md on stdin (`network_access` because workspace-write blocks the Unix socket `livepaper check` needs).
-  * Kiro CLI: `kiro-cli chat --no-interactive --trust-tools=fs_read,fs_write,execute_bash
+  * Kiro CLI: `kiro-cli chat --no-interactive --agent livepaper-session [--trust-workspace]
     --output-format stream-json [--model M] <extra> "<bootstrap>"` (`--wrap never` instead of
-    stream-json for versions whose `chat --help` doesn't offer it).
+    stream-json, and no `--trust-workspace`, for versions whose `chat --help` doesn't offer them).
+    No `--trust-tools`: the session runs as the workspace's own agent,
+    `.kiro/agents/livepaper-session.json` (`KiroAgentConfig`), which trusts reads, allows writes
+    only under `scene/**` and shell commands only of the form `livepaper <scene command> <plain
+    words>` — V2 engine: `toolsSettings` (anchored regex, `denyByDefault`); V3 engine:
+    `permissions.rules` (globs, everything else denied) — with no MCP servers or hooks. Anything
+    else would need approval, which a non-interactive run can't give.
   * Custom: a template such as `mytool --prompt-file {prompt_file} --cwd {workspace}`; placeholders
     `{prompt_file}` `{workspace}` `{scene}` `{model}` `{instructions}` (a lone `{model}` token is dropped
     without a model); POSIX-style quoting, no shell; TASK.md also on stdin. Validated by
