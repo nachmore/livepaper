@@ -240,11 +240,11 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         let store = SaverSessionStores.shared
         let planned = SaverSessionPlanner.plan(now: Date(), stored: store.load())
         let deck = SaverDeck(ids: content.entries.map(\.id), mode: playlist.mode, seed: planned.session.shuffleSeed,
-                             avoid: planned.session.avoid)
+                             avoid: planned.session.avoid, recent: planned.session.recent)
         let schedule = SaverSchedule(startedAt: planned.session.startedAt, cycleMinutes: playlist.cycleMinutes,
                                      deckCount: deck.count, mode: playlist.mode, cycles: !gate.preview)
         plan = Plan(deck: deck, schedule: schedule, session: planned.session, record: planned.record)
-        SaverLog.saver.info("""
+        SaverLog.saver.notice("""
             start: publish \(playlist.generation, privacy: .public), \(deck.count, privacy: .public) scenes, \
             \(playlist.mode.rawValue, privacy: .public), \(planned.joined ? "joined" : "new", privacy: .public) session \
             \(planned.session.epoch, privacy: .public), preview \(self.gate.preview, privacy: .public)
@@ -354,7 +354,15 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         case .willStop:
             gate.apply(event)
             logLifecycle(event.rawValue, previewLike ? "ignored by previews" : "")
-            if !previewLike { prepareToExit() }
+            if !previewLike {
+                // Mark the session ended so a quick re-lock starts a new one (different scene).
+                if var plan, plan.record.endedAt == nil {
+                    plan.record.endedAt = Date().timeIntervalSince1970
+                    self.plan = plan
+                    SaverSessionStores.shared.save(plan.record)
+                }
+                prepareToExit()
+            }
         case .published:
             // Real sessions read the playlist once at start; previews follow the app live.
             if previewLike && started { restart() }
@@ -442,14 +450,14 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         case .web: host = WebSceneHost(entry: entry, fileURL: url, context: context)
         case .video: host = VideoSceneHost(entry: entry, fileURL: url, context: context)
         }
-        SaverLog.saver.info("showing \(entry.id, privacy: .public) (\(entry.kind.rawValue, privacy: .public)), step \(step, privacy: .public)")
+        SaverLog.saver.notice("showing \(entry.id, privacy: .public) (\(entry.kind.rawValue, privacy: .public)), step \(step, privacy: .public)")
         install(host, crossfade: crossfade)
     }
 
     /// Bookkeeping for no-repeat: the next session avoids the scene shown last. Previews never write.
     private func rememberShown(_ id: String) {
         guard !gate.preview, var plan, plan.record.lastShown != id else { return }
-        plan.record.lastShown = id
+        plan.record.noteShown(id)
         self.plan = plan
         SaverSessionStores.shared.save(plan.record)
     }

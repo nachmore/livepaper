@@ -134,6 +134,58 @@ extension SelfTests {
             try expectEqual(a.session, b.session)
             try expect(first.session.sceneSeed >= 1 && first.session.sceneSeed <= 100_000)
         },
+        TestCase(name: "saver.session.ended-session-not-replayed") {
+            // Lock, unlock after 10 s, lock again 15 s later: a NEW session with a different shuffle.
+            let t0 = Date(timeIntervalSince1970: 1_800_000_015)
+            var first = SaverSessionPlanner.plan(now: t0, stored: nil).record
+            first.noteShown("a")
+            first.endedAt = t0.addingTimeInterval(10).timeIntervalSince1970
+            let again = SaverSessionPlanner.plan(now: t0.addingTimeInterval(15), stored: first)
+            try expect(!again.joined, "an ended session must not be joined")
+            try expect(again.session.epoch != first.epoch, "new shuffle seed")
+            try expectEqual(again.session.recent, ["a"])
+            // A second display starting while the session runs still joins it.
+            var running = SaverSessionPlanner.plan(now: t0, stored: nil).record
+            running.noteShown("a")
+            try expect(SaverSessionPlanner.plan(now: t0.addingTimeInterval(1), stored: running).joined)
+        },
+        TestCase(name: "saver.deck.avoids-recent-half") {
+            let ids = (0..<13).map { "s\($0)" }
+            let recent = ["s3", "s7", "s1", "s9", "s0", "s5", "s11"]   // newest first
+            for seed in UInt64(1)...500 {
+                let deck = SaverDeck(ids: ids, mode: .shuffle, seed: seed, avoid: "s3", recent: recent)
+                let first = ids[deck.entryIndex(atStep: 0)]
+                try expect(!recent.prefix(6).contains(first), "seed \(seed) started with recent \(first)")
+            }
+        },
+        TestCase(name: "saver.deck.relock-walk-no-repeats") {
+            // Simulate 40 quick lock/unlock cycles: no scene repeats within the newest half.
+            let ids = (0..<13).map { "s\($0)" }
+            var record: SaverSessionRecord? = nil
+            var shown: [String] = []
+            var t = Date(timeIntervalSince1970: 1_800_000_000)
+            for _ in 0..<40 {
+                let planned = SaverSessionPlanner.plan(now: t, stored: record)
+                let deck = SaverDeck(ids: ids, mode: .shuffle, seed: planned.session.shuffleSeed,
+                                     avoid: planned.session.avoid, recent: planned.session.recent)
+                var rec = planned.record
+                let id = ids[deck.entryIndex(atStep: 0)]
+                rec.noteShown(id)
+                rec.endedAt = t.addingTimeInterval(5).timeIntervalSince1970
+                record = rec
+                if let last = shown.suffix(6).firstIndex(of: id) { throw TestFailure(description: "\(id) repeated after \(shown.count - last) locks: \(shown)") }
+                shown.append(id)
+                t = t.addingTimeInterval(12)
+            }
+        },
+        TestCase(name: "saver.session.record-recent-cap") {
+            var r = SaverSessionRecord(epoch: 1, startedAt: 30, avoid: nil, lastShown: nil)
+            for i in 0..<20 { r.noteShown("s\(i % 15)") }
+            try expectEqual(r.recent?.count, SaverSessionRecord.recentCapacity)
+            try expectEqual(r.recent?.first, "s4"); try expectEqual(r.lastShown, "s4")
+            let decoded = try JSONDecoder().decode(SaverSessionRecord.self, from: Data(#"{"epoch":5,"startedAt":150,"avoid":"a","lastShown":"b"}"#.utf8))
+            try expect(decoded.recent == nil && decoded.endedAt == nil, "old records still decode")
+        },
         TestCase(name: "saver.session.file-store") {
             let dir = try tempDir("saver-store")
             defer { remove(dir) }

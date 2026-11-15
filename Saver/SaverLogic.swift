@@ -105,6 +105,22 @@ struct SaverSessionRecord: Codable, Equatable {
     var avoid: String?
     /// Scene on screen most recently (the next session avoids it).
     var lastShown: String?
+    /// Scenes shown recently, most recent first (shuffle avoids starting a session with any of the
+    /// newest half of the deck). Optional for records written by older builds.
+    var recent: [String]? = nil
+    /// When the session ended (willstop). Only a session that is still running can be joined, so a
+    /// quick unlock → lock starts a NEW session instead of replaying the previous one.
+    var endedAt: TimeInterval? = nil
+
+    static let recentCapacity = 12
+
+    /// Records `id` as on screen now.
+    mutating func noteShown(_ id: String) {
+        lastShown = id
+        var list = (recent ?? []).filter { $0 != id }
+        list.insert(id, at: 0)
+        recent = Array(list.prefix(Self.recentCapacity))
+    }
 }
 
 /// One screen-saver session as seen by every display that starts within it.
@@ -112,6 +128,8 @@ struct SaverSession: Equatable {
     var epoch: Int
     var startedAt: Date
     var avoid: String?
+    /// Recently shown scenes, most recent first (see `SaverDeck.recent`).
+    var recent: [String] = []
 
     /// Seed for the scene shuffle (identical on every display of the session).
     var shuffleSeed: UInt64 { UInt64(bitPattern: Int64(epoch)) }
@@ -131,13 +149,22 @@ enum SaverSessionPlanner {
     ///   existing session was joined.
     static func plan(now: Date, stored: SaverSessionRecord?) -> (session: SaverSession, record: SaverSessionRecord, joined: Bool) {
         let t = now.timeIntervalSince1970
-        if let stored, t - stored.startedAt >= -epochLength, t - stored.startedAt < joinWindow {
-            return (SaverSession(epoch: stored.epoch, startedAt: Date(timeIntervalSince1970: stored.startedAt), avoid: stored.avoid), stored, true)
+        // Join only a session that is still running (another display started it a moment ago). A
+        // session that already ended — the user unlocked and locked again quickly — must not be
+        // replayed: that showed the same scene lock after lock.
+        if let stored, stored.endedAt == nil, t - stored.startedAt >= -epochLength, t - stored.startedAt < joinWindow {
+            return (SaverSession(epoch: stored.epoch, startedAt: Date(timeIntervalSince1970: stored.startedAt), avoid: stored.avoid,
+                                 recent: stored.recent ?? []), stored, true)
         }
-        let epoch = Int((t / epochLength).rounded(.down))
-        let start = TimeInterval(epoch) * epochLength
-        let record = SaverSessionRecord(epoch: epoch, startedAt: start, avoid: stored?.lastShown, lastShown: nil)
-        return (SaverSession(epoch: epoch, startedAt: Date(timeIntervalSince1970: start), avoid: record.avoid), record, false)
+        var epoch = Int((t / epochLength).rounded(.down))
+        // A new session in the same 30 s epoch as an ended one still needs a different shuffle.
+        if let stored, epoch <= stored.epoch { epoch = stored.epoch + 1 }
+        let start = t >= TimeInterval(epoch) * epochLength ? TimeInterval(epoch) * epochLength : t
+        let recent = stored?.recent ?? (stored?.lastShown.map { [$0] } ?? [])
+        let record = SaverSessionRecord(epoch: epoch, startedAt: start, avoid: stored?.lastShown, lastShown: nil,
+                                        recent: recent, endedAt: nil)
+        return (SaverSession(epoch: epoch, startedAt: Date(timeIntervalSince1970: start), avoid: record.avoid, recent: recent),
+                record, false)
     }
 }
 
@@ -193,6 +220,21 @@ struct SaverDeck: Equatable {
     let seed: UInt64
     /// Scene to avoid at step 0 (shown last in the previous session).
     let avoid: String?
+    /// Recently shown scenes, most recent first. Shuffle never starts a session with one of the
+    /// newest ⌊n/2⌋ of them, so locking repeatedly walks through the deck instead of repeating.
+    var recent: [String] = []
+
+    init(ids: [String], mode: LPPlaylistMode, seed: UInt64, avoid: String?, recent: [String] = []) {
+        self.ids = ids; self.mode = mode; self.seed = seed; self.avoid = avoid; self.recent = recent
+    }
+
+    /// The ids the first scene of a session must not be (empty for one-scene decks).
+    var startAvoidSet: Set<String> {
+        guard ids.count > 1 else { return [] }
+        var list = recent
+        if let avoid, !list.contains(avoid) { list.insert(avoid, at: 0) }
+        return Set(list.filter { ids.contains($0) }.prefix(max(1, ids.count / 2)))
+    }
 
     var count: Int { ids.count }
 
@@ -223,7 +265,12 @@ struct SaverDeck: Equatable {
             var rng = SaverRandom(seed: seed &+ UInt64(r) &* 0xD1B5_4A32_D192_ED03)
             order = Array(0..<n)
             for i in stride(from: n - 1, to: 0, by: -1) { order.swapAt(i, rng.next(below: i + 1)) }
-            if let previous, order[0] == previous { order.swapAt(0, 1) }
+            if r == 0 {
+                let avoidSet = startAvoidSet
+                if let k = order.firstIndex(where: { !avoidSet.contains(ids[$0]) }), k > 0 { order.swapAt(0, k) }
+            } else if let previous, order[0] == previous {
+                order.swapAt(0, 1)
+            }
             previous = order[n - 1]
         }
         return order
