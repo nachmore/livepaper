@@ -55,9 +55,7 @@ final class MockAISession: AISessionHandle, @unchecked Sendable {
     init(id: String, workspace: URL) {
         self.id = id
         self.workspace = workspace
-        var c: AsyncStream<AISessionEvent>.Continuation!
-        events = AsyncStream(bufferingPolicy: .unbounded) { c = $0 }
-        continuation = c
+        (events, continuation) = AsyncStream.makeStream(of: AISessionEvent.self, bufferingPolicy: .unbounded)
     }
 
     func run(_ script: MockAIScript, pace: Double, holdAfter: Int? = nil) {

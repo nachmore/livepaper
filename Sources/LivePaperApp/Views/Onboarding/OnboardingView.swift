@@ -522,9 +522,11 @@ private struct LockKeysPage: View {
             }
             .padding(14)
             .card(cornerRadius: 10)
-            CheckWithAction(check: SetupChecklist.checks(for: .lockKeys, status: status)[0]) {
-                if !status.accessibilityTrusted {
-                    Button("Open Accessibility Settings") { model.openAccessibilitySettings() }
+            ForEach(SetupChecklist.checks(for: .lockKeys, status: status)) { check in
+                CheckWithAction(check: check) {
+                    if !status.accessibilityTrusted {
+                        Button("Open Accessibility Settings") { model.openAccessibilitySettings() }
+                    }
                 }
             }
             Text("Catching keys needs Accessibility access. If the helper ever stops, the keys simply work as they always did.")

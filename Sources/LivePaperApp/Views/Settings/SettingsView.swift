@@ -157,11 +157,13 @@ private struct LockSettingsTab: View {
                     Label("These need Accessibility access before they take effect.", systemImage: "exclamationmark.triangle.fill")
                         .foregroundStyle(.orange)
                 }
-                HStack {
-                    SetupCheckRow(check: SetupChecklist.checks(for: .lockKeys, status: status)[0])
-                    Spacer()
-                    if !status.accessibilityTrusted {
-                        Button("Open Accessibility Settings\u{2026}") { model.openAccessibilitySettings() }
+                ForEach(SetupChecklist.checks(for: .lockKeys, status: status)) { check in
+                    HStack {
+                        SetupCheckRow(check: check)
+                        Spacer()
+                        if !status.accessibilityTrusted {
+                            Button("Open Accessibility Settings\u{2026}") { model.openAccessibilitySettings() }
+                        }
                     }
                 }
             } header: {
