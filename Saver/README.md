@@ -98,15 +98,24 @@ are logged. A missing, unreadable or empty playlist shows the fallback: a dark g
 native clock and "Open LivePaper to choose a scene".
 
 **Scene selection.** `shuffle`, `sequence` or `single`. Every display decides independently but
-identically: a display joins the session recorded by another display if it started less than 45 s
-after that session's 30 s epoch began, otherwise it starts a new session in the current epoch. The
-epoch seeds the shuffle (SplitMix64, identical on every architecture) and the web scenes' `seed`.
-A new session never starts with the scene shown last in the previous one (shuffle), or continues
-after it (sequence); each shuffled pass is reshuffled without repeating across the pass boundary.
-Scene changes happen every `cycleMinutes` at wall-clock steps from the session start, so displays
-switch together and a view that slept catches up. Changes crossfade (2 s; first reveal 0.6 s).
-Bookkeeping is a single blob in ScreenSaverDefaults (see the pitfalls in `SaverSupport.swift`);
-previews never write it.
+identically: a display joins the session recorded by another display if that session is still
+running (no willstop yet) and started less than 45 s earlier. Otherwise it starts a new session in
+the current 30 s epoch, or one past the previous session's epoch when that is the same or later (a
+quick unlock → lock), so the shuffle always changes; such a session starts at the actual time, not
+at an epoch boundary. A stored epoch more than a day ahead of the clock is ignored. The epoch seeds
+the shuffle (SplitMix64, identical on every architecture) and the web scenes' `seed`. The record
+keeps the recently shown scenes (up to 12, newest first): a new shuffle session never starts with
+the scene shown last or with any of the newest ⌊n/2⌋ of an n-scene deck, so repeated locks walk
+through the deck, and sequence continues after the scene shown last. Each shuffled pass is
+reshuffled without repeating across the pass boundary. What a session's first scene avoids is
+frozen in the record when the session starts (`startRecent`), so a display that joins builds the
+same deck. By then the history already holds the scene the first display is showing. Scene changes
+happen every `cycleMinutes` at wall-clock steps from the session start, so displays switch together
+and a view that slept catches up. Changes crossfade (2 s; first reveal 0.6 s). Bookkeeping is a
+single blob in ScreenSaverDefaults (see the pitfalls in `SaverSupport.swift`); previews never write
+it. Each display adds the scenes it shows to the stored record when that record is its session or
+a newer one, and willstop marks the stored record ended, so displays writing in any order keep each
+other's history.
 
 **Web scenes.** `loadHTMLString(_:baseURL: nil)` (scenes are self-contained; the sandboxed
 WebContent process couldn't read the bundle anyway), non-persistent data store, no navigation away
@@ -216,7 +225,9 @@ swift run LivePaperSelfTest saver
 ```
 
 They cover playlist validation, the deck (determinism, no repeats over many seeds, sequence and
-single), session joining across displays and epoch boundaries, the schedule, back-off, events and
+single), sessions (displays that join build the same deck after the first display recorded its
+scene, epoch boundaries, ended sessions, quick re-locks, displays keeping each other's history,
+damaged records), the schedule, back-off, events and
 lock-UI state, the run gate (prewarm, explicit starts, display sleep, release, previews, the
 policy switches), clock geometry (against the runtime's numbers) and locale
 formatting, the web bridge JSON, performance resolution, the Options summary and the bundle
@@ -227,7 +238,8 @@ the way the host does and drives one scripted scenario through off-screen window
 `.prohibited` (never-activating) process: the prewarm gate, web scene load on lock, injected
 config, clock hand-off both ways, state queued before the page is ready, display sleep/wake,
 unlock and the release after it, a start by `didstart` while unlocked, a lock while the displays
-sleep, the Options sheet, a publish into the signed bundle, video playback and its native clock
+sleep, the Options sheet, a second display agreeing on the scene (sequence and shuffle), a publish
+into the signed bundle, video playback and its native clock
 hand-off, a preview (runs while "System Settings" is in front; pauses while locked, in the
 background or ordered out), the fallback, and finally willstop (ignored by the preview, `exit(0)`
 from a real instance). System events reach the view through its `livepaperHandleNotificationNamed:`
@@ -267,5 +279,8 @@ ScreenSaverEngine from tooling.
   lock and `didstart` and both render (`othersRunning=1` in the log); unverified.
 * Whether System Settings' preview host reports its window's visibility and the frontmost app to
   the sandboxed saver is unverified; previews then fall back to "visible".
-* A display that starts more than 45 s after another joins a new session and may pick a different
-  scene; two sessions within 45 s of each other count as one (same first scene).
+* A display that starts more than 45 s after another begins a new session and may pick a different
+  scene (it still avoids the recent scenes).
+* A session counts as ended only once willstop arrives. If a run ends without one (for example a
+  prewarmed instance behind a direct lock, which just releases its scene after the unlock), a
+  re-lock within 45 s of that session's start joins it and shows its first scene again.

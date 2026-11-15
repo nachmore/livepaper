@@ -24,6 +24,40 @@ private func playlistDir(_ playlist: LPPlaylist, extraFiles: [String] = [], skip
 
 private func remove(_ url: URL) { try? FileManager.default.removeItem(at: url) }
 
+/// One display's view reduced to the bookkeeping LivePaperSaverView does against the shared session
+/// store, with the same SaverLogic calls: begin() plans and builds the deck, then shows step 0;
+/// show() → rememberShown(); willstop → recordEnded. Tests run several of these against one store.
+private struct SimDisplay {
+    let ids: [String]
+    let planned: (session: SaverSession, record: SaverSessionRecord, joined: Bool)
+    let deck: SaverDeck
+    private(set) var record: SaverSessionRecord
+
+    init(ids: [String], mode: LPPlaylistMode = .shuffle, at now: Date, store: SaverSessionStore) {
+        self.ids = ids
+        planned = SaverSessionPlanner.plan(now: now, stored: store.load())
+        deck = SaverDeck(ids: ids, mode: mode, session: planned.session)
+        record = planned.record
+        show(step: 0, store: store)
+    }
+
+    var joined: Bool { planned.joined }
+    func scene(atStep step: Int) -> String { ids[deck.entryIndex(atStep: step)] }
+
+    mutating func show(step: Int, store: SaverSessionStore) { show(id: scene(atStep: step), store: store) }
+    mutating func show(id: String, store: SaverSessionStore) {
+        let update = SaverSessionPlanner.recordShown(id, own: record, stored: store.load())
+        record.noteShown(id)
+        if let update { store.save(update) }
+    }
+
+    func stop(at date: Date, store: SaverSessionStore) {
+        if let ended = SaverSessionPlanner.recordEnded(at: date.timeIntervalSince1970, own: record, stored: store.load()) {
+            store.save(ended)
+        }
+    }
+}
+
 private var repoRoot: URL {
     URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
 }
@@ -105,21 +139,98 @@ extension SelfTests {
         // MARK: sessions
         TestCase(name: "saver.session.displays-agree-and-next-session-avoids") {
             let store = SaverMemorySessionStore()
+            let ids = ["aurora", "beach", "city"]
             let t0 = Date(timeIntervalSince1970: 1_800_000_010)
-            let first = SaverSessionPlanner.plan(now: t0, stored: store.load())
+            let first = SimDisplay(ids: ids, at: t0, store: store)
             try expect(!first.joined)
-            var record = first.record
-            record.lastShown = "aurora"
-            store.save(record)
-            // A second display a few seconds later joins the same session.
-            let second = SaverSessionPlanner.plan(now: t0.addingTimeInterval(3), stored: store.load())
+            // A second display a few seconds later joins the same session and plays the same scenes.
+            let second = SimDisplay(ids: ids, at: t0.addingTimeInterval(3), store: store)
             try expect(second.joined)
-            try expectEqual(second.session, first.session)
+            try expectEqual(second.planned.session, first.planned.session)
+            try expectEqual(second.deck, first.deck)
             // The next lock, minutes later, is a new session that avoids what was shown last.
+            first.stop(at: t0.addingTimeInterval(300), store: store)
+            second.stop(at: t0.addingTimeInterval(300), store: store)
             let next = SaverSessionPlanner.plan(now: t0.addingTimeInterval(600), stored: store.load())
             try expect(!next.joined)
-            try expectEqual(next.session.avoid, "aurora")
-            try expect(next.session.epoch != first.session.epoch)
+            try expectEqual(next.session.avoid, first.scene(atStep: 0))
+            try expect(next.session.epoch != first.planned.session.epoch)
+        },
+        TestCase(name: "saver.session.joined-display-builds-same-deck") {
+            // The first display's begin() already recorded its scene before the second display plans;
+            // the second must still build the same deck (it used to avoid that very scene).
+            for mode in [LPPlaylistMode.shuffle, .sequence] {
+                for n in [2, 3, 6, 13] {
+                    let ids = (0..<n).map { "s\($0)" }
+                    for k in 0..<50 {
+                        let store = SaverMemorySessionStore()
+                        var prior = SaverSessionRecord(epoch: 1, startedAt: 30, avoid: nil, lastShown: nil)
+                        for i in 0..<(k % 4) { prior.noteShown(ids[(k + i) % n]) }
+                        prior.endedAt = 40
+                        store.save(prior)
+                        let t0 = Date(timeIntervalSince1970: 1_800_000_000 + Double(k * 97))
+                        let first = SimDisplay(ids: ids, mode: mode, at: t0, store: store)
+                        let afterFirst = store.load()
+                        let second = SimDisplay(ids: ids, mode: mode, at: t0.addingTimeInterval([0.2, 3, 8, 14][(k / 4) % 4]), store: store)
+                        let label = "\(mode) n=\(n) k=\(k)"
+                        try expect(second.joined, label)
+                        try expect(second.planned.session == first.planned.session, label)
+                        for step in 0..<(2 * n) {
+                            try expect(second.scene(atStep: step) == first.scene(atStep: step), "\(label) step=\(step)")
+                        }
+                        try expect(store.load() == afterFirst, "\(label): joining display rewrote the record")
+                    }
+                }
+            }
+            // Only the session-start fields define the session: history and the end never change it.
+            var record = SaverSessionPlanner.plan(now: Date(timeIntervalSince1970: 1_800_000_000),
+                                                  stored: SaverSessionRecord(epoch: 1, startedAt: 30, avoid: nil, lastShown: "a")).record
+            let session = record.session
+            record.noteShown("b"); record.noteShown("c"); record.endedAt = 1_800_000_100
+            try expectEqual(record.session, session)
+        },
+        TestCase(name: "saver.session.displays-keep-each-others-history") {
+            let ids = (0..<8).map { "s\($0)" }
+            let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+            for stopOrder in [false, true] {
+                // One session; display 2 skipped a failing scene, so the two showed different scenes.
+                let store = SaverMemorySessionStore()
+                var a = SimDisplay(ids: ids, at: t0, store: store)
+                var b = SimDisplay(ids: ids, at: t0.addingTimeInterval(1), store: store)
+                let x = a.scene(atStep: 1), w = ids.first { $0 != x && $0 != a.scene(atStep: 0) }!
+                a.show(step: 1, store: store)
+                b.show(id: w, store: store)
+                if stopOrder { a.stop(at: t0.addingTimeInterval(200), store: store); b.stop(at: t0.addingTimeInterval(200), store: store) }
+                else { b.stop(at: t0.addingTimeInterval(200), store: store); a.stop(at: t0.addingTimeInterval(200), store: store) }
+                let ended = try unwrap(store.load())
+                try expect(ended.endedAt != nil)
+                try expect(ended.recent?.contains(x) == true && ended.recent?.contains(w) == true, "\(ended.recent ?? [])")
+
+                // A display that starts 60 s late begins its own session. The first display changing
+                // scene afterwards must not replace that newer session in the store, and whichever
+                // display handles willstop last, the next lock still knows what both showed.
+                let late = SaverMemorySessionStore()
+                var first = SimDisplay(ids: ids, at: t0, store: late)
+                let second = SimDisplay(ids: ids, at: t0.addingTimeInterval(60), store: late)
+                try expect(!second.joined)
+                first.show(step: 1, store: late)
+                let third = SimDisplay(ids: ids, at: t0.addingTimeInterval(70), store: late)
+                try expect(third.joined && third.deck == second.deck, "a display joins the newest session")
+                for display in stopOrder ? [first, second, third] : [third, second, first] {
+                    display.stop(at: t0.addingTimeInterval(120), store: late)
+                }
+                let record = try unwrap(late.load())
+                let all = [first.scene(atStep: 0), first.scene(atStep: 1), second.scene(atStep: 0)]
+                try expect(record.endedAt != nil && record.session == second.planned.session
+                           && all.allSatisfy { record.recent?.contains($0) == true }, "\(record)")
+                let next = SaverSessionPlanner.plan(now: t0.addingTimeInterval(130), stored: record)
+                try expect(!next.joined)
+                let avoided = SaverDeck(ids: ids, mode: .shuffle, session: next.session).startAvoidSet
+                try expect(Set(all).isSubset(of: avoided), "next lock avoids \(avoided), shown \(all)")
+            }
+            // No stored record (the store lost it): willstop still saves this display's, ended.
+            let own = SaverSessionPlanner.plan(now: t0, stored: nil).record
+            try expect(SaverSessionPlanner.recordEnded(at: 5, own: own, stored: nil)?.endedAt == 5)
         },
         TestCase(name: "saver.session.epoch-boundary") {
             // Display 1 starts 1 s before an epoch boundary, display 2 starts 2 s after it.
@@ -144,10 +255,39 @@ extension SelfTests {
             try expect(!again.joined, "an ended session must not be joined")
             try expect(again.session.epoch != first.epoch, "new shuffle seed")
             try expectEqual(again.session.recent, ["a"])
-            // A second display starting while the session runs still joins it.
-            var running = SaverSessionPlanner.plan(now: t0, stored: nil).record
-            running.noteShown("a")
-            try expect(SaverSessionPlanner.plan(now: t0.addingTimeInterval(1), stored: running).joined)
+            // A second display starting while the session runs still joins it (and plays the same deck).
+            let store = SaverMemorySessionStore()
+            let ids = ["a", "b", "c", "d"]
+            let running = SimDisplay(ids: ids, at: t0, store: store)
+            let joining = SimDisplay(ids: ids, at: t0.addingTimeInterval(1), store: store)
+            try expect(joining.joined && joining.deck == running.deck)
+        },
+        TestCase(name: "saver.session.implausible-stored-epoch-ignored") {
+            // A damaged record (or a clock moved back by days) must not pin or overflow the epoch: this
+            // used to trap on `stored.epoch + 1` at every start.
+            let t = Date(timeIntervalSince1970: 1_800_000_000)
+            let clockEpoch = Int(1_800_000_000 / SaverSessionPlanner.epochLength)
+            for bad in [Int.max, Int.max - 1, clockEpoch + SaverSessionPlanner.maxEpochLead] {
+                let stored = SaverSessionRecord(epoch: bad, startedAt: 0, avoid: nil, lastShown: "a", endedAt: 1)
+                let planned = SaverSessionPlanner.plan(now: t, stored: stored)
+                try expect(!planned.joined && planned.session.epoch == clockEpoch, "epoch \(bad) → \(planned.session.epoch)")
+                try expectEqual(planned.record.startedAt, TimeInterval(clockEpoch) * SaverSessionPlanner.epochLength)
+                try expectEqual(planned.session.avoid, "a")
+            }
+            // The new session replaces the damaged record, so a second display joins it.
+            let store = SaverMemorySessionStore()
+            store.save(SaverSessionRecord(epoch: .max, startedAt: 0, avoid: nil, lastShown: "a", endedAt: 1))
+            let ids = ["a", "b", "c"]
+            let a = SimDisplay(ids: ids, at: t, store: store)
+            let b = SimDisplay(ids: ids, at: t.addingTimeInterval(2), store: store)
+            try expect(b.joined && b.deck == a.deck)
+            let damaged = SaverSessionRecord(epoch: .max, startedAt: 0, avoid: nil, lastShown: nil)
+            let ancient = SaverSessionRecord(epoch: .min, startedAt: 0, avoid: nil, lastShown: nil)
+            try expect(!SaverSessionPlanner.isSession(damaged, newerThan: ancient) && !SaverSessionPlanner.isSession(ancient, newerThan: damaged))
+            // An epoch a little ahead (quick re-locks ran it past the clock) is still bumped past.
+            let ahead = SaverSessionRecord(epoch: clockEpoch + 20, startedAt: 1_799_999_990, avoid: nil, lastShown: "a", endedAt: 1_799_999_995)
+            let planned = SaverSessionPlanner.plan(now: t, stored: ahead)
+            try expect(planned.session.epoch == clockEpoch + 21 && planned.record.startedAt == t.timeIntervalSince1970, "\(planned.record)")
         },
         TestCase(name: "saver.deck.avoids-recent-half") {
             let ids = (0..<13).map { "s\($0)" }
@@ -161,18 +301,14 @@ extension SelfTests {
         TestCase(name: "saver.deck.relock-walk-no-repeats") {
             // Simulate 40 quick lock/unlock cycles: no scene repeats within the newest half.
             let ids = (0..<13).map { "s\($0)" }
-            var record: SaverSessionRecord? = nil
+            let store = SaverMemorySessionStore()
             var shown: [String] = []
             var t = Date(timeIntervalSince1970: 1_800_000_000)
             for _ in 0..<40 {
-                let planned = SaverSessionPlanner.plan(now: t, stored: record)
-                let deck = SaverDeck(ids: ids, mode: .shuffle, seed: planned.session.shuffleSeed,
-                                     avoid: planned.session.avoid, recent: planned.session.recent)
-                var rec = planned.record
-                let id = ids[deck.entryIndex(atStep: 0)]
-                rec.noteShown(id)
-                rec.endedAt = t.addingTimeInterval(5).timeIntervalSince1970
-                record = rec
+                let display = SimDisplay(ids: ids, at: t, store: store)
+                try expect(!display.joined)
+                display.stop(at: t.addingTimeInterval(5), store: store)
+                let id = display.scene(atStep: 0)
                 if let last = shown.suffix(6).firstIndex(of: id) { throw TestFailure(description: "\(id) repeated after \(shown.count - last) locks: \(shown)") }
                 shown.append(id)
                 t = t.addingTimeInterval(12)
@@ -184,7 +320,11 @@ extension SelfTests {
             try expectEqual(r.recent?.count, SaverSessionRecord.recentCapacity)
             try expectEqual(r.recent?.first, "s4"); try expectEqual(r.lastShown, "s4")
             let decoded = try JSONDecoder().decode(SaverSessionRecord.self, from: Data(#"{"epoch":5,"startedAt":150,"avoid":"a","lastShown":"b"}"#.utf8))
-            try expect(decoded.recent == nil && decoded.endedAt == nil, "old records still decode")
+            try expect(decoded.recent == nil && decoded.startRecent == nil && decoded.endedAt == nil, "old records still decode")
+            // A running session recorded by an older build is joined with what it avoided (`avoid`).
+            let joined = SaverSessionPlanner.plan(now: Date(timeIntervalSince1970: 160), stored: decoded)
+            try expect(joined.joined && joined.session.avoid == "a" && joined.session.recent.isEmpty)
+            try expectEqual(SaverDeck(ids: ["a", "b"], mode: .shuffle, session: joined.session).startAvoidSet, ["a"])
         },
         TestCase(name: "saver.session.file-store") {
             let dir = try tempDir("saver-store")
@@ -192,7 +332,8 @@ extension SelfTests {
             let url = dir.appendingPathComponent("state.json")
             let store = SaverFileSessionStore(url: url)
             try expect(store.load() == nil)
-            let r = SaverSessionRecord(epoch: 5, startedAt: 150, avoid: "a", lastShown: "b")
+            let r = SaverSessionRecord(epoch: 5, startedAt: 150, avoid: "a", lastShown: "b", recent: ["b", "a"], startRecent: ["a"],
+                                       endedAt: 170)
             store.save(r)
             try expectEqual(SaverFileSessionStore(url: url).load(), r)
         },
