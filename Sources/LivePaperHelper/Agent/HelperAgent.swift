@@ -153,12 +153,16 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
 
     private func reloadState(reason: String) {
         let new = HelperStateReader.load(from: LPPaths.stateFile, previous: config)
-        for problem in new.problems { log.error("state.json: \(problem, privacy: .public)") }
         if new != config {
+            // Logged once per change, not on every stateChanged.
+            for problem in new.problems { log.error("state.json: \(problem, privacy: .public)") }
             log.info("""
                 state (\(reason, privacy: .public)): shortcut \(new.hotkey?.displayString ?? "off", privacy: .public) \
                 [\(new.source.rawValue, privacy: .public)]
                 """)
+            if let hotkey = new.hotkey, let problem = HelperHotkeyMapping.problem(with: hotkey) {
+                log.error("not registering the shortcut \(hotkey.displayString, privacy: .public): \(problem.description, privacy: .public)")
+            }
         }
         config = new
         applyHotkey()
@@ -205,9 +209,6 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
 
     private func applyHotkey() {
         guard let config, !stopped else { return }
-        if let hotkey = config.hotkey, let problem = HelperHotkeyMapping.problem(with: hotkey) {
-            log.error("not registering the shortcut \(hotkey.displayString, privacy: .public): \(problem.description, privacy: .public)")
-        }
         let desired = HelperHotkeyPlan.desired(config: config, suspended: recordingActive)
         for action in HelperHotkeyPlan.actions(registered: hotkeys.registered, desired: desired) {
             switch action {
@@ -236,7 +237,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         let now = Date()
         let situation = HelperLockSituation(
             engineExists: FileManager.default.fileExists(atPath: HelperProcesses.screenSaverEngineApp.path),
-            screenSaverRunning: HelperProcesses.isRunning(executable: HelperProcesses.screenSaverEngineExecutable),
+            screenSaverRunning: HelperProcesses.isScreenSaverEngineRunning,
             sessionLocked: Self.sessionLocked,
             launchInFlight: launchStartedAt.map { now.timeIntervalSince($0) < Self.launchTimeout } ?? false)
         switch HelperLockPolicy.decide(situation) {

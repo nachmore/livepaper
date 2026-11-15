@@ -63,7 +63,7 @@ enum HelperSystem {
             app: app,
             appVersion: app.url.flatMap(HelperAppLocator.infoPlistVersion),
             engineExists: FileManager.default.fileExists(atPath: HelperProcesses.screenSaverEngineApp.path),
-            screenSaverRunning: HelperProcesses.isRunning(executable: HelperProcesses.screenSaverEngineExecutable),
+            screenSaverRunning: HelperProcesses.isScreenSaverEngineRunning,
             password: passwordPolicy(),
             systemLockTakeover: systemLockTakeover,
             carbonConstantsMatch: CarbonHotkeyCenter.carbonConstantsMatch,

@@ -7,24 +7,22 @@ import Foundation
 import LivePaperCore
 
 enum HelperProcesses {
-    /// ScreenSaverEngine's executable; a running copy means a screen saver is up.
+    /// What the lock flow launches; a running ScreenSaverEngine means a screen saver is up.
     static let screenSaverEngineApp = URL(fileURLWithPath: "/System/Library/CoreServices/ScreenSaverEngine.app")
-    static var screenSaverEngineExecutable: String { screenSaverEngineApp.path + "/Contents/MacOS/ScreenSaverEngine" }
+    /// Matched as a path suffix: system executables may be reported under a firmlinked/cryptex prefix.
+    static let screenSaverEngineExecutableSuffix = "/ScreenSaverEngine.app/Contents/MacOS/ScreenSaverEngine"
 
     /// Holds an exclusive flock while an agent runs, and its pid (see HelperSingleInstance).
     static var instanceFile: URL { LPPaths.supportRoot.appendingPathComponent("helper.pid") }
 
-    /// Executable paths of all processes this user may inspect.
-    static func executablePaths() -> [(pid: pid_t, path: String)] {
+    /// All current pids (a snapshot; processes may exit right after).
+    static func allPIDs() -> [pid_t] {
         let estimate = proc_listallpids(nil, 0)
         guard estimate > 0 else { return [] }
         var pids = [pid_t](repeating: 0, count: Int(estimate) + 64)   // room for processes started meanwhile
         let count = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) }
         guard count > 0 else { return [] }
-        return pids.prefix(Int(count)).compactMap { pid in
-            guard pid > 0, let path = executablePath(of: pid) else { return nil }
-            return (pid, path)
-        }
+        return pids.prefix(Int(min(count, Int32(pids.count)))).filter { $0 > 0 }
     }
 
     /// The executable of `pid`, or nil if it is gone or not inspectable.
@@ -35,10 +33,15 @@ enum HelperProcesses {
         return String(decoding: buffer.prefix(Int(length)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
     }
 
-    /// Whether any process runs `executable` (exact path).
-    static func isRunning(executable: String) -> Bool {
-        executablePaths().contains { $0.path == executable }
+    /// Whether any process's executable path satisfies `matches`. A few ms for ~1000 processes;
+    /// used once per lock request or report, never periodically.
+    static func isRunning(where matches: (String) -> Bool) -> Bool {
+        allPIDs().contains { pid in executablePath(of: pid).map(matches) ?? false }
     }
+
+    static func isRunning(executable: String) -> Bool { isRunning { $0 == executable } }
+
+    static var isScreenSaverEngineRunning: Bool { isRunning { $0.hasSuffix(screenSaverEngineExecutableSuffix) } }
 
     /// The pid recorded in an instance file ("<pid>\n"); nil for anything else.
     static func parsePID(_ text: String) -> pid_t? {

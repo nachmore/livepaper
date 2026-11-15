@@ -401,7 +401,8 @@ extension SelfTests {
                             (Bundle.main.executableURL ?? URL(fileURLWithPath: CommandLine.arguments[0])).resolvingSymlinksInPath().path)
             try expect(HelperProcesses.isRunning(executable: me), "the scan finds this test process")
             try expect(!HelperProcesses.isRunning(executable: "/nonexistent/LivePaperHelper"))
-            try expect(HelperProcesses.screenSaverEngineExecutable.hasSuffix("ScreenSaverEngine.app/Contents/MacOS/ScreenSaverEngine"))
+            let engine = HelperProcesses.screenSaverEngineApp.deletingLastPathComponent().path + HelperProcesses.screenSaverEngineExecutableSuffix
+            try expect(FileManager.default.isExecutableFile(atPath: engine), "the scan looks for \(engine)")
         },
         TestCase(name: "helper.processes.instance-file") {
             try expectEqual(HelperProcesses.parsePID("123\n"), 123)
