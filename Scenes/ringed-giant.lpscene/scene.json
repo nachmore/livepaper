@@ -4,14 +4,14 @@
     "position" : "top"
   },
   "created" : "2026-11-15T02:40:36Z",
-  "description" : "A slow, banded gas giant with tilted luminous rings, tiny moons, and a quiet nebula in deep space.",
+  "description" : "A banded gas giant turning once every five minutes, its zonal winds shearing the bands and carrying its storms into the night side, while the whole ringed system nods gently. Clumps and glints orbit the rings, three moons slip in front of and behind the rings and globe, and three parallax star layers, fine drifting dust, faint violet-and-teal nebula filaments on the far side of the sky and the occasional faint meteor keep deep space quietly alive.",
   "id" : "ringed-giant",
   "kind" : "web",
   "name" : "Ringed Giant",
   "performance" : {
-    "benchMs" : 0.75,
-    "checkedAt" : "2026-11-15T03:05:11Z",
-    "energyMw" : 36
+    "benchMs" : 1.325,
+    "checkedAt" : "2026-11-15T18:13:57Z",
+    "energyMw" : 56
   },
   "runtime" : 1,
   "schema" : 1,
@@ -22,5 +22,5 @@
     "rings",
     "calm"
   ],
-  "updated" : "2026-11-15T03:03:38Z"
+  "updated" : "2026-11-15T18:07:18Z"
 }
