@@ -59,6 +59,54 @@ extension SelfTests {
                 try expect(build.contains(needle), "build.sh doesn't mention \(needle)")
             }
         },
+        TestCase(name: "cli.packaging.uninstall-dev-script") {
+            // scripts/uninstall-dev.sh keeps the scene library unless --delete-scenes, and deleting it
+            // asks first (after showing the plan) unless --yes. Runs against a fake app whose
+            // `livepaper` only logs its arguments (and fails a real uninstall, so the script stops
+            // before deleting anything); fake pgrep/pkill keep it away from any real LivePaper.
+            let root = try tempDir("uninstall-dev")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fm = FileManager.default
+            let app = root.appendingPathComponent("Fake.app"), bin = root.appendingPathComponent("bin"), log = root.appendingPathComponent("cli.log")
+            func script(_ text: String, _ url: URL) throws {
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data((text + "\n").utf8).write(to: url)
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path)
+            }
+            try script("#!/bin/sh\necho \"$*\" >> '\(log.path)'\ncase \"$*\" in *--dry-run*) exit 0 ;; esac\nexit 3",
+                       app.appendingPathComponent("Contents/Helpers/livepaper"))
+            try script("#!/bin/sh\nexit 1", bin.appendingPathComponent("pgrep"))
+            try script("#!/bin/sh\necho \"pkill $*\" >> '\(log.path)'\nexit 1", bin.appendingPathComponent("pkill"))
+            var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("LIVEPAPER_") }
+            env["PATH"] = bin.path + ":/usr/bin:/bin"
+            env["HOME"] = root.path
+            let uninstallDev = CLITestSupport.repo.appendingPathComponent("scripts/uninstall-dev.sh").path
+            func run(_ args: [String], stdin: String? = nil) throws -> (CLITestSupport.Result, [String]) {
+                try? fm.removeItem(at: log)
+                let r = try CLITestSupport.exec(URL(fileURLWithPath: "/bin/bash"), [uninstallDev] + args + ["--app", app.path],
+                                                environment: env, stdin: stdin)
+                let calls = ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+                return (r, calls)
+            }
+            var (r, calls) = try run(["--dry-run"])
+            try expectEqual(r.status, 0)
+            try expectEqual(calls, ["uninstall --keep-scenes --dry-run"])
+            // Default: scenes kept, no question (the app and the rest go).
+            (r, calls) = try run([])
+            try expectEqual(calls, ["uninstall --keep-scenes --yes"])
+            // --delete-scenes: the plan, then a question; EOF or "n" changes nothing.
+            for answer in [nil, "n\n"] as [String?] {
+                (r, calls) = try run(["--delete-scenes"], stdin: answer)
+                try expectEqual(r.status, 1)
+                try expectEqual(calls, ["uninstall --dry-run"])
+                try expect(r.out.contains("Nothing was changed"), r.out)
+            }
+            (r, calls) = try run(["--delete-scenes"], stdin: "y\n")
+            try expectEqual(calls, ["uninstall --dry-run", "uninstall --yes"])
+            (r, calls) = try run(["--delete-scenes", "--yes"])
+            try expectEqual(calls, ["uninstall --yes"])
+            try expect(fm.fileExists(atPath: app.path), "the fake CLI failed the uninstall, so the app was never deleted")
+        },
     ] }
 
     // MARK: - Commands

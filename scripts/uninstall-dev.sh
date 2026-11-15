@@ -1,13 +1,18 @@
 #!/bin/bash
-# Removes LivePaper completely: everything `livepaper uninstall` undoes (helper, screen saver,
-# lock-keys setting and other changed preferences, LivePaper's data), then the app itself.
+# Removes LivePaper: everything `livepaper uninstall` undoes (helper, screen saver, lock-keys setting
+# and other changed preferences, LivePaper's data), then the app itself. Your scene library and
+# preferences are KEPT unless you pass --delete-scenes.
 #
-#   scripts/uninstall-dev.sh [--keep-scenes] [--dry-run] [--app PATH]
+#   scripts/uninstall-dev.sh [--delete-scenes] [--yes] [--dry-run] [--app PATH]
 #
-#   --keep-scenes  keep the scene library and preferences in ~/Library/Application Support/LivePaper
-#   --dry-run      show what would happen; change nothing
-#   --app PATH     the installed bundle (default: /Applications/LivePaper.app or
-#                  ~/Applications/LivePaper.app, whichever exists)
+#   --delete-scenes  also delete the scene library (every scene you or an AI made) and preferences in
+#                    ~/Library/Application Support/LivePaper — permanently, not to the Trash. Asks
+#                    first, after showing what uninstall would do, unless --yes is given
+#   --yes            don't ask (only matters with --delete-scenes)
+#   --dry-run        show what would happen; change nothing
+#   --app PATH       the installed bundle (default: /Applications/LivePaper.app or
+#                    ~/Applications/LivePaper.app, whichever exists)
+#   --keep-scenes    accepted for compatibility; keeping the scenes is the default
 #
 # The bundled CLI does the uninstall, so it always matches the installed version. If no installed
 # app is found, the CLI from build/LivePaper.app is used to clean up what is left.
@@ -15,14 +20,17 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP=""
-CLI_ARGS=(--yes)
+KEEP=1
+YES=0
 DRY=0
 while [ $# -gt 0 ]; do
   case "$1" in
-    --keep-scenes) CLI_ARGS+=(--keep-scenes); shift ;;
-    --dry-run) CLI_ARGS+=(--dry-run); DRY=1; shift ;;
+    --keep-scenes) KEEP=1; shift ;;
+    --delete-scenes) KEEP=0; shift ;;
+    --yes|-y) YES=1; shift ;;
+    --dry-run) DRY=1; shift ;;
     --app) APP="$2"; shift 2 ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown option: $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -40,6 +48,27 @@ for a in ${APPS[@]+"${APPS[@]}"} "$ROOT/build/LivePaper.app"; do
   if [ -x "$a/Contents/Helpers/livepaper" ]; then CLI="$a/Contents/Helpers/livepaper"; break; fi
 done
 [ -n "$CLI" ] || { echo "✗ no LivePaper.app found (looked in /Applications, ~/Applications and build/)" >&2; exit 1; }
+
+CLI_ARGS=()
+if [ "$KEEP" = 1 ]; then CLI_ARGS+=(--keep-scenes); fi
+if [ "$DRY" = 1 ]; then
+  CLI_ARGS+=(--dry-run)
+else
+  # Deleting the scenes can't be undone: show the plan and ask before changing anything (including
+  # quitting the app). EOF or anything but y/yes is a no.
+  if [ "$KEEP" = 0 ] && [ "$YES" = 0 ]; then
+    "$CLI" uninstall --dry-run
+    echo
+    echo "This also deletes your scene library ($HOME/Library/Application Support/LivePaper/Library) permanently."
+    answer=""
+    read -r -p "Delete LivePaper and all your scenes? [y/N] " answer || true
+    case "$answer" in
+      y|Y|yes|YES|Yes) ;;
+      *) echo "Nothing was changed. (Without --delete-scenes your scenes are kept.)"; exit 1 ;;
+    esac
+  fi
+  CLI_ARGS+=(--yes)
+fi
 
 # The app must not run while its files and settings are removed (it would recreate some).
 if [ "$DRY" = 0 ] && pgrep -x LivePaper >/dev/null 2>&1; then
