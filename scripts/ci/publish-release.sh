@@ -209,7 +209,12 @@ if [ "$CHANNEL" = nightly ]; then
     [ "$now" = "$GITHUB_SHA" ] || fail "the nightly tag points at ${now:-nothing}, not $GITHUB_SHA"
   fi
 else
-  workflows_match_main || fail "$TAG's .github/workflows differ from main's current ones, and GitHub doesn't let the workflow's token publish such a release. Tag main's current commit instead (scripts/release.sh), or attach this run's packages to a release by hand."
+  if ! workflows_match_main; then
+    # Try anyway (GitHub may accept workflows that match another branch), but say why it may fail.
+    msg="$TAG's .github/workflows differ from main's current ones: GitHub may refuse to let the workflow's token publish it (404 or 403 below). Then tag main's current commit instead (scripts/release.sh), or attach this run's packages to a release by hand."
+    echo "! $msg" >&2
+    [ -z "${GITHUB_ACTIONS:-}" ] || echo "::warning title=Publish::$msg"
+  fi
   if [ -n "$STATE" ]; then
     # A re-run: the release (maybe a draft left by a failed upload) gets the new assets; its notes stay.
     gh_do release upload "$TAG" "${FILES[@]}" --clobber

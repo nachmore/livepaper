@@ -37,6 +37,8 @@ The workflow runs on every push (any branch, `v*` tags) and every pull request, 
 
 A newer push to the same branch or pull request cancels the older run's build. Publishing is never
 cancelled half-way: publishes of the same ref queue, and a newer one waiting replaces an older one.
+Re-run only the newest run of `main`: an older run's re-run publishes nothing (the nightly never
+goes backwards), but while it waits it can take the place of the newest run's queued publish.
 
 **Nightly** is one release, tagged `nightly`. Each run replaces it — the old release and its tag
 are deleted and a new pre-release `Nightly 0.1.0 (build 142, abc1234)` is created at the new commit
@@ -57,8 +59,10 @@ contributors, the full-changelog link; GitHub only lists pull requests, hence th
 first beta and the first release have no predecessor: their notes list the history instead, without
 GitHub's part (its automatic starting point could be the nightly). Re-running a failed publish
 replaces the assets of the release it already created and leaves its notes alone. For the same
-GitHub rule, a tag whose `.github/workflows/` differ from `main`'s current ones can't be published by
-CI (the job says so): tag `main`'s newest commit, as `scripts/release.sh` does.
+GitHub rule, a tag whose `.github/workflows/` differ from `main`'s current ones may not be publishable
+by CI (the job warns): tag `main`'s newest commit, as `scripts/release.sh` does. (A GitHub App or
+personal token with the *Workflows* permission would lift the rule; the workflow deliberately uses
+only `GITHUB_TOKEN`.)
 
 ## Cutting a beta or a release
 
