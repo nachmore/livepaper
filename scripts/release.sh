@@ -21,7 +21,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-usage() { sed -n '2,20p' "$0" >&2; exit 2; }
+usage() { sed -n '2,19p' "$0" >&2; exit 2; }
 fail() { echo "✗ $*" >&2; exit 1; }
 
 KIND="" WANT="" YES=0 FETCH=1 DRY=0 PUSH=0
@@ -34,6 +34,7 @@ while [ $# -gt 0 ]; do
     --push) PUSH=1 ;;
     -h|--help) usage ;;
     [0-9]*) [ -z "$WANT" ] || usage; WANT="$1" ;;
+    v[0-9]*) fail "give the version without the v: scripts/release.sh $KIND ${1#v}" ;;
     *) echo "unknown argument: $1" >&2; usage ;;
   esac
   shift
@@ -135,7 +136,7 @@ if [ "$BUMP" = 1 ]; then
   echo "▸ committed VERSION $VERSION ($(git rev-parse --short HEAD))"
 fi
 # CI must accept the tag for this commit (same rule as the workflow).
-scripts/ci/version-from-ref.sh "refs/tags/$TAG" >/dev/null || fail "CI would reject $TAG (see above)"
+check="$(scripts/ci/version-from-ref.sh "refs/tags/$TAG" 2>&1 >/dev/null)" || { echo "$check" >&2; fail "CI would reject $TAG"; }
 if [ "$KIND" = beta ]; then MESSAGE="LivePaper $VERSION beta ${TAG##*.}"; else MESSAGE="LivePaper $VERSION"; fi
 git tag --annotate "$TAG" --message "$MESSAGE"
 echo "▸ tagged $TAG ($(git rev-parse --short "$TAG^{commit}"))"
