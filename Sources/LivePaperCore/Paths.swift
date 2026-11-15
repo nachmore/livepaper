@@ -26,6 +26,14 @@ public enum LPPaths {
         if let o = ProcessInfo.processInfo.environment["LIVEPAPER_SAVERS_DIR"], !o.isEmpty { return URL(fileURLWithPath: o) }
         return home.appendingPathComponent("Library/Screen Savers")
     }
+    /// Written by uninstall (outside supportRoot, which uninstall may delete). A helper that finds it
+    /// exits cleanly at launch so a still-registered login item can't resurrect LivePaper.
+    public static var uninstallMarker: URL {
+        if let o = ProcessInfo.processInfo.environment["LIVEPAPER_HOME"], !o.isEmpty {
+            return URL(fileURLWithPath: o).deletingLastPathComponent().appendingPathComponent("LivePaper.uninstalled")
+        }
+        return home.appendingPathComponent("Library/Application Support/LivePaper.uninstalled")
+    }
     public static var launchAgentsDir: URL {
         if let o = ProcessInfo.processInfo.environment["LIVEPAPER_LAUNCH_AGENTS_DIR"], !o.isEmpty { return URL(fileURLWithPath: o) }
         return home.appendingPathComponent("Library/LaunchAgents")
