@@ -21,8 +21,12 @@ saver**, if it was already running when the Mac locked: the login window draws i
 password field over the live saver. If no saver is running at that moment, you get the plain
 desktop picture. LivePaper builds on exactly that:
 
-* **The saver.** LivePaper installs `LivePaper.saver` into `~/Library/Screen Savers`. You select it
-  once in System Settings › Wallpaper › Screen Saver. The saver runs sandboxed and can only read
+* **The saver.** LivePaper installs `LivePaper.saver` into `~/Library/Screen Savers` and, when you
+  click *Make LivePaper my screen saver*, selects it for you: it edits only the screen-saver slots of
+  macOS's wallpaper store (your desktop picture is never touched), restarts WallpaperAgent (about a
+  second of blank desktop) and verifies the result. If that isn't possible (System Settings is open,
+  the setting is managed by your organisation, …) it falls back to a one-click guided step in
+  System Settings › Wallpaper › Screen Saver. The saver runs sandboxed and can only read
   its own bundle, so "publishing" compiles your playlist's scenes *into* the installed saver.
 * **Idle timeout — unchanged.** macOS starts the screen saver after your usual idle time (System
   Settings › Lock Screen). LivePaper never changes it (on managed Macs it may be set by your
@@ -62,8 +66,8 @@ quarantine flag, verifies the signature and restarts the helper if it was runnin
 open the app unless you pass `--launch`.
 `--link-cli` also links the `livepaper` command into `~/.local/bin`.
 
-On first launch LivePaper walks you through setup: it installs the screen saver, helps you select
-it, offers the lock-keys switch, starts the helper (System Settings may ask you to allow it under
+On first launch LivePaper walks you through setup: it installs the screen saver, selects it (or
+guides you if it can't), offers the lock-keys switch, starts the helper (System Settings may ask you to allow it under
 General › Login Items) and checks that a password is required immediately. Every step can be
 re-run from Settings and only changes what still needs it.
 

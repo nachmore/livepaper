@@ -131,7 +131,12 @@ directories and inject fakes for commands, preferences and login items.
   ai-settings.json                AISettings: Settings › AI (shared by the app, the CLI and sessions)
   publish.lock                    flock: one publish / saver install at a time (app and CLI may race)
   backups/
-    wallpaper-store-Index.plist   the wallpaper store before LivePaper first changed the selection
+    wallpaper-store-Index.plist   raw copy of the wallpaper store before LivePaper's first selection
+                                  (forensics only — NEVER restored wholesale; WallpaperAgent rewrites the
+                                  file constantly and a stale copy would clobber newer Desktop choices)
+    wallpaper-selection.json      per-slot manifest of the Idle slots LivePaper changed (original provider +
+                                  configuration); uninstall restores only slots that still point at LivePaper
+  wallpaper-store.lock            flock: one wallpaper-store apply at a time
     changed-defaults.json         every system preference LivePaper changed, with its previous value
                                   (including the lock keys, §7) — restored by uninstall
   render.sock                     RenderService socket (§8)
