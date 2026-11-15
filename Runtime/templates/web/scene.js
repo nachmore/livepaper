@@ -36,10 +36,10 @@ let rays = null;       // 1-px-tall strip of curtain "rays", stretched verticall
 LivePaper.scene({
   context: '2d',
 
-  // Called once the canvas exists, then resize() follows. Nothing here depends on the size.
-  setup(lp) {},
+  // setup(lp) would run once before the first resize(); this scene has no size-independent work
+  // beyond the module-level constants above.
 
-  // Called whenever the size or pixel density changes (including governor scale steps).
+  // Called after setup and whenever the size or pixel density changes (incl. governor scale steps).
   resize(lp) {
     const horizon = lp.h * HORIZON;
     sky = buildSky(lp, horizon);
@@ -50,8 +50,8 @@ LivePaper.scene({
     rays = buildRays(aw);
   },
 
-  // This scene derives everything from lp.t, so it needs no update(). Simulations that do keep
-  // state should advance it here using dt only (stills replay update() in 1/30 s steps).
+  // No update(lp, dt) either: everything is derived from lp.t. A scene that simulates would add it
+  // here and advance its state by dt only (stills replay update() in 1/30 s steps from t = 0).
 
   draw(lp) {
     const ctx = lp.ctx;
