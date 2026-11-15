@@ -46,6 +46,9 @@ public final class WorkspaceBuilder: @unchecked Sendable {
     public static let exampleCount = 3
     /// Workspaces are kept this long for debugging, then pruned.
     public static let retention: TimeInterval = 7 * 86_400
+    /// The candidate's `scene/.check/` (full-size stills: 40–80 MB per session) only matters while
+    /// the session is reviewed; it goes after a day, the logs and scene stay for `retention`.
+    public static let checkRetention: TimeInterval = 86_400
 
     public let runtimeDirectory: URL
     public let builtinScenesDirectory: URL
@@ -114,15 +117,21 @@ public final class WorkspaceBuilder: @unchecked Sendable {
         }
     }
 
-    /// Deletes workspaces older than `retention` (by modification date).
-    public func pruneWorkspaces(now: Date = Date(), retention: TimeInterval = WorkspaceBuilder.retention) {
+    /// Deletes workspaces older than `retention` and the check output (stills) of those older than
+    /// `checkRetention`, by the workspace directory's modification date.
+    public func pruneWorkspaces(now: Date = Date(), retention: TimeInterval = WorkspaceBuilder.retention,
+                                checkRetention: TimeInterval = WorkspaceBuilder.checkRetention) {
         let fm = FileManager.default
         guard let entries = try? fm.contentsOfDirectory(at: workspacesDirectory, includingPropertiesForKeys: [.contentModificationDateKey],
                                                         options: [.skipsHiddenFiles]) else { return }
         for url in entries {
-            guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate,
-                  now.timeIntervalSince(date) > retention else { continue }
-            try? fm.removeItem(at: url)
+            guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate else { continue }
+            let age = now.timeIntervalSince(date)
+            if age > retention {
+                try? fm.removeItem(at: url)
+            } else if age > checkRetention {
+                try? fm.removeItem(at: AIWorkspace(root: url).scene.appendingPathComponent(SceneChecker.checkDirectory))
+            }
         }
     }
 

@@ -622,6 +622,19 @@ extension SelfTests {
                 do { _ = try builder.build(.modify(sceneID: "clip", prompt: "x"), sessionID: "s5"); throw TestFailure(description: "video") }
                 catch AIError.unsupported {}
                 try expectLibraryError({ _ = try builder.build(.create(prompt: "x"), sessionID: "s1") }) { if case .exists = $0 { return true }; return false }
+
+                // Pruning: stills go after a day, whole workspaces after a week.
+                for (id, days) in [("fresh", 0.1), ("yesterday", 2.0), ("old", 8.0)] {
+                    let w = try builder.build(.create(prompt: "x"), sessionID: id)
+                    try sb.write("png", to: w.scene.appendingPathComponent(".check/1512x982@2-t0.png"))
+                    try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-days * 86_400)], ofItemAtPath: w.root.path)
+                }
+                builder.pruneWorkspaces()
+                let left = { (id: String) in AIWorkspace(root: sb.workspaces.appendingPathComponent(id)) }
+                try expect(exists(left("fresh").scene.appendingPathComponent(".check/1512x982@2-t0.png")), "a fresh session keeps its stills")
+                try expect(exists(left("yesterday").scene.appendingPathComponent("scene.js")) && exists(left("yesterday").stdoutLog.deletingLastPathComponent()))
+                try expect(!exists(left("yesterday").scene.appendingPathComponent(".check")), "stills of a day-old session are pruned")
+                try expect(!exists(left("old").root), "week-old workspaces are deleted")
             }
         },
         TestCase(name: "core.ai.argv") {
