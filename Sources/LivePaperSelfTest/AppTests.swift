@@ -442,6 +442,185 @@ extension SelfTests {
                 try expect(wipe.items.allSatisfy { !$0.detail.contains(home + "/") }, "paths are ~-abbreviated")
             }
         },
+    ] + fullScreenPreview }
+
+    // MARK: - Full-screen preview (pure logic)
+
+    static var fullScreenPreview: [TestCase] { [
+        TestCase(name: "app.fullscreen.sequence-steps-and-wraps") {
+            var seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c"], start: "b", source: .library))
+            try expectEqual(seq.current, "b")
+            try expectEqual(seq.positionText, "2 of 3")
+            try expect(seq.step(1)); try expectEqual(seq.current, "c")
+            try expect(seq.step(1)); try expectEqual(seq.current, "a")   // wraps forward
+            try expect(seq.step(-1)); try expectEqual(seq.current, "c")  // wraps backward
+            try expect(seq.step(-4)); try expectEqual(seq.current, "b")  // any distance
+            try expectEqual(seq.positionText, "2 of 3")
+            var single = try unwrap(FullScreenPreviewSequence(ids: ["solo"], source: .playlist))
+            try expect(!single.canStep && !single.step(1), "one scene: nowhere to go")
+            try expectEqual(single.current, "solo")
+            try expectEqual(single.positionText, nil)
+            try expect(FullScreenPreviewSequence(ids: [], source: .library) == nil, "nothing to show")
+            let unknown = try unwrap(FullScreenPreviewSequence(ids: ["a", "b"], start: "zz", source: .library))
+            try expectEqual(unknown.current, "a")
+            let dupes = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "a", "c", "b"], start: "c", source: .playlist))
+            try expectEqual(dupes.ids, ["a", "b", "c"])
+            try expectEqual(dupes.current, "c")
+        },
+        TestCase(name: "app.fullscreen.sequence-drops-deleted-scenes") {
+            var seq = try unwrap(FullScreenPreviewSequence(ids: ["a", "b", "c", "d"], start: "b", source: .library))
+            try expect(seq.retain(available: ["a", "b", "c", "d", "extra"]))
+            try expectEqual(seq.ids, ["a", "b", "c", "d"])
+            try expect(seq.retain(available: ["a", "b", "d"]), "the current scene survives")
+            try expectEqual(seq.current, "b")
+            try expectEqual(seq.ids, ["a", "b", "d"])
+            try expect(seq.retain(available: ["a", "d"]), "current deleted → the next one")
+            try expectEqual(seq.current, "d")
+            try expect(seq.retain(available: ["a"]), "the last one deleted → wraps to the first")
+            try expectEqual(seq.current, "a")
+            try expect(!seq.retain(available: []), "nothing left")
+        },
+        TestCase(name: "app.fullscreen.library-order") {
+            let all = ["mine-1", "mine-2", "builtin-1", "builtin-2"]
+            try expectEqual(FullScreenPreviewSequence.libraryOrder(visible: ["mine-2", "builtin-1"], all: all, start: "builtin-1"),
+                            ["mine-2", "builtin-1"])
+            // A scene the grid doesn't show (filtered out) steps through the whole library.
+            try expectEqual(FullScreenPreviewSequence.libraryOrder(visible: ["mine-2"], all: all, start: "builtin-2"), all)
+            var settings = PlaylistSettings()
+            settings.showClock = false
+            settings.performance = .battery
+            let request = try unwrap(FullScreenPreviewRequest.library(start: "mine-2", visible: all, all: all, playlist: settings))
+            try expectEqual(request.sequence.source, .library)
+            try expectEqual(request.sequence.current, "mine-2")
+            try expectEqual(request.showClock, false)
+            try expectEqual(request.performance, .battery)
+            // The sample library's grid order (user scenes first) is what ← → follow.
+            let entries = sampleEntries()
+            let visible = LibraryQuery().apply(entries).map(\.id)
+            let start = try unwrap(visible.last)
+            var fromGrid = try unwrap(FullScreenPreviewRequest.library(start: start, visible: visible, all: entries.map(\.id),
+                                                                       playlist: PlaylistSettings())).sequence
+            fromGrid.step(1)
+            try expectEqual(fromGrid.current, visible[0])
+        },
+        TestCase(name: "app.fullscreen.playlist-order") {
+            let available = ["a", "b", "c", "d"]
+            var settings = PlaylistSettings()
+            settings.mode = .sequence
+            settings.sceneIDs = ["c", "gone", "a"]
+            settings.showClock = false
+            settings.performance = .balanced
+            let request = try unwrap(FullScreenPreviewRequest.playlist(settings, available: available))
+            try expectEqual(request.sequence.source, .playlist)
+            try expectEqual(request.sequence.ids, ["c", "a"])   // the playlist's order, deleted scenes left out
+            try expectEqual(request.sequence.current, "c")
+            try expectEqual(request.showClock, false)
+            try expectEqual(request.performance, .balanced)
+            settings.sceneIDs = []
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available, start: "b")).sequence.ids,
+                            available)   // "all scenes"
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available, start: "b")).sequence.current, "b")
+            settings.mode = .single
+            settings.sceneIDs = ["d"]
+            try expectEqual(try unwrap(FullScreenPreviewRequest.playlist(settings, available: available)).sequence.ids, ["d"])
+            try expect(FullScreenPreviewRequest.playlist(settings, available: []) == nil, "nothing to preview")
+        },
+        TestCase(name: "app.fullscreen.hint-visibility") {
+            let t0 = Date(timeIntervalSince1970: 1_000)
+            func at(_ s: TimeInterval) -> Date { t0.addingTimeInterval(s) }
+            var hint = IdleVisibility(timeout: 3)
+            try expect(!hint.isVisible)
+            try expectEqual(hint.noteActivity(at: t0), .init(visible: true, armTimer: at(3)))       // opened: shows, one timer
+            try expectEqual(hint.noteActivity(at: at(1)), .init())                                   // moving: no new timer
+            try expectEqual(hint.noteActivity(at: at(1.5)), .init())
+            try expectEqual(hint.timerFired(at: at(3)), .init(armTimer: at(4.5)))                   // too early: re-armed for the rest
+            try expect(hint.isVisible)
+            try expectEqual(hint.timerFired(at: at(4.5)), .init(visible: false))                    // 3 s without movement: hides
+            try expect(!hint.isVisible && hint.timerDate == nil, "hidden, nothing scheduled")
+            try expectEqual(hint.timerFired(at: at(9)), .init())                                     // a stale timer does nothing
+            try expectEqual(hint.noteActivity(at: at(10)), .init(visible: true, armTimer: at(13)))  // moving again: back
+            try expectEqual(hint.timerFired(at: at(12.99)), .init(visible: false))                  // a hair early counts
+            hint.reset()
+            try expect(!hint.isVisible && hint.timerDate == nil && hint.lastActivity == nil)
+            var cursor = IdleVisibility(timeout: 2)
+            _ = cursor.noteActivity(at: t0)
+            try expectEqual(cursor.timerFired(at: at(2)), .init(visible: false))
+        },
+        TestCase(name: "app.fullscreen.hint-text") {
+            try expectEqual(FullScreenHint.text(FullScreenHint.items(canStep: true, clockOn: true, lockPreview: false)),
+                            "\u{2190} \u{2192} scenes \u{00B7} C clock \u{00B7} L lock-screen preview \u{00B7} Esc close")
+            try expectEqual(FullScreenHint.text(FullScreenHint.items(canStep: false, clockOn: true, lockPreview: false)),
+                            "C clock \u{00B7} L lock-screen preview \u{00B7} Esc close")
+            let toggled = FullScreenHint.items(canStep: true, clockOn: false, lockPreview: true)
+            try expectEqual(FullScreenHint.text(toggled),
+                            "\u{2190} \u{2192} scenes \u{00B7} C clock off \u{00B7} L lock-screen preview on \u{00B7} Esc close")
+            try expectEqual(toggled.filter(\.isActive).map(\.id), ["L"])
+            try expectEqual(Set(toggled.map(\.id)).count, toggled.count)   // stable, unique ids for ForEach
+        },
+        TestCase(name: "app.fullscreen.screen-choice") {
+            // Primary 1512×982 at the origin, a 2560×1440 display to its right, one above-left.
+            let primary = CGRect(x: 0, y: 0, width: 1512, height: 982)
+            let right = CGRect(x: 1512, y: -200, width: 2560, height: 1440)
+            let above = CGRect(x: -400, y: 982, width: 1920, height: 1080)
+            let screens = [primary, right, above]
+            let mouseOnPrimary = CGPoint(x: 700, y: 400)
+            // The window's screen: the one it overlaps most, wherever the pointer is.
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .window(CGRect(x: 1300, y: 100, width: 1100, height: 700)),
+                                                         pointer: mouseOnPrimary), 1)
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .window(CGRect(x: 100, y: 100, width: 900, height: 600)),
+                                                         pointer: CGPoint(x: 2000, y: 300)), 0)
+            // No window frame, or a window off every screen: the pointer decides.
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .window(nil), pointer: CGPoint(x: 0, y: 1500)), 2)
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .window(CGRect(x: 9000, y: 9000, width: 10, height: 10)),
+                                                         pointer: CGPoint(x: 2000, y: 0)), 1)
+            // Menu bar: the screen under the pointer, its top edge (menu bar) included; edges between screens go to one.
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .pointer, pointer: CGPoint(x: 3000, y: 1240)), 1)
+            try expectEqual(FullScreenScreenChoice.index(screens: [primary, right], origin: .pointer, pointer: CGPoint(x: 700, y: 982)), 0)
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .pointer, pointer: CGPoint(x: 1512, y: 500)), 1)
+            // Off every screen: the nearest; no screens at all: nothing.
+            try expectEqual(FullScreenScreenChoice.index(screens: screens, origin: .pointer, pointer: CGPoint(x: 5000, y: 0)), 1)
+            try expectEqual(FullScreenScreenChoice.index(screens: [], origin: .pointer, pointer: .zero), nil)
+            try expectEqual(FullScreenScreenChoice.index(screens: [primary], origin: .window(nil), pointer: CGPoint(x: -50, y: -50)), 0)
+        },
+        TestCase(name: "app.fullscreen.renders-like-the-saver") {
+            let battery = SaverPowerState(onBattery: true, lowPowerMode: false)
+            let ac = SaverPowerState(onBattery: false, lowPowerMode: false)
+            // Byte for byte what WebSceneHost injects: SaverWebConfig + the lock-UI line.
+            let profile = SaverPerformance.resolve(.automatic, power: battery, preview: false)
+            let saver = SaverWebConfig(showClock: true, clockPosition: .bottomLeft, profile: profile, seed: 42, power: battery)
+            try expectEqual(FullScreenSceneConfig.webConfigScript(showClock: true, clockPosition: .bottomLeft, performance: .automatic,
+                                                                  power: battery, seed: 42, lockUI: false),
+                            saver.userScript + "window.LIVEPAPER_CONFIG.lockUI = false;")
+            func config(_ script: String) throws -> [String: Any] {
+                let json = try unwrap(script.split(separator: ";").first?.split(separator: "=", maxSplits: 1).last)
+                return try unwrap(try JSONSerialization.jsonObject(with: Data(json.utf8)) as? [String: Any])
+            }
+            let onBattery = try config(FullScreenSceneConfig.webConfigScript(showClock: false, clockPosition: .top, performance: .automatic,
+                                                                             power: battery, seed: 7, lockUI: true))
+            try expectEqual(onBattery["fps"] as? Int, 30)
+            try expectEqual(onBattery["scale"] as? Double, 0.75)
+            try expectEqual(onBattery["clock"] as? Bool, false)
+            try expectEqual(onBattery["clockPosition"] as? String, "top")
+            try expectEqual(onBattery["power"] as? String, "battery")
+            try expect(onBattery["preview"] == nil, "full screen is not a small preview (lp.env.preview stays false)")
+            let best = try config(FullScreenSceneConfig.webConfigScript(showClock: true, clockPosition: .none, performance: .best,
+                                                                        power: battery, seed: 7, lockUI: false))
+            try expectEqual(best["fps"] as? Int, 60)
+            try expectEqual(best["scale"] as? Double, 1)
+            try expectEqual(best["clockPosition"] as? String, "none")
+            let balanced = try config(FullScreenSceneConfig.webConfigScript(showClock: true, clockPosition: .top, performance: .balanced,
+                                                                            power: ac, seed: 7, lockUI: false))
+            try expectEqual(balanced["fps"] as? Int, 60)
+            try expectEqual(balanced["scale"] as? Double, 0.75)
+            // C and L reach a running page through guarded host calls.
+            let state = FullScreenSceneConfig.stateScript(showClock: false, lockUI: true)
+            try expect(state.contains("h.config({\"clock\":false})"), state)
+            try expect(state.contains(SaverJS.lockUI(true)), state)
+            try expect(FullScreenSceneConfig.nativeClockVisible(showClock: true, lockUI: false))
+            try expect(!FullScreenSceneConfig.nativeClockVisible(showClock: true, lockUI: true), "the lock UI hides the video clock")
+            try expect(!FullScreenSceneConfig.nativeClockVisible(showClock: false, lockUI: false))
+            for _ in 0..<50 { try expect((1...100_000).contains(FullScreenSceneConfig.randomSeed())) }
+        },
     ] }
 
     // MARK: - AppModel with mock services

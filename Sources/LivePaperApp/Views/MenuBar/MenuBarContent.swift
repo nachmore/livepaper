@@ -1,5 +1,5 @@
-// MenuBarContent — the menu-bar extra: lock now, what the screen saver plays, next scene, AI jobs,
-// and the way back into the app.
+// MenuBarContent — the menu-bar extra: lock now, what the screen saver plays, next scene, a
+// full-screen preview of the playlist, AI jobs, and the way back into the app.
 import AppKit
 import LivePaperCore
 import SwiftUI
@@ -20,6 +20,9 @@ struct MenuBarContent: View {
         Text("Screen saver: \(model.playlistSummary)")
         Button("Next Scene") { Task { await model.advanceScene() } }
             .disabled(!model.canAdvanceScene || model.isPublishing)
+        // What the screen saver plays, full screen on the display under the pointer.
+        Button("Preview Full Screen") { FullScreenPreviewLauncher.previewPlaylist(model.playlist, model: model, fromMenuBar: true) }
+            .disabled(!FullScreenPreviewLauncher.canPreview(model.playlist, model: model))
         Divider()
         aiSection
         Divider()

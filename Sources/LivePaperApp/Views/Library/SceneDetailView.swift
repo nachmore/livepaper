@@ -63,7 +63,12 @@ private struct SceneDetailContent: View {
         .task(id: DetailsKey(entry: entry, revision: model.detailsRevision)) {
             details = await model.details(for: entry.item)
         }
+        .focusedSceneValue(\.fullScreenPreview, FullScreenPreviewAction { [model, id = entry.id] in
+            FullScreenPreviewLauncher.previewScene(id, model: model)
+        })
     }
+
+    private func previewFullScreen() { FullScreenPreviewLauncher.previewScene(entry.id, model: model) }
 
     // MARK: preview
 
@@ -75,8 +80,11 @@ private struct SceneDetailContent: View {
                 .overlay {
                     ScenePreview(item: entry.item, quality: .full, showClock: true, cornerRadius: 14) { message in previewError = message }
                 }
+                .overlay(alignment: .bottomTrailing) { fullScreenButton }
                 .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
                 .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.primary.opacity(0.1)))
+                .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .onTapGesture(count: 2, perform: previewFullScreen)
                 .shadow(color: .black.opacity(0.18), radius: 14, y: 6)
                 .frame(maxWidth: .infinity, maxHeight: 460)
                 .animation(.snappy, value: aspect)
@@ -105,6 +113,23 @@ private struct SceneDetailContent: View {
                 }
             }
         }
+    }
+
+    /// On the preview itself, like a video player's: the scene on the whole screen, as the saver shows it.
+    private var fullScreenButton: some View {
+        Button(action: previewFullScreen) {
+            Label("Preview Full Screen", systemImage: FullScreenPreviewSymbol.name)
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 7)
+                .background(.black.opacity(0.5), in: Capsule())
+                .overlay(Capsule().strokeBorder(.white.opacity(0.18)))
+                .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .padding(12)
+        .help("Show the scene on the whole screen, exactly as the screen saver will (\u{21E7}\u{2318}F, or double-click the preview)")
     }
 
     // MARK: header + actions
