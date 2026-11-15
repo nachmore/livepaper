@@ -35,6 +35,24 @@ public enum LibraryError: Error, LocalizedError, Sendable {
     }
 }
 
+/// What the library already has for a scene package someone opened (ScenePackageComparison).
+public enum SceneImportMatch: Sendable, Equatable {
+    /// The package is this library or built-in scene, or a copy of it with the same contents:
+    /// open it rather than importing a duplicate.
+    case same(SceneItem)
+    /// Another version of a user scene: its id (or an earlier import's `id-2`, …) and its
+    /// `created`, but different contents (ScenePackageComparison.sameLineage).
+    case otherVersion(SceneItem)
+}
+
+/// What opening a scene package did (LibraryServicing.openPackage(at:)).
+public enum SceneOpenResult: Sendable, Equatable {
+    /// The library already has the scene, or another version of it: nothing was imported.
+    case existing(SceneImportMatch)
+    /// The scene was new to the library and has been imported.
+    case imported(SceneItem)
+}
+
 public protocol LibraryServicing: AnyObject, Sendable {
     /// Built-in + user scenes, user scenes first, each group sorted by name.
     func scenes() throws -> [SceneItem]
@@ -50,6 +68,13 @@ public protocol LibraryServicing: AnyObject, Sendable {
     /// Replace a user scene's contents with another package (AI "modify" accept). Keeps history.
     func replaceContents(id: String, with package: URL) throws -> SceneItem
     func importPackage(at url: URL) throws -> SceneItem
+    /// The scene a package to be imported already is, if any (nil: import it). Only scene
+    /// packages are compared; archives and invalid packages return nil (import reports them).
+    func existingScene(matching url: URL) throws -> SceneImportMatch?
+    /// Opening a package (double-click in Finder, Import Scene… in the app): `existingScene`, and
+    /// the import when that finds nothing, as one step, so the same new package opened twice at
+    /// once is imported once.
+    func openPackage(at url: URL) throws -> SceneOpenResult
     func exportPackage(id: String, to url: URL) throws
 }
 

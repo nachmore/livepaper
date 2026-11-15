@@ -435,19 +435,92 @@ final class AppModel {
         }
     }
 
+    /// Opening a scene package (double-click in Finder, Import Scene… in the File menu and the
+    /// Library toolbar). A scene the library already has — the package itself, or a copy with the
+    /// same contents — just opens. Another version of a scene in the library opens that scene and
+    /// offers to replace it or import the package as a copy. Anything else is imported. The check
+    /// and the import are one library step (`openPackage`), so opening a new package twice at once
+    /// imports it once.
+    func openScenePackage(at url: URL) async {
+        let library = services.library
+        let result: SceneOpenResult
+        do {
+            result = try await offMain { try library.openPackage(at: url) }
+        } catch {
+            banners.error("Couldn't import \(url.lastPathComponent)", error)
+            return
+        }
+        switch result {
+        case .imported(let item):
+            await didImport(item)
+        case .existing(.same(let item)):
+            await show(item)
+            banners.post(.info, "\u{201C}\(item.manifest.name)\u{201D} is already in your library")
+        case .existing(.otherVersion(let item)):
+            await show(item)
+            banners.post(.warning, "\u{201C}\(item.manifest.name)\u{201D} is already in your library",
+                         message: "\(url.lastPathComponent) is a different version of it.",
+                         actions: [.init(title: "Replace with This Version") { [weak self] in Task { await self?.replaceScene(item.id, with: url) } },
+                                   .init(title: "Import as a Copy") { [weak self] in Task { await self?.importPackage(at: url) } }])
+        }
+    }
+
+    /// Shows a scene, loading the library first when it doesn't know the scene yet (a package
+    /// opened from Finder while LivePaper was still starting).
+    private func show(_ item: SceneItem) async {
+        if entry(id: item.id) == nil { await reloadLibrary(quiet: true) }
+        showScene(item.id)
+    }
+
+    /// Replaces a library scene with a package's contents (its previous version stays in history).
+    func replaceScene(_ id: String, with url: URL) async {
+        let library = services.library
+        do {
+            let item = try await offMain { try library.replaceContents(id: id, with: url) }
+            await didChangeContents(of: item)
+            showScene(item.id)
+            banners.post(.success, "Updated \u{201C}\(item.manifest.name)\u{201D}",
+                         message: "The previous version is kept in the scene\u{2019}s history.")
+            await republishIfInPlaylist(item.id)
+        } catch {
+            banners.error("Couldn't replace the scene", error) { [weak self] in Task { await self?.replaceScene(id, with: url) } }
+        }
+    }
+
+    /// A scene's files were written (Replace, AI accept): drop what was derived from the old ones.
+    private func didChangeContents(of item: SceneItem) async {
+        previewHTMLCache = previewHTMLCache.filter { !$0.key.hasPrefix(item.id + "-") }
+        thumbnailRevision[item.id, default: 0] += 1
+        detailsRevision += 1
+        await reloadLibrary()
+    }
+
+    /// The saver plays the copies compiled when the playlist was published, so a scene in the
+    /// playlist whose contents changed is published again (quietly; a scene that is no longer
+    /// playable is still reported). Nothing happens while the saver isn't installed.
+    private func republishIfInPlaylist(_ id: String) async {
+        if !installStatusLoaded { await refreshInstallStatus() }
+        guard installStatus.saverInstalled, isInPlaylist(id) else { return }
+        await savePlaylist(playlist, announce: false)
+    }
+
     @discardableResult
     func importPackage(at url: URL) async -> SceneItem? {
         let library = services.library
         do {
             let item = try await offMain { try library.importPackage(at: url) }
-            await reloadLibrary()
-            banners.post(.success, "Imported \u{201C}\(item.manifest.name)\u{201D}",
-                         actions: [.init(title: "Show") { [weak self] in self?.showScene(item.id) }])
+            await didImport(item)
             return item
         } catch {
             banners.error("Couldn't import \(url.lastPathComponent)", error)
             return nil
         }
+    }
+
+    private func didImport(_ item: SceneItem) async {
+        await reloadLibrary()
+        banners.post(.success, "Imported \u{201C}\(item.manifest.name)\u{201D}",
+                     actions: [.init(title: "Show") { [weak self] in self?.showScene(item.id) }])
     }
 
     /// Imports a video file as a new scene, reporting progress through `videoImport`.
@@ -991,14 +1064,12 @@ final class AppModel {
                 }
             }
             session.resolution = .accepted(sceneID: item.id)
-            previewHTMLCache = previewHTMLCache.filter { !$0.key.hasPrefix(item.id + "-") }
-            thumbnailRevision[item.id, default: 0] += 1
-            detailsRevision += 1
-            await reloadLibrary()
+            await didChangeContents(of: item)
             let verb = session.isModify ? "Updated" : "Added"
             banners.post(.success, "\(verb) \u{201C}\(item.manifest.name)\u{201D}",
                          actions: [.init(title: "Show") { [weak self] in self?.showScene(item.id) },
                                    .init(title: "Use as Screen Saver") { [weak self] in Task { await self?.useAsScreenSaver(item.id) } }])
+            if session.isModify { await republishIfInPlaylist(item.id) }
             return item
         } catch {
             banners.error(session.isModify ? "Couldn't replace the scene" : "Couldn't add the scene", error) { [weak self] in

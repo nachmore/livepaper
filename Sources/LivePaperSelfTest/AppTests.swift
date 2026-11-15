@@ -17,6 +17,28 @@ extension SelfTests {
     // MARK: - Pure logic
 
     static var appLogic: [TestCase] { [
+        TestCase(name: "app.banners.keep-pending-decisions") {
+            try MainActor.assumeIsolated {
+                // Opening many packages at once: the warning that needs a decision outlives the
+                // "Imported" banners that follow it; the newest banner is always shown.
+                let center = BannerCenter()
+                center.post(.warning, "\u{201C}Lake\u{201D} is already in your library", message: "lake.lpscene is a different version of it.",
+                            actions: [.init(title: "Replace with This Version") {}, .init(title: "Import as a Copy") {}])
+                for n in 1...6 { center.post(.success, "Imported \u{201C}Scene \(n)\u{201D}") }
+                try expectEqual(center.banners.count, BannerCenter.maxVisible)
+                try expectEqual(center.banners.first?.style, .warning)
+                try expectEqual(center.banners.last?.title, "Imported \u{201C}Scene 6\u{201D}")
+                // Then plain warnings go before ones with actions, and only then the oldest.
+                center.post(.warning, "Plain warning")
+                center.post(.error, "Failed 1", message: "x", actions: [.init(title: "Try Again") {}])
+                center.post(.error, "Failed 2", message: "x", actions: [.init(title: "Try Again") {}])
+                try expectEqual(center.banners.map(\.title), ["\u{201C}Lake\u{201D} is already in your library", "Plain warning", "Failed 1", "Failed 2"])
+                center.post(.error, "Failed 3", message: "x", actions: [.init(title: "Try Again") {}])
+                try expectEqual(center.banners.map(\.title), ["\u{201C}Lake\u{201D} is already in your library", "Failed 1", "Failed 2", "Failed 3"])
+                center.post(.info, "Newest")
+                try expectEqual(center.banners.map(\.title), ["Failed 1", "Failed 2", "Failed 3", "Newest"])
+            }
+        },
         TestCase(name: "app.hotkey.accepts-combos") {
             let ctrlCmd = HotkeyRecorder.FlagBit.control | HotkeyRecorder.FlagBit.command
             try expectEqual(HotkeyRecorder.evaluate(keyCode: 37, rawFlags: ctrlCmd), .accepted(.controlCommandL))
@@ -935,6 +957,89 @@ extension SelfTests {
                 try expect(model.banners.banners.contains { $0.style == .error }, "built-ins can't be deleted")
             }
         },
+        TestCase(name: "app.model.open-package-already-imported") {
+            try withModel("open-package") { model, fx in
+                var copy: SceneItem?
+                try awaitMain { copy = await model.clone("aurora-lake", name: "Lake") }
+                let item = try unwrap(copy)
+                let exported = fx.root.appendingPathComponent("Downloads/lake.lpscene")
+                try FileManager.default.createDirectory(at: exported.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try awaitMain { await model.export(item.id, to: exported) }
+                let before = model.entries.count
+                // Double-clicking the same scene (a copy, or the library's own package) opens it.
+                for url in [exported, item.packageURL] {
+                    model.libraryPath = []
+                    model.section = .playlist
+                    try awaitMain { await model.openScenePackage(at: url) }
+                    try expectEqual(model.entries.count, before)
+                    try expectEqual(model.section, .library)
+                    try expectEqual(model.libraryPath, [item.id])
+                    try expect(model.banners.banners.last?.title.contains("already in your library") == true)
+                }
+                // A different version of it: shown, with Replace and Import as a Copy.
+                let js = exported.appendingPathComponent("scene.js")
+                try Data("// edited elsewhere\n".utf8).write(to: js)
+                model.libraryPath = []
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before)
+                try expectEqual(model.libraryPath, [item.id])
+                let banner = try unwrap(model.banners.banners.last)
+                try expectEqual(banner.style, .warning)
+                try expectEqual(banner.actions.map(\.title), ["Replace with This Version", "Import as a Copy"])
+                // Replace: the scene is in the screen saver's playlist, so the saver gets the new version.
+                let install = try unwrap(fx.services.install as? MockInstallService)
+                try install.installSaver()
+                try awaitMain { await model.refreshInstallStatus() }
+                try awaitMain { await model.useAsScreenSaver(item.id) }
+                let published = try unwrap(model.lastPublished?.generation)
+                try awaitMain { await model.replaceScene(item.id, with: exported) }
+                try expectEqual(model.entries.count, before)
+                try expectEqual(String(decoding: try Data(contentsOf: item.packageURL.appendingPathComponent("scene.js")), as: UTF8.self),
+                                "// edited elsewhere\n")
+                try expect((model.lastPublished?.generation ?? 0) > published, "republished after Replace")
+                // Now identical again: it just opens.
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before)
+                // A new scene still imports.
+                try Data("// another scene\n".utf8).write(to: js)
+                var m = try SceneManifest.load(package: exported)
+                m.id = "brand-new"; m.name = "Brand New"
+                try m.write(package: exported)
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before + 1)
+                try expect(model.entry(id: "brand-new") != nil, "imported")
+                // Another scene that only shares the id (someone else's "Lake") is imported as a copy.
+                try Data("// someone else's lake\n".utf8).write(to: js)
+                m = try SceneManifest.load(package: exported)
+                m.id = item.id; m.name = "Lake"; m.created = Date(timeIntervalSince1970: 1_700_000_000)
+                try m.write(package: exported)
+                try awaitMain { await model.openScenePackage(at: exported) }
+                try expectEqual(model.entries.count, before + 2)
+                try expectEqual(model.banners.banners.last?.title, "Imported \u{201C}Lake\u{201D}")
+            }
+        },
+        TestCase(name: "app.model.open-package-twice-at-once") {
+            // Two copies of a new scene opened together (or a second double-click while the first
+            // import is still copying): imported once, the other open shows it.
+            try withModel("open-package-twice") { model, fx in
+                let downloads = fx.root.appendingPathComponent("Downloads")
+                try FileManager.default.createDirectory(at: downloads, withIntermediateDirectories: true)
+                let first = downloads.appendingPathComponent("comet.lpscene"), second = downloads.appendingPathComponent("comet 2.lpscene")
+                try FileManager.default.createDirectory(at: first, withIntermediateDirectories: true)
+                try SceneManifest(id: "comet", name: "Comet", kind: .web).write(package: first)
+                try Data("// comet\n".utf8).write(to: first.appendingPathComponent("scene.js"))
+                try FileManager.default.copyItem(at: first, to: second)
+                let before = model.entries.count
+                try awaitMain {
+                    async let a: Void = model.openScenePackage(at: first)
+                    async let b: Void = model.openScenePackage(at: second)
+                    _ = await (a, b)
+                }
+                try expectEqual(model.entries.count, before + 1)
+                try expect(model.entry(id: "comet") != nil && model.entry(id: "comet-2") == nil, model.entries.map(\.id).joined(separator: ", "))
+                try expect(model.banners.banners.contains { $0.title.contains("already in your library") })
+            }
+        },
         TestCase(name: "app.model.lock-settings") {
             try withModel("lock") { model, fx in
                 let saved = fx.saved
@@ -1331,7 +1436,7 @@ extension SelfTests {
             }
         },
         TestCase(name: "app.model.ai-modify-builtin") {
-            try withModel("ai-modify") { model, _ in
+            try withModel("ai-modify") { model, fx in
                 let harness = try unwrap(model.preferredHarness)
                 var started: AISessionModel?
                 try awaitMain { started = await model.startModify(sceneID: "aurora-lake", prompt: "Make it slower please", harness: harness, model: nil) }
@@ -1340,9 +1445,16 @@ extension SelfTests {
                 let target = try unwrap(session.targetSceneID)
                 try expect(target != "aurora-lake", "built-ins are modified as a copy")
                 try awaitMain(until: { !session.isRunning })
+                // The copy is in the screen saver's playlist: accepting republishes it.
+                let install = try unwrap(fx.services.install as? MockInstallService)
+                try install.installSaver()
+                try awaitMain { await model.refreshInstallStatus() }
+                try awaitMain { await model.useAsScreenSaver(target) }
+                let published = try unwrap(model.lastPublished?.generation)
                 var replaced: SceneItem?
                 try awaitMain { replaced = await model.accept(session) }
                 try expectEqual(replaced?.id, target)
+                try expect((model.lastPublished?.generation ?? 0) > published, "republished after accepting")
                 let history = ProvenanceLog.load(package: try unwrap(replaced).packageURL)
                 try expect(history.contains { $0.action == "modify" })
             }

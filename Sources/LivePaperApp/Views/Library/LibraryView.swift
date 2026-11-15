@@ -39,7 +39,8 @@ struct LibraryView: View {
                 }
                 ToolbarItemGroup(placement: .primaryAction) {
                     Button {
-                        if let url = SystemActions.chooseScenePackage() { Task { await model.importPackage(at: url) } }
+                        // Like File › Import Scene…: a scene the library already has just opens.
+                        if let url = SystemActions.chooseScenePackage() { Task { await model.openScenePackage(at: url) } }
                     } label: {
                         Label("Import Scene", systemImage: "square.and.arrow.down")
                     }

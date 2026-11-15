@@ -167,7 +167,9 @@ public final class LibraryService: LibraryServicing, @unchecked Sendable {
                 if FileOps.isRegularFile(oldLog) { try fm.copyItem(at: oldLog, to: staging.appendingPathComponent(SceneHistory.fileName)) }
                 let replace = SceneHistoryEntry(date: now(), action: .replace, summary: "Previous version kept in \(SceneHistory.directoryName)/\(stamp)",
                                                 previous: "\(SceneHistory.directoryName)/\(stamp)")
-                try SceneHistory.append(SceneHistory.entries(in: package) + [replace], to: staging)
+                let known = SceneHistory.entries(in: current)
+                let incoming = SceneHistory.entries(in: package).filter { !known.contains($0) }
+                try SceneHistory.append(incoming + [replace], to: staging)
                 // 4. Same identity, new content.
                 var m = candidate
                 m.id = id
@@ -211,6 +213,32 @@ public final class LibraryService: LibraryServicing, @unchecked Sendable {
                 return try commit(staging: staging, manifest: m, preferredID: preferred)
             } catch { try? FileManager.default.removeItem(at: staging); throw error }
         }
+    }
+
+    public func existingScene(matching url: URL) throws -> SceneImportMatch? {
+        let all = try scenes()
+        // 1. The package itself is in the library or the app (opened from there in Finder).
+        if let identity = Self.fileIdentity(url),
+           let item = all.first(where: { Self.fileIdentity($0.packageURL).map { $0.isEqual(identity) } ?? false }) {
+            return .same(item)
+        }
+        guard url.pathExtension.lowercased() == SceneManifest.packageExtension, let manifest = try? validatedPackage(at: url) else { return nil }
+        // 2. A scene with the same contents; 3. another version of a user scene with that id.
+        return ScenePackageComparison.match(url, manifest, in: all)
+    }
+
+    public func openPackage(at url: URL) throws -> SceneOpenResult {
+        // One step under the lock: a second open of the same new package (a double-click while the
+        // first copy is still running, two copies opened together) finds the first one's import.
+        try withLock {
+            if let match = try? existingScene(matching: url) { return .existing(match) }
+            return .imported(try importPackage(at: url))
+        }
+    }
+
+    /// The file system's identity for a file (same file ⇔ equal), whatever path or case was used.
+    private static func fileIdentity(_ url: URL) -> NSObjectProtocol? {
+        (try? url.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier
     }
 
     public func exportPackage(id: String, to url: URL) throws {
