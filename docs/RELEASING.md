@@ -109,12 +109,13 @@ when you cut the first beta): nightlies are labelled with `VERSION`, so until th
   `X.Y.Z-beta.N` or `X.Y.Z-nightly`. `scripts/build.sh` only accepts `VERSION` itself or
   `VERSION-<suffix>`.
 * `CFBundleVersion` is numeric: the commit count of the built commit (`LIVEPAPER_BUILD` overrides
-  it; CI passes it explicitly so the build and publish jobs agree). It must grow, because the app
-  replaces the installed screen saver when the numbers differ, so CI checks out the full history
-  (`build.sh` warns about shallow clones). Builds of the same commit — say a nightly and a beta —
-  share a number: the code is the same, but going from one to the other doesn't refresh the
-  installed screen saver, which keeps the version string (and signature) it was installed with
-  until a build with a higher number arrives.
+  it; CI passes it explicitly so the build and publish jobs agree). It must grow, because at launch
+  the app replaces the installed screen saver only with a higher number (an older LivePaper never
+  downgrades it; only an explicit install from setup replaces a newer one — ARCHITECTURE §11), so
+  CI checks out the full history (`build.sh` warns about shallow clones). Builds of the same
+  commit — say a nightly and a beta — share a number: the code is the same, but going from one to
+  the other doesn't refresh the installed screen saver, which keeps the version string (and
+  signature) it was installed with until a build with a higher number arrives.
 
 ## Signing
 
