@@ -92,9 +92,11 @@ jobs:
             swiftpm-${{ runner.os }}-${{ runner.arch }}-xcode${{ env.XCODE_VERSION }}-
 
       - name: swift build
+        timeout-minutes: 20
         run: swift build
 
       - name: Self-tests
+        timeout-minutes: 20
         run: |
           # Opt-in tests (a real render server, real AI agents) stay off in CI.
           unset LIVEPAPER_SELFTEST_E2E LIVEPAPER_SMOKE_HARNESS LIVEPAPER_SMOKE_OUT
@@ -105,6 +107,7 @@ jobs:
           exit "$status"
 
       - name: Release build (universal)
+        timeout-minutes: 30
         env:
           LIVEPAPER_VERSION: ${{ steps.version.outputs.version }}
           LIVEPAPER_BUILD: ${{ steps.version.outputs.build_number }}

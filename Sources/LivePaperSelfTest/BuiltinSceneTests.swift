@@ -66,7 +66,8 @@ extension SelfTests {
         },
         TestCase(name: "scenes.builtin.hygiene") {
             // Public repository: no machine-specific paths or user names in anything shipped.
-            let user = NSUserName()
+            // (Not the account name on CI: GitHub's is "runner", an ordinary word, and not a leak.)
+            let user = ProcessInfo.processInfo.environment["CI"] == "true" ? "" : NSUserName()
             for pkg in try BuiltinScenes.packages() {
                 let id = pkg.deletingPathExtension().lastPathComponent
                 for name in ["scene.json", "scene.js", "history.jsonl"] {
