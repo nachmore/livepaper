@@ -6,6 +6,7 @@
 // run against the mock services with zero delays, in temporary directories, and drive the main run
 // loop so MainActor tasks (event streams, banners) make progress. Nothing here touches the user's
 // real state or launches a GUI process.
+import CoreGraphics
 import Foundation
 import LivePaperCore
 
@@ -256,10 +257,11 @@ extension SelfTests {
             if case .tools(let calls) = s.entries[2].kind { try expectEqual(ToolSummary.title(calls), "Used 3 tools \u{00B7} Read \u{00D7}2, Write") }
             let png = URL(fileURLWithPath: "/tmp/a.png")
             s.apply(.stillRendered(png), at: t)
-            s.apply(.stillRendered(png), at: t)
+            s.apply(.stillRendered(png), at: t)   // rewritten: one tile, a new revision
             s.apply(.stillRendered(URL(fileURLWithPath: "/tmp/b.png")), at: t)
             try expectEqual(s.stills.count, 2)
-            try expectEqual(s.entries.last?.kind, .stills(2))
+            try expectEqual(s.stillRevision(png), 1)
+            try expectEqual(s.entries.last?.kind, .stills(3))
             s.apply(.status("Validating with livepaper check\u{2026}"), at: t)
             try expectEqual(s.phase, .validating)
             s.apply(.checkResult(CheckReport(passed: true, benchMs: ["1512x982@2 t=14": 1.6])), at: t)
@@ -290,6 +292,60 @@ extension SelfTests {
             var cancelled = AISessionState()
             cancelled.markCancelled()
             try expectEqual(cancelled.phase, .cancelled)
+        },
+        TestCase(name: "app.ai.session-reducer.rerendered-stills") {
+            // Every `livepaper check` run (the agent's, then LivePaper's own) rewrites the same file
+            // names; AISession re-reports a still whenever its file changes. Each report is a new
+            // picture: the filmstrip keeps one tile per file, newest render last (the hero shows
+            // the last one), and the tile's revision changes so its image is reloaded.
+            var s = AISessionState()
+            let t = Date(timeIntervalSince1970: 0)
+            let a = URL(fileURLWithPath: "/tmp/ws/scene/.check/1512x982@2-t4.png")
+            let b = URL(fileURLWithPath: "/tmp/ws/scene/.check/1512x982@2-t12.png")
+            s.apply(.stillRendered(a), at: t)
+            s.apply(.stillRendered(b), at: t)
+            try expectEqual(s.stills, [a, b])
+            try expectEqual([s.stillRevision(a), s.stillRevision(b)], [0, 0])
+            s.apply(.toolUse(name: "Edit", detail: "scene/scene.js"), at: t)
+            s.apply(.stillRendered(a), at: t)   // the second check run
+            try expectEqual(s.stills, [b, a])
+            try expectEqual([s.stillRevision(a), s.stillRevision(b)], [1, 0])
+            try expectEqual(s.entries.last?.kind, .stills(1))
+            s.apply(.stillRendered(b), at: t)
+            try expectEqual(s.stills, [a, b])
+            try expectEqual([s.stillRevision(a), s.stillRevision(b)], [1, 1])
+            try expectEqual(s.entries.last?.kind, .stills(2))
+            // The image a tile shows is keyed on the revision, so it can't be the first run's.
+            try expect(ThumbnailCache.key(a, revision: s.stillRevision(a), maxPixel: 240)
+                       != ThumbnailCache.key(a, revision: 0, maxPixel: 240))
+        },
+        TestCase(name: "app.thumbnails.revisions") {
+            // A file rewritten under the same name is decoded again for a new revision, and the
+            // superseded image is dropped (re-rendered stills don't pile up in memory).
+            let dir = try tempDir("thumbs")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            let png = dir.appendingPathComponent("1512x982@2-t4.png")
+            func pixels(_ image: CGImage?) -> Data? { image?.dataProvider?.data as Data? }
+            try expect(MockArtwork.writeImage(style: .aurora, seed: 1, width: 64, height: 40, to: png))
+            let cache = ThumbnailCache()
+            var first: CGImage?, stale: CGImage?, second: CGImage?, late: CGImage?
+            try awaitMain { first = await cache.load(png, revision: 0, maxPixel: 64) }
+            try expect(MockArtwork.writeImage(style: .dunes, seed: 2, width: 64, height: 40, to: png))
+            try awaitMain { stale = await cache.load(png, revision: 0, maxPixel: 64) }
+            try expect(stale === first, "same revision: served from the cache")
+            try awaitMain { second = await cache.load(png, revision: 1, maxPixel: 64) }
+            try expect(pixels(first) != nil && pixels(second) != nil)
+            try expect(pixels(second) != pixels(first), "the new revision shows the new picture")
+            try expect(cache.cached(ThumbnailCache.key(png, revision: 0, maxPixel: 64)) == nil, "superseded image dropped")
+            try expect(cache.cached(ThumbnailCache.key(png, revision: 1, maxPixel: 64)) === second)
+            // A slow load of an older revision finishing late doesn't evict or shadow the newer one.
+            try awaitMain { late = await cache.load(png, revision: 0, maxPixel: 64) }
+            try expect(late != nil)
+            try expect(cache.cached(ThumbnailCache.key(png, revision: 0, maxPixel: 64)) == nil)
+            try expect(cache.cached(ThumbnailCache.key(png, revision: 1, maxPixel: 64)) === second)
+            // Other sizes of the same file are separate entries.
+            try awaitMain { _ = await cache.load(png, revision: 1, maxPixel: 32) }
+            try expect(cache.cached(ThumbnailCache.key(png, revision: 1, maxPixel: 64)) === second)
         },
         TestCase(name: "app.setup.checklist") {
             var st = SetupState()

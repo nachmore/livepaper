@@ -2,8 +2,8 @@
 // (Foundation-only; also compiled into LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
 //
 // Sessions can run for 20+ minutes and agents can be chatty, so the reducer coalesces streamed
-// prose, groups consecutive tool calls, de-duplicates stills and caps the timeline length. That
-// keeps SwiftUI diffing cheap and memory bounded however long the agent runs.
+// prose, groups consecutive tool calls, keeps one filmstrip tile per still file and caps the
+// timeline length. That keeps SwiftUI diffing cheap and memory bounded however long the agent runs.
 import Foundation
 import LivePaperCore
 
@@ -69,8 +69,12 @@ struct AISessionState: Equatable {
 
     private(set) var phase: Phase = .starting
     private(set) var entries: [Entry] = []
-    /// Every distinct still, in arrival order (the filmstrip).
+    /// One entry per still file, in the order of their latest render (the filmstrip; the last one
+    /// is the newest picture). `livepaper check` writes the same file names on every run.
     private(set) var stills: [URL] = []
+    /// How often each still was re-rendered since it first appeared (missing = 0). Views key their
+    /// image caches on it, so a rewritten file is decoded again instead of showing the first run.
+    private(set) var stillRevisions: [URL: Int] = [:]
     private(set) var report: CheckReport?
     /// Latest status line ("Running claude…"), for compact displays such as the menu bar.
     private(set) var lastStatus: String = "Starting…"
@@ -83,6 +87,9 @@ struct AISessionState: Equatable {
         if case .succeeded(let url) = phase { return url }
         return nil
     }
+
+    /// The revision of a still's current picture (0 until it is re-rendered).
+    func stillRevision(_ url: URL) -> Int { stillRevisions[url] ?? 0 }
 
     /// Applies one event. Events after a terminal phase are ignored (e.g. late output from an
     /// agent that was cancelled).
@@ -113,7 +120,12 @@ struct AISessionState: Equatable {
                 append(.tools([call]), date)
             }
         case .stillRendered(let url):
-            guard !stills.contains(url) else { return }
+            // AISession reports a file again only when it was rewritten (a later check run): a new
+            // picture under the same name. It moves to the end and gets a new revision.
+            if let index = stills.firstIndex(of: url) {
+                stills.remove(at: index)
+                stillRevisions[url, default: 0] += 1
+            }
             stills.append(url)
             if case .stills(let n) = entries.last?.kind {
                 replaceLast(.stills(n + 1), date)
