@@ -90,10 +90,11 @@ scripts/dev-install.sh    # → /Applications (or ~/Applications), then: open it
 ad-hoc from the inside out and verifies the result; `--debug` is a fast incremental build for this
 Mac's architecture only. `scripts/dev-install.sh` copies the bundle into `/Applications` when it is
 writable (else `~/Applications`, or wherever LivePaper is already installed), clears the
-quarantine flag, verifies the signature and restarts the helper if it was running and that can
-work; it doesn't open the app unless you pass `--launch`. A login item whose (ad-hoc-signed) helper
-changed can only be registered again by the app, which does so at launch — the script says when
-that's needed (docs/RESEARCH.md §6.1).
+quarantine flag, verifies the signature and restarts the helper only when that can work (never a
+stopped ad-hoc login item, and nothing when the running helper already is this build's); it doesn't
+open the app unless you pass `--launch`. A login item whose (ad-hoc-signed) helper changed can only be
+registered again by the app, which does so at launch — the script says when that's needed
+(docs/RESEARCH.md §6.1).
 `--link-cli` also links the `livepaper` command into `~/.local/bin`.
 
 On first launch LivePaper walks you through setup: it installs the screen saver, selects it (or

@@ -773,7 +773,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     /// Which helper process `pid` runs (HelperProbe; see RunningHelper.Code).
     private func runningCode(_ pid: Int32) -> RunningHelper.Code {
-        guard let path = probe.executablePath(pid) else { return probe.isAlive(pid) ? .gone(nil) : .unknown }
+        let path: String
+        switch probe.executable(of: pid) {
+        case .path(let found): path = found
+        case .deleted: return .gone(nil)
+        case .unknown: return .unknown
+        }
         let real = Self.realPath(path)
         if real == Self.realPath(paths.helperExecutable.path) {
             switch probe.runsCodeOnDisk(pid) {

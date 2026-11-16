@@ -355,33 +355,58 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   answers `lockNowAccepted` with the same `requestID` (deliverImmediately) as soon as the request
   arrives — also when its lock flow then skips or refuses — and runs the lock flow. Without an
   answer within 1 s the app launches ScreenSaverEngine itself (explicit user action only).
-* **Login item and its repair** (`InstallService`, `Install/HelperJob.swift`): the app registers the
-  helper with `SMAppService.agent` (the LaunchAgent fallback, with its own label, for unbundled builds
-  or when SMAppService refuses for good). launchd only starts it as the code recorded at registration
-  — for ad-hoc builds the helper's cdhash — and an update can leave it unable to start the helper at
-  all while SMAppService still says `.enabled` (docs/RESEARCH.md §6.1). So `InstallStatus.helperProblem`
-  comes from `launchctl print` (the CLI sees it too): `cannotStart` (spawn failed, EX_CONFIG, needs
-  LWCR update, a launch-constraint exit), `notLoaded`, `stopped`, or `outdated` (the running process
-  predates the helper on disk, or the fallback runs another copy's helper). `HelperJobAssessment`
-  decides: a stopped job registered by this build is started (`launchctl kickstart`, and registered
-  again if launchd then refuses it); anything else is registered again — unregister, waiting for its
-  completion, then register, as SMAppService.h asks for after the executable changed (the fallback:
-  plist rewritten, bootout + bootstrap). A job registered by an older build is never kickstarted: that
-  launch would only be refused and set off launchd's repair, which is what breaks it.
+* **Login item and its repair** (`InstallService`, `Install/HelperJob.swift`, `Install/HelperProbe.swift`):
+  the app registers the helper with `SMAppService.agent` (the LaunchAgent fallback, with its own label,
+  for unbundled builds or when SMAppService refuses for good). launchd only starts it as the code
+  recorded at registration — for ad-hoc builds the helper's cdhash — and an update can leave it unable
+  to start the helper at all while SMAppService still says `.enabled` (docs/RESEARCH.md §6.1). Registering
+  again fixes that but isn't free: it ends the running helper, and every new registration makes macOS
+  post "“LivePaper” can run in the background". So LivePaper registers again only on **positive
+  evidence** that launchd can't run this build's helper, and decides by the helper's code, not by file
+  times or build numbers:
+  * `InstallStatus.helperProblem` (the CLI sees it too): `cannotStart` (spawn failed, EX_CONFIG, needs
+    LWCR update, a launch-constraint exit), `notLoaded` (launchctl's exit 113 — a timeout or any other
+    error is no answer and changes nothing), `stopped`, `outdated` (its process runs code that is no
+    longer this copy's helper on disk: `SecCodeCheckValidity` says errSecCSStaticCodeChanged, or its
+    executable is gone or in the Trash), `otherCopy` (it runs another copy of LivePaper's helper: reported
+    only) and `unregistered` (a re-registration that didn't finish). A job counts as running when the
+    `pid` launchd shows is alive, whatever its `state` line says (`launchctl print` is "NOT API").
+  * `HelperRegistrationRecord` (`helper-registration.json` in the support directory, removed with the
+    login item): which copy registered it, its build and its helper's signature (cdhash, Team ID).
+    `pendingSince` is written right before the unregister of a re-registration and cleared once
+    registering worked, so a register that fails after the unregister is retried at the next launch
+    (and reported) instead of leaving the helper unregistered and taken for "not set up".
+  * `HelperJobAssessment` decides: a helper that runs this copy's current code is left alone (an update
+    that leaves the helper byte-identical changes nothing); one that runs older code is registered again
+    when it is ad-hoc signed, and only restarted (`launchctl kickstart -k`) when the registration
+    recorded the same Team ID; a stopped job is started (`launchctl kickstart`) when the recorded
+    signature still covers this helper, and registered again when it doesn't (without a record: when an
+    older build registered it). A start or restart that launchd then refuses is registered again; one
+    that just doesn't show a running helper is reported, not registered again. Registering again:
+    unregister, waiting for its completion, then register, as SMAppService.h asks for after the
+    executable changed — retried once when SMAppService still has the item (a late unregister), then
+    waiting up to 10 s for smd to submit the job (the fallback: plist rewritten, bootout + bootstrap).
   * The app runs `InstallServicing.recoverHelper` by itself **once per launch**, the first time a read
-    of the status shows a problem (at launch, or later), never while other install work runs, and only
-    for a helper that is set up (an enabled login item, or the fallback's plist) — never after an
-    uninstall, never while macOS waits for approval. It is quiet when it works (logged with NSLog and
-    the install Logger). A re-registration that ends in `.requiresApproval` gets a banner with "Open
-    Login Items" and nothing else (no fallback behind the user's back); a failure gets an error banner
-    with Try Again.
+    of the status shows a problem (at launch, later, or as soon as other install work ends — it never
+    runs alongside it), and only for a helper that is set up (an enabled login item, the fallback's
+    plist, or an unfinished re-registration) — never after an uninstall, never while macOS waits for
+    approval. Registering moves the login item to the copy that registers, so the automatic repair only
+    runs in the **copy that registered it** (or, without a record or when that copy is gone, a copy in
+    /Applications or ~/Applications): opening a download, a translocated copy, a disk image or a build
+    folder never takes the helper away from the installed app. It is quiet when it works (logged with
+    NSLog and the install Logger). A re-registration that ends in `.requiresApproval` gets a banner
+    with "Open Login Items" and nothing else (no fallback behind the user's back); a failure gets an
+    error banner with Try Again. Both go once a status read shows the helper running.
   * Settings › Lock and onboarding show "LivePaper helper can't start" with **Repair Helper** (otherwise
-    Start Helper): `registerHelper`, the same logic on request.
-  * `livepaper doctor` reports "can't start: launchd reports …" with the fix (open LivePaper; else
-    Login Items off/on or log out and in) and warns about an outdated running helper.
-    `scripts/dev-install.sh` can't use SMAppService: it doesn't restart a login item whose ad-hoc
-    helper changed, and says when launching the app is needed (with `--launch` it waits up to 30 s for
-    the new helper to run).
+    Start Helper): `registerHelper`, the same logic on the user's request — which may take the helper
+    over from another copy.
+  * `livepaper doctor` reports "can't start: launchd reports …" or an unfinished re-registration with
+    the fix (open LivePaper; else Login Items off/on or log out and in), and warns about an outdated
+    running helper or another copy's. `scripts/dev-install.sh` can't use SMAppService: it compares the
+    new helper with the **running** process (`codesign --verify <pid>`; `codesign -dvvv <pid>` would
+    describe the new file), restarts only a Team ID-signed login item, never starts a stopped ad-hoc
+    one, and says when launching the app is needed (with `--launch` it waits up to 30 s for the new
+    helper to run).
 * **Uninstall:** if `LPPaths.uninstallMarker` exists at launch, the agent exits 0 before it creates
   anything (launchd's KeepAlive restarts it only after a crash).
 * Watches `state.json` / `stateChanged`; relays `openApp` from the saver.
@@ -646,9 +671,10 @@ prints the numbers of the built-ins as they are now (`LIVEPAPER_MOTION_DUMP=<dir
   app logs it and waits for the next unlock: it observes `com.apple.screenIsUnlocked` (distributed,
   object = the uid string, `.deliverImmediately`; `SessionUnlockObserver`) only while an update is
   pending, and on the unlock stops observing, re-reads the status and tries once more (a Mac locked
-  again by then waits for the following unlock). Uninstall ends the wait.
+  again by then waits for the following unlock). Uninstall ends the wait; uninstall and setup wait for
+  what an unlock started, and no saver update starts while either runs.
 * **Helper repair at launch:** see §7 — the app registers the helper's login item again by itself
-  (once per launch) when launchd can't start this build's helper.
+  (once per launch, only in the copy the helper belongs to) when launchd can't run this build's helper.
 * *Settings* — Screen Saver (status, setup), Lock (**one** toggle "Use ⌃⌘Q and the lock key for
   LivePaper lock" + the optional extra shortcut recorder + helper status with Start Helper / Repair
   Helper / Open Login Items), Performance (profile),

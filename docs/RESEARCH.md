@@ -291,7 +291,13 @@ and (6.1) from the log of a login item that an update broke:
   registered (an ad-hoc helper's designated requirement is `cdhash H"…"`, so it changes with every
   build that changes the helper). An earlier version of this page expected launchd's repair path to
   re-register the item after such a rebuild, at the cost of one failed launch. That was wrong: the
-  repair can fail for good (6.1).
+  repair can fail for good (6.1). For code with a Team ID the requirement should name the team rather
+  than a cdhash, so a rebuild with the same Team ID keeps starting (Inferred; not seen on the test Mac,
+  which only ran ad-hoc builds).
+* **Every new registration posts an advisory** (Verified from the log, 6.1): backgroundtaskmanagementd
+  makes a new record (`disposition=[enabled, allowed, not notified]`) and about 10 s later posts
+  "“LivePaper” can run in the background…", which usernoted shows. Registering again is therefore only
+  worth it when launchd can't run the helper as it is.
 * Switching the item off in System Settings needs administrator rights. `sfltool resetbtm` would
   reset every app's login items, so LivePaper never uses it.
 
@@ -325,6 +331,20 @@ nothing. From the unified log and `launchctl print gui/$UID/com.nachmore.livepap
    through several installs. One earlier that day (11:48) had the helper started normally by
    `launchctl kickstart -k` right after it, so an install that leaves the helper unchanged isn't
    affected (Inferred: that start passed the recorded constraint).
+7. **A restart is what sets it off.** At 16:32:18, right after a `scripts/dev-install.sh` run, launchd
+   stopped the running helper and refused the next spawn (`xpcproxy exited due to OS_REASON_CODESIGNING |
+   Launch Constraint Violation`, `Requesting LWCR update on next spawn`); at 16:32:28
+   backgroundtaskmanagementd invalidated the item for `/Applications/LivePaper.app`, and at 16:32:39 it
+   posted "“LivePaper” can run in the background" for the new record. That install's helper was
+   identical to the one it replaced but not to the one that ran, which an earlier install had left
+   running (Inferred from the review of that script; the old check compared with the replaced file).
+8. **What a running helper runs** (Verified on 26.7 with throwaway ad-hoc binaries): once its
+   executable is replaced, `codesign -dvvv <pid>` and `SecCodeCopySigningInformation` describe the
+   *new* file at its path (its CDHash), not the code that runs; `codesign --verify <pid>` and
+   `SecCodeCheckValidity` fail with errSecCSStaticCodeChanged ("the code on disk does not match what is
+   running"), and pass again for byte-identical code in a new file. `proc_pidpath` follows the file when
+   it is moved (e.g. to the Trash with its app) and fails with ENOENT once it is deleted.
+   `launchctl print` of a service the domain doesn't have exits 113 ("Could not find service").
 
 What fixes it, and what LivePaper does (ARCHITECTURE §7):
 
@@ -343,11 +363,26 @@ What fixes it, and what LivePaper does (ARCHITECTURE §7):
 * **Approval should survive it** (Inferred): new agents start out enabled and allowed, as the
   repair's replacement record shows (Verified, 2. above). LivePaper re-registers only an enabled item,
   and says so if macOS asks for approval anyway.
-* **When it does it:** when launchd can't start the job (the signs in 4.), lacks it, has a stopped
-  job registered by an older build (starting that would only be refused, and set off 2.), or runs a
-  process that started before the helper on disk was put in place (an app replaced under a running
-  helper). A stopped job registered by this build is just started, and registered again if launchd
-  then refuses it.
+* **When it does it — only on positive evidence that launchd can't run this build's helper**, decided
+  by code, not by file times or build numbers (ARCHITECTURE §7): launchd can't start the job (the signs
+  in 4.), doesn't have it (exit 113; a timeout or another error changes nothing), runs a helper whose
+  code is no longer this copy's on disk (8.) and is ad-hoc signed, or has a stopped job whose recorded
+  helper signature doesn't cover this one (LivePaper records it at every registration; without a
+  record, a stopped job registered by an older build). A helper that runs this copy's current code is
+  left alone; one with the registration's Team ID is restarted (`kickstart -k`); a stopped job launchd
+  should accept is started. A start that launchd then refuses is registered again; launchctl text
+  LivePaper can't read never leads to an unregister.
+* **Only from the copy the login item belongs to:** registering moves the item to the registering app.
+  The automatic repair runs only in the copy that registered it — or, without a record (or when that
+  copy is gone or in the Trash), in a copy in /Applications or ~/Applications — never in a download,
+  a translocated copy, a disk image or a build folder that was just opened. Whether SMAppService reports
+  `.enabled` to a second copy at another path wasn't tested (that needs SMAppService calls on the test
+  Mac); LivePaper doesn't rely on it.
+* **An unfinished re-registration is remembered:** LivePaper writes its intent before the unregister
+  and clears it once registering worked, so a register that fails in between is retried at the next
+  launch and reported (`livepaper doctor`) rather than leaving the helper unregistered and forgotten.
 * **Without the app:** switching LivePaper off and on in Login Items (administrator rights), or
   logging out and in, should make smd submit the job from the current record (Inferred, untested).
-* **Keeping the helper byte-identical across app updates avoids all of this** (Inferred from 6.).
+* **Keeping the helper byte-identical across app updates avoids all of this** (Inferred from 6.): the
+  running helper then passes `SecCodeCheckValidity` against the new file, so LivePaper leaves it alone
+  — no re-registration, no advisory.

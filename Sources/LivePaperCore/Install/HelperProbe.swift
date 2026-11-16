@@ -12,12 +12,20 @@ import Darwin
 import Foundation
 import Security
 
+/// Where a process's executable is (proc_pidpath).
+public enum ProcessExecutable: Sendable, Equatable {
+    case path(String)
+    /// It was deleted (ENOENT).
+    case deleted
+    /// It couldn't be found out (the process is gone, or another error).
+    case unknown
+}
+
 public protocol HelperProcessProbing: Sendable {
     /// Process `pid` exists.
     func isAlive(_ pid: Int32) -> Bool
-    /// The path of process `pid`'s executable (proc_pidpath), nil when it can't be found — e.g. it
-    /// was deleted.
-    func executablePath(_ pid: Int32) -> String?
+    /// Where process `pid`'s executable is.
+    func executable(of pid: Int32) -> ProcessExecutable
     /// Process `pid` runs the code that is on disk at its path (true), other code (false:
     /// errSecCSStaticCodeChanged), or LivePaper can't tell (nil).
     func runsCodeOnDisk(_ pid: Int32) -> Bool?
@@ -36,11 +44,11 @@ public struct SystemHelperProbe: HelperProcessProbing {
         return kill(pid, 0) == 0 || errno == EPERM
     }
 
-    public func executablePath(_ pid: Int32) -> String? {
-        guard pid > 0 else { return nil }
+    public func executable(of pid: Int32) -> ProcessExecutable {
+        guard pid > 0 else { return .unknown }
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
-        return String(cString: buffer)
+        guard proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return errno == ENOENT ? .deleted : .unknown }
+        return .path(String(cString: buffer))
     }
 
     public func runsCodeOnDisk(_ pid: Int32) -> Bool? {
@@ -73,7 +81,7 @@ public struct SystemHelperProbe: HelperProcessProbing {
         guard filled > 0 else { return [] }
         let uid = getuid()
         return pids.prefix(Int(filled)).filter { pid in
-            guard pid > 0, let exe = executablePath(pid), exe == wanted else { return false }
+            guard pid > 0, executable(of: pid) == .path(wanted) else { return false }
             var info = proc_bsdshortinfo()
             let size = Int32(MemoryLayout<proc_bsdshortinfo>.size)
             return proc_pidinfo(pid, PROC_PIDT_SHORTBSDINFO, 0, &info, size) == size && info.pbsi_uid == uid

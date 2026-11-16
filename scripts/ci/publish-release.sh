@@ -107,9 +107,10 @@ commit_list() {
     echo ">   *Security* and click **Open Anyway** next to the LivePaper message (confirm with your password), or"
     echo "> * run \`xattr -dr com.apple.quarantine /Applications/LivePaper.app\` in Terminal, then open it."
     echo ">"
-    echo "> **Updating:** open LivePaper once after replacing it. macOS keeps starting the helper (your lock"
-    echo "> shortcut) only as the build that registered it, so until LivePaper registers it again — which it"
-    echo "> does by itself when it opens; macOS may say a login item was added — the shortcut doesn't work."
+    echo "> **Updating:** open LivePaper (the copy in Applications) once after replacing it. macOS keeps starting"
+    echo "> the helper (your lock shortcut) only as the build that registered it, so when an update changes the"
+    echo "> helper the shortcut doesn't work until LivePaper registers it again — which it does by itself when it"
+    echo "> opens; macOS may then say LivePaper can run in the background."
   fi
   echo
 } > "$NOTES"

@@ -423,7 +423,12 @@ private final class FakeProbe: HelperProcessProbing, @unchecked Sendable {
     func end(_ pid: Int32) { _ = lock.withLock { procs.removeValue(forKey: pid) } }
     func sign(_ url: URL, _ signature: CodeSignature?) { lock.withLock { signatures[url.path] = signature } }
     func isAlive(_ pid: Int32) -> Bool { lock.withLock { procs[pid] != nil } }
-    func executablePath(_ pid: Int32) -> String? { lock.withLock { procs[pid]?.path } }
+    func executable(of pid: Int32) -> ProcessExecutable {
+        lock.withLock {
+            guard let proc = procs[pid] else { return .unknown }
+            return proc.path.map(ProcessExecutable.path) ?? .deleted
+        }
+    }
     func runsCodeOnDisk(_ pid: Int32) -> Bool? { lock.withLock { procs[pid]?.current ?? nil } }
     func signature(at url: URL) -> CodeSignature? { lock.withLock { signatures[url.path] } }
     func processes(running path: String) -> [Int32] {
@@ -2447,6 +2452,54 @@ extension SelfTests {
             try expect(adhoc.passesRecordedRequirement(of: CodeSignature(cdhash: "aa")) && !adhoc.passesRecordedRequirement(of: CodeSignature(cdhash: "bb")))
             try expect(team.passesRecordedRequirement(of: CodeSignature(cdhash: "dd", teamID: "TEAM1")))
             try expect(!team.passesRecordedRequirement(of: CodeSignature(cdhash: "cc", teamID: "TEAM2")) && !team.passesRecordedRequirement(of: adhoc))
+        },
+        TestCase(name: "core.install.helper-probe") {
+            // SystemHelperProbe against real processes (two throwaway ad-hoc binaries compiled here,
+            // nothing of LivePaper's): what it says once the running file is replaced, moved, deleted.
+            let probe = SystemHelperProbe()
+            let me = getpid()
+            try expect(probe.isAlive(me) && !probe.isAlive(0))
+            guard case .path(let selfPath) = probe.executable(of: me) else { throw TestFailure(description: "no path for this process") }
+            try expectEqual(probe.runsCodeOnDisk(me), true)
+            try expect(probe.processes(running: selfPath).contains(me))
+            let cc = URL(fileURLWithPath: "/usr/bin/cc")
+            guard FileManager.default.isExecutableFile(atPath: cc.path) else { print("  (no /usr/bin/cc: skipping the replaced-binary part)"); return }
+            let dir = try tempDir("helper-probe")
+            defer { try? FileManager.default.removeItem(at: dir) }
+            for (name, code) in [("a", 1), ("b", 2)] {
+                let c = dir.appendingPathComponent("\(name).c")
+                try Data("#include <unistd.h>\nint main(void){ sleep(30); return \(code); }\n".utf8).write(to: c)
+                let built = try CLITestSupport.exec(cc, ["-o", dir.appendingPathComponent(name).path, c.path], environment: nil, stdin: nil)
+                try expect(built.status == 0, built.err)
+            }
+            let app = dir.appendingPathComponent("app/Contents/Helpers")
+            try FileManager.default.createDirectory(at: app, withIntermediateDirectories: true)
+            let helper = app.appendingPathComponent("H")
+            try FileManager.default.copyItem(at: dir.appendingPathComponent("a"), to: helper)
+            let a = try unwrap(probe.signature(at: dir.appendingPathComponent("a"))), b = try unwrap(probe.signature(at: dir.appendingPathComponent("b")))
+            try expect(a.isAdHoc && b.isAdHoc && a.cdhash != b.cdhash && a.cdhash.count == 40, "\(a) \(b)")
+            let process = Process()
+            process.executableURL = helper
+            try process.run()
+            defer { if process.isRunning { process.terminate() }; process.waitUntilExit() }
+            let pid = process.processIdentifier
+            let real = resolvedPath(helper.path)
+            try expectEqual(probe.executable(of: pid), .path(real))
+            try expectEqual(probe.runsCodeOnDisk(pid), true)
+            try expectEqual(probe.processes(running: helper.path), [pid])
+            // Byte-identical code in a new file: still the code on disk.
+            try FileManager.default.removeItem(at: helper)
+            try FileManager.default.copyItem(at: dir.appendingPathComponent("a"), to: helper)
+            try expectEqual(probe.runsCodeOnDisk(pid), true)
+            // Other code at its path: it runs code that isn't on disk any more.
+            try FileManager.default.removeItem(at: helper)
+            try FileManager.default.copyItem(at: dir.appendingPathComponent("b"), to: helper)
+            try expectEqual(probe.runsCodeOnDisk(pid), false)
+            // Deleted: proc_pidpath can't find it (or still names the old path, but never other code).
+            try FileManager.default.removeItem(at: dir.appendingPathComponent("app"))
+            let gone = probe.executable(of: pid)
+            try expect(gone == .deleted || gone == .path(real), "\(gone)")
+            try expect(probe.runsCodeOnDisk(pid) != true)
         },
         TestCase(name: "core.install.helper-job-assess") {
             let failed = LaunchdJob.parse(helperSpawnFailedPrint), runningJob = LaunchdJob.parse(helperRunningPrint)
