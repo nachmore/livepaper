@@ -30,7 +30,8 @@ extension SelfTests {
             let back = try SceneManifest.decoder().decode(LPSharedState.self, from: SceneManifest.encoder().encode(on))
             try expectEqual(back, on)
             let json = try JSONSerialization.jsonObject(with: SceneManifest.encoder().encode(LPLockSettings(hotkey: nil))) as? [String: Any]
-            try expectEqual(Set(json?.keys.map { $0 } ?? []), ["lockKeysShowScene"])
+            // Both toggles are always written (the helper reads `showSceneBeforeDisplaySleep`, §4.4).
+            try expectEqual(Set(json?.keys.map { $0 } ?? []), ["lockKeysShowScene", "showSceneBeforeDisplaySleep"])
             // state.json written before the single toggle (two flags for the same preference).
             func legacy(_ lock: String) throws -> LPLockSettings {
                 try SceneManifest.decoder().decode(LPSharedState.self, from: Data(#"{"schema":1,"lock":\#(lock)}"#.utf8)).lock
@@ -40,6 +41,10 @@ extension SelfTests {
             try expectEqual(try legacy(#"{"takeOverSystemLock":false,"takeOverLockKey":true}"#), LPLockSettings(hotkey: nil, lockKeysShowScene: true))
             try expectEqual(try legacy(#"{"takeOverSystemLock":false}"#), LPLockSettings(hotkey: nil, lockKeysShowScene: false))
             try expectEqual(try legacy(#"{"lockKeysShowScene":false,"takeOverSystemLock":true}"#).lockKeysShowScene, false)
+            // …and before "show your scene when the screens turn off first": off.
+            try expectEqual(try legacy(#"{"lockKeysShowScene":true}"#).showSceneBeforeDisplaySleep, false)
+            let presleep = LPSharedState(lock: LPLockSettings(hotkey: nil, showSceneBeforeDisplaySleep: true))
+            try expectEqual(try SceneManifest.decoder().decode(LPSharedState.self, from: SceneManifest.encoder().encode(presleep)), presleep)
         },
         TestCase(name: "contracts.notifications") {
             let names = [LPNotification.stateChanged, LPNotification.openApp, LPNotification.lockNow, LPNotification.lockNowAccepted,

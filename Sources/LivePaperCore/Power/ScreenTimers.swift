@@ -145,8 +145,8 @@ public struct LPScreenTimers: Codable, Equatable, Sendable {
 /// What keeps the displays on, and until when macOS counts the user as active, from powerd's
 /// assertions (docs/RESEARCH.md §7).
 public struct LPPowerAssertions: Equatable, Sendable {
-    /// Assertions that keep the displays on with no end in sight ("MSTeams: Microsoft Teams Call in
-    /// progress"): the displays won't turn off by themselves while one is held.
+    /// Assertions that keep the displays on with no end in sight ("<call app>: Call in progress"):
+    /// the displays won't turn off by themselves while one is held.
     public var preventingDisplaySleep: [String]
     /// When the last timed display-sleep preventer ends (e.g. powerd's "delay display off" proxy).
     public var preventionEnds: Date?

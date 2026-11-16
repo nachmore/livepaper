@@ -509,3 +509,94 @@ What fixes it, and what LivePaper does (ARCHITECTURE §7):
 * **Keeping the helper byte-identical across app updates avoids all of this** (Inferred from 6.): the
   running helper then passes `SecCodeCheckValidity` against the new file, so LivePaper leaves it alone
   — no re-registration, no advisory.
+
+## 7. When the screens turn off before the screen saver starts
+
+The case behind "Show your scene when the screens turn off first" (ARCHITECTURE §7). On the test
+Mac the configuration profile sets `idleTime` 900 s, `askForPassword` 1, `askForPasswordDelay` 0,
+and the displays sleep after 5 min on battery and 20 min on AC. On battery the displays turn off
+first; macOS locks then (the password is required immediately), no screen saver is running, and the
+lock screen shows the desktop picture (§1: loginwindow only uses a saver that runs when the lock
+begins; §2: display-sleep locks aren't covered by `immediateLockLaunchesScreenSaver`).
+
+### 7.1 When macOS starts the screen saver (Verified in disassembly, loginwindow, 26.7)
+
+* `-[ScreenSaverDaemon idleTimePreference]` calls `CFPreferencesAppSynchronize` and then
+  `CFPreferencesGetAppIntegerValue("idleTime", "com.apple.screensaver")` (`loginWindowIdleTime` while
+  the login window is up). That search list puts a configuration profile's forced value first, then
+  the user's current-host value (where System Settings writes it), then the any-host one.
+* Without a value it uses `_defaultUserIdleTimePreference`, which `-[ScreenSaverDaemon init]` reads
+  from `/System/Library/Frameworks/ScreenSaver.framework/Resources/EngineDefaults.plist` (`idleTime`
+  1200 on 26.7), falling back to a built-in 1200 s.
+* 0 means the screen saver never starts by itself (the System Settings choice "Never").
+* LivePaper resolves it the same way (`LPScreenSaverIdle.resolve`). On the test Mac
+  `CFPreferencesAppValueIsForced("idleTime")` is true and the value is 900 (Verified, read-only).
+
+### 7.2 When macOS turns the displays off (Verified in the power log)
+
+* `pmset -g custom` prints one section per power source ("Battery Power:", "AC Power:", "UPS
+  Power:"), each with `displaysleep` in minutes (0 = never). /Library/Preferences/com.apple.PowerManagement.plist
+  holds the same as "Display Sleep Timer", but only the values changed from the defaults.
+  `IOPSGetProvidingPowerSourceType` names the source in use with the same strings (public, IOPowerSources.h).
+* Activity is tracked with `UserIsActive` assertions: WindowServer's HID tickle
+  ("com.apple.iohideventsystem.queue.tickle …"), powerd's "com.apple.powermanagement.kernel.useractive
+  …", and processes declaring user activity (rcd's "com.apple.rcdevent", bluetoothd's "Bluetooth LE
+  HID Activity", loginwindow, a screen-capture app). Their timeout is the current source's display-sleep time ("Timeout
+  will fire in 1200 secs" on AC) and activity re-arms it.
+* **"Display is turned off" follows 10–11 s after the last `UserIsActive` assertion times out**, in
+  all ten idle display-offs of the test Mac's `pmset -g log` (2026-11-13 to 11-16). The 10 s in
+  between are the dim (Inferred: it wasn't watched on screen).
+* WindowServer's tickle and powerd's kernel tickle can end minutes apart (7.5 min once); the displays
+  went off after the later one. LivePaper's idle time is WindowServer's
+  (`CGEventSourceSecondsSinceLastEventType(.hidSystemState, kCGAnyInputEventType)`), and it also takes
+  the end of the last `UserIsActive` assertion into account (below), so a declared activity after the
+  last key or mouse event doesn't make it start early.
+* `IOPMCopyAssertionsByProcess` (public) returns each assertion as a dictionary with `AssertType` /
+  `AssertionTrueType`, `AssertLevel`, `AssertName`, `Process Name`, `TimeoutSeconds`, `TimeoutAction`,
+  `AssertTimeoutUpdateTime` and `AssertTimeoutTimeLeft` (Verified, read-only). The time left is the
+  value at the last re-arm, not a live countdown (one re-armed three minutes earlier still said 300),
+  so an assertion ends at update time + time left. These keys aren't documented; when they
+  are missing LivePaper uses the HID idle time alone, and when the per-process list can't be read, the
+  summary (`IOPMCopyAssertionsStatus`), where any display preventer counts as untimed.
+* `ioreg`'s `HIDIdleTime` (IOHIDSystem) wasn't used: it follows the kernel's tickle, which ended 7.5
+  minutes before WindowServer's in the example above.
+
+### 7.3 What keeps the displays on (Verified in the power log)
+
+* Call apps and video players hold `NoDisplaySleepAssertion` (for example "… Call in progress",
+  Chrome's "Video Wake Lock", Firefox's "video-playing") or `PreventUserIdleDisplaySleep`. The summary (`IOPMCopyAssertionsStatus`, `pmset -g assertions`) counts
+  `NoDisplaySleepAssertion` under `PreventUserIdleDisplaySleep`.
+* **When such an assertion is released, powerd turns on `InternalPreventDisplaySleep`
+  "com.apple.powermanagement.delayDisplayOff"** ("Proxy to delay display off") in the same second,
+  with a 300 s timeout (every release in the log, 2026-11-09 to 11-16). So after a call the displays
+  stay on for up to 5 more minutes. LivePaper treats untimed display preventers as "the displays
+  won't turn off by themselves" (it does nothing) and timed ones by their end.
+* The power log shows no assertion from ScreenSaverEngine or legacyScreenSaver (LivePaper's video
+  scenes set `preventsDisplaySleepDuringVideoPlayback = false`, Saver/README.md), and the displays do
+  sleep under a running saver (Verified 2026-11-16, Saver/README.md: the host stops the animation for
+  display sleep; the saver resumes by itself on wake since commit 74f0a05). So a saver LivePaper
+  starts early doesn't keep the displays on (Inferred for this exact path: not yet watched end to end).
+
+### 7.4 What LivePaper does, and what is still open
+
+* The helper starts the screen saver through its lock flow 8 s before the predicted dim (the latest
+  of display sleep − HID idle, the last `UserIsActive` end, the last timed preventer's end): about 18 s
+  before the displays turn off. With the password required immediately the saver locks as it starts,
+  so the lock at display sleep finds the session already locked over the running saver. The cost: a
+  mouse move in those seconds meets the password prompt instead of an unlocked Mac.
+* Nothing runs while the option is off. While on, one one-shot timer, re-armed after activity (about
+  once per display-sleep period while the Mac is in use), plus notify(3) observers:
+  `com.apple.system.powersources.source` (kIOPSNotifyPowerSource, documented), and two names found as
+  strings in powerd and not observed firing: `com.apple.system.powermanagement.prefschange` (energy
+  settings changed) and `com.apple.system.powermanagement.assertions` (an assertion summary changed;
+  only while the displays are kept on). If the first doesn't fire, a changed display-sleep setting is
+  picked up at the next unlock, wake, power-source change or timer.
+* **Unknown — to be checked live** (the log lines "before screens off (…)" carry the numbers):
+  * the whole path once on battery: started at ~292 s idle, the displays dimming and turning off
+    under the saver, the lock screen showing the scene after the wake;
+  * whether a strict `DispatchSource` timer in the helper (an accessory app without windows, which
+    App Nap may throttle) fires within its 0.5 s leeway — the log records the idle time at every
+    evaluation;
+  * whether `CGEventSourceSecondsSinceLastEventType` works in the LaunchAgent without Input Monitoring
+    (Inferred: it reports only times; it was read from a terminal process here);
+  * whether the dim really starts at the `UserIsActive` timeout (the 10 s gap is Inferred to be it).

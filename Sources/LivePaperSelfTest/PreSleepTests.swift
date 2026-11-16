@@ -58,7 +58,7 @@ extension SelfTests {
         TestCase(name: "core.presleep.pmset-custom") {
             try expectEqual(LPScreenTimers.parsePmsetCustom(pmsetLaptop), [.battery: 300, .ac: 1200])
             // A desktop Mac (only AC Power), `pmset -g`'s annotations, "never" and junk.
-            let desktop = "AC Power:\n displaysleep         10 (display sleep prevented by zoom.us)\n sleep 0\n"
+            let desktop = "AC Power:\n displaysleep         10 (display sleep prevented by CallApp)\n sleep 0\n"
             try expectEqual(LPScreenTimers.parsePmsetCustom(desktop), [.ac: 600])
             try expectEqual(LPScreenTimers.parsePmsetCustom("UPS Power:\n displaysleep 0\n"), [.ups: 0])
             try expectEqual(LPScreenTimers.parsePmsetCustom("Battery Power:\n displaysleep soon\nAC Power:\n displaysleep -3\n"), [:])
@@ -155,7 +155,7 @@ extension SelfTests {
             func at(_ offset: TimeInterval) -> Date { now.addingTimeInterval(offset) }
             // Shapes recorded from IOPMCopyAssertionsByProcess (macOS 26.7).
             let call: [String: Any] = ["AssertType": "NoDisplaySleepAssertion", "AssertionTrueType": "NoDisplaySleepAssertion",
-                                       "AssertLevel": 255, "AssertName": "Microsoft Teams Call in progress", "Process Name": "MSTeams",
+                                       "AssertLevel": 255, "AssertName": "Call in progress", "Process Name": "CallApp",
                                        "AssertStartWhen": at(-3000)]
             let proxy: [String: Any] = ["AssertType": "InternalPreventDisplaySleep", "AssertLevel": 255,
                                         "AssertName": "com.apple.powermanagement.delayDisplayOff", "Process Name": "powerd",
@@ -176,7 +176,7 @@ extension SelfTests {
             let unrelated: [String: Any] = ["AssertType": "PreventUserIdleSystemSleep", "AssertLevel": 255, "AssertName": "com.apple.BTStack"]
 
             let parsed = LPPowerAssertions.parse([call, proxy, hid, declared, expired, off, logOnly, unrelated], now: now)
-            try expectEqual(parsed.preventingDisplaySleep, ["MSTeams: Microsoft Teams Call in progress", "pid 42: slides"])
+            try expectEqual(parsed.preventingDisplaySleep, ["CallApp: Call in progress", "pid 42: slides"])
             try expectEqual(parsed.preventionEnds, at(200))
             // The latest UserIsActive counts (rcd's declared activity, after the last HID input).
             try expectEqual(parsed.userActivityEnds, at(100))
@@ -231,16 +231,16 @@ extension SelfTests {
             // The option comes first: nothing else is even looked at while it is off.
             try expectEqual(LPPreSleepPolicy.decide(situation(enabled: false, password: false, locked: true)), .inactive(.optionOff))
             // A call keeps the screens on: look again later.
-            let call = LPPowerAssertions(preventingDisplaySleep: ["MSTeams: Microsoft Teams Call in progress"])
+            let call = LPPowerAssertions(preventingDisplaySleep: ["CallApp: Call in progress"])
             try expectEqual(LPPreSleepPolicy.decide(situation(assertions: call)),
-                            .blocked(.displaySleepPrevented(["MSTeams: Microsoft Teams Call in progress"])))
+                            .blocked(.displaySleepPrevented(["CallApp: Call in progress"])))
             // …but not where the option has nothing to do anyway.
             try expectEqual(LPPreSleepPolicy.decide(situation(timers: ownerTimers(on: .ac), assertions: call)),
                             .inactive(.screenSaverStartsFirst(.ac, displaySleep: 1200, screenSaverIdle: 900)))
             // A timed preventer (powerd's "delay display off") doesn't block; the schedule waits for it.
             try expectEqual(LPPreSleepPolicy.decide(situation(assertions: LPPowerAssertions(preventionEnds: Date()))),
                             .watch(displaySleep: 300, screenSaverIdle: 900))
-            try expect(LPPreSleepReason.displaySleepPrevented(["zoom.us: Describe Activity Type"]).description.contains("zoom.us"))
+            try expect(LPPreSleepReason.displaySleepPrevented(["MeetingApp: Meeting in progress"]).description.contains("MeetingApp"))
         },
         TestCase(name: "core.presleep.applies-per-source") {
             try expectEqual(LPPreSleepPolicy.applies(on: .battery, timers: ownerTimers()), true)
@@ -422,9 +422,9 @@ extension SelfTests {
             let adapter = HelperReport(reportInputs(config: on, timers: ownerTimers(on: .ac)))
             try expect(adapter.preSleep.now.hasPrefix("inactive: the screen saver starts first on power adapter"), adapter.preSleep.now)
             let call = HelperReport(reportInputs(config: on, timers: ownerTimers(),
-                                                 assertions: LPPowerAssertions(preventingDisplaySleep: ["zoom.us: Describe Activity Type"])))
-            try expectEqual(call.preSleep.preventedBy, ["zoom.us: Describe Activity Type"])
-            try expect(call.preSleep.now.hasPrefix("blocked: the screens are kept on by zoom.us"), call.preSleep.now)
+                                                 assertions: LPPowerAssertions(preventingDisplaySleep: ["MeetingApp: Meeting in progress"])))
+            try expectEqual(call.preSleep.preventedBy, ["MeetingApp: Meeting in progress"])
+            try expect(call.preSleep.now.hasPrefix("blocked: the screens are kept on by MeetingApp"), call.preSleep.now)
             let delayed = HelperReport(reportInputs(config: on, timers: ownerTimers(),
                                                     password: HelperPasswordPolicy(requirement: .delayed, delaySeconds: 5, source: .sysadminctl)))
             try expectEqual(delayed.preSleep.status, "Off: your password isn\u{2019}t required immediately after the screen saver starts")
