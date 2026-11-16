@@ -14,7 +14,7 @@ motion is the share of the frame that visibly changes within 5 s and within 2 s,
 | Scene | | Made with (in order) | Frame time 1512×982@2 · 5120×1440@1 | Energy | Brightness (frame · clock) | Motion within 5 s · 2 s (16:9 / 5:4) |
 |---|---|---|---|---|---|---|
 | **Abyssal Lanterns** `abyssal-lanterns` | Translucent bioluminescent drifters — bells, fringed discs, frilly-armed and comb jellies — pulse and travel through the deep night ocean, through three depths of sinking marine snow, under swaying moonlight shafts and a rippling net of surface light, with drifting plankton haze, sparks blooming at the edges and passing waves of plankton light. | Claude Code (claude-opus-5-5) ×5 | 1.61 · 1.77 ms | 90 mW | 12–20 · 15–20 | 66 / 76 % · 48 / 62 %, 9 of 9 regions |
-| **Ink and Ember** `ink-and-ember` | A sumi-e mountain range at dusk on dark handmade paper: pines on the crag and ridge crests sway as gusts travel through them, mist veils drift and breathe at their own depths, dry-brush cloud wisps form and dissolve, a slow river shimmers with the seal-red sun's broken reflection, a lantern boat sheds embers and a small flock passes now and then. | Codex (openai.gpt-5.6-luna) ×2, Codex (openai.gpt-5.6-sol) ×2, Claude Code (claude-opus-5-5) ×4 | 0.81 · 0.73 ms | 125 mW⁴ | 45–48 · 29–34 | 69 / 67 % · 37 / 34 %, 9 of 9 |
+| **Ink and Ember** `ink-and-ember` | A sumi-e mountain range at dusk on dark handmade paper: pines on the crag and ridge crests sway as gusts travel through them, mist veils drift and breathe at their own depths, dry-brush cloud wisps form and dissolve, a slow river shimmers with the seal-red sun's broken reflection, a lantern boat sheds embers and a small flock passes now and then. | Codex (openai.gpt-5.6-luna) ×2, Codex (openai.gpt-5.6-sol) ×2, Claude Code (claude-opus-5-5) ×4 | 0.81 · 0.73 ms | 69 mW⁴ | 45–48 · 29–34 | 69 / 67 % · 37 / 34 %, 9 of 9 |
 | **Liquid Glass** `liquid-glass` | Deep midnight, violet and teal colour fields flowing behind a thick pane of curved glass, with dark wisps folding through the top band, an undulating ember ribbon trailed by warm motes, glints sliding along the glass edges and morphing pool caustics (WebGL). | Kiro CLI (claude-opus-5.5) ×2, Claude Code (claude-opus-5-5) ×2 | 1.79 · 2.36 ms | 30 mW¹ | 42–52 · 6–20 | 86 / 82 % · 50 / 49 %, 9 of 9 |
 | **Rain on the River** `rain-on-the-river` | A night skyline of original towers in soft rain across a wide river: mist drifting through the towers, windows changing, slow rooftop lights and a sweeping beacon, traffic on the lit cable-stayed bridge and the far shore, and a lit barge trailing a fading wake through long, wavering reflections. | Claude Code (claude-opus-5-5), Kiro CLI (claude-opus-5.5), Claude Code, Codex (openai.gpt-6.1-sol) ×2 | 2.78 · 3.42 ms | 64 mW | 22–24 · 9–16 | 100 / 100 % · 100 / 100 %², 9 of 9 |
 | **Ringed Giant** `ringed-giant` | A banded gas giant turning once every five minutes, its zonal winds shearing the bands and carrying storms into the night side, the whole ringed system nodding gently under a distant star; glints orbit the rings, three moons pass in front of and behind rings and globe, and parallax stars, fine dust, far nebula filaments and the odd faint meteor keep deep space alive. | Codex (openai.gpt-5.6-luna) ×2, Codex (openai.gpt-5.6-sol), Claude Code (claude-opus-5-5) ×3, Codex (openai.gpt-6.1-sol) | 1.32 · 1.67 ms | 56 mW³ | 21–24 · 3–5 | 100 / 99 % · 99 / 98 %, 9 of 9 |
@@ -27,9 +27,10 @@ GPU, which the CPU-energy figure doesn't include. ² The falling rain alone chan
 city underneath (mist, windows, lights, bridge traffic, the barge) was brought to life in the
 November 2026 rounds by comparing stills a few seconds apart. ³ The planet's surface is remapped in
 JavaScript at 8 Hz and cross-faded every frame; at full quality on power (60 fps, scale 1) it draws
-about 170–200 mW, the most of the five (the others: 70–185 mW). ⁴ Measured while the Mac was busy
-with other work: in interleaved `livepaper live` runs the version before the time-continuity fix
-(69 mW when it was recorded) measured the same, 121–133 mW against 120–138 mW.
+about 170–200 mW, the most of the five (the others: 70–185 mW). ⁴ Recorded on an idle Mac before the
+time-continuity fix, which adds no real work (one smoothstep, and sometimes a skipped draw): re-measured
+on a busy Mac afterwards, interleaved `livepaper live` runs read the same for both versions (121–133
+mW before, 120–138 mW after), so the idle figure stands.
 
 ### The motion pass (November 2026)
 
