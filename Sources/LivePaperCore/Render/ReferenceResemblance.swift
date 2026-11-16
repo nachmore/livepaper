@@ -128,7 +128,8 @@ public struct ReferenceBudgets: Sendable, Equatable {
     /// A transparent picture with less of its grid opaque than this can't be compared (warns).
     public var minOpaqueShare = 0.2
     /// The median colour match of the primary stills under which the picture's colours count as
-    /// gone or changed (warns; greyscale scores 0, even darkening and fog stay near 1).
+    /// gone or changed (warns; greyscale scores 0 and a wash that shifts the hue −0.4–0.1, while even
+    /// darkening and fog stay near 1).
     public var minColour = 0.3
     public init() {}
 }

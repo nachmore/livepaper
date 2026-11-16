@@ -201,6 +201,8 @@ enum ReferenceFixtures {
         case over(Backdrop)
         /// Evenly darkened to `k` and fogged: `fog` adds the fog layer too.
         case darkenedFog(Double, fog: Bool)
+        /// A colour wash over the picture (a "dusk grade"): `rgb` at `alpha`.
+        case tinted((Double, Double, Double), alpha: Double)
 
         var description: String {
             switch self {
@@ -217,6 +219,7 @@ enum ReferenceFixtures {
             case .otherPicture(let s): return "same layout, seed \(s)"
             case .over(let b): return "over \(b)"
             case .darkenedFog(let k, let fog): return "darken \(k)\(fog ? " + fog" : "")"
+            case .tinted(let c, let a): return String(format: "tint %.2f,%.2f,%.2f @ %.2f", c.0, c.1, c.2, a)
             }
         }
     }
@@ -342,6 +345,9 @@ enum ReferenceFixtures {
         case .over(let backdrop):
             backdrop.fill(ctx, w, h)
             drawCover(ctx, photo, w, h)
+        case .tinted(let c, let a):
+            drawCover(ctx, photo, w, h)
+            ctx.setFillColor(rgb(c.0, c.1, c.2, a)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
         case .darkenedFog(let k, let fog):
             drawCover(ctx, photo, w, h, zoom: 1.03)
             ctx.setFillColor(rgb(0, 0, 0, 1 - k)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))

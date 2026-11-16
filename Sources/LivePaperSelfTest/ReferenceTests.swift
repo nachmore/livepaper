@@ -1040,7 +1040,7 @@ enum ReferenceTests {
                 }
             }
             func row(_ v: ReferenceFixtures.Variant, _ xs: [ResemblanceScore]) {
-                table.append("  \(name.padding(toLength: 13, withPad: " ", startingAt: 0))\(v.description.padding(toLength: 30, withPad: " ", startingAt: 0))" +
+                table.append("  \(name.padding(toLength: 16, withPad: " ", startingAt: 0))\(v.description.padding(toLength: 30, withPad: " ", startingAt: 0))" +
                              zip(checkSizes, xs).map {
                                  String(format: "%@ %.2f", $0.0.name, $0.1.score) + ($0.1.colour.map { String(format: " (c %.2f)", $0) } ?? "") +
                                      ($0.1.flat ? " flat" : "")
@@ -1065,8 +1065,21 @@ enum ReferenceTests {
             band(.fog, 0.68...1)
             band(.topGradient, 0.72...1)
             band(.unrelated, 0...0.30)
-            for v: ReferenceFixtures.Variant in [.mirrored, .otherPicture(7)] { row(v, scores(v)) }
-            if layout == .city || layout == .portrait { band(.otherPicture(7), 0.35...0.70) }
+            row(.mirrored, scores(.mirrored))
+            if layout == .city || layout == .portrait { band(.otherPicture(7), 0.35...0.70) } else { row(.otherPicture(7), scores(.otherPicture(7))) }
+            // A colour wash that changes the picture's hue loses its colours as well (the colour warning
+            // at 16:10): a warm dusk grade over the cool lake, city and portrait, a blue one over the warm
+            // flowers. A wash in the picture's own hue keeps them (no warning, and none is needed).
+            let washes: [ReferenceFixtures.Variant] = [.tinted((1.0, 0.55, 0.25), alpha: 0.35), .tinted((1.0, 0.55, 0.25), alpha: 0.6),
+                                                       .tinted((0.2, 0.35, 0.9), alpha: 0.5)]
+            for (i, v) in washes.enumerated() {
+                let xs = scores(v)
+                row(v, xs)
+                let changesHue = layout == .flowers ? i == 2 : i < 2
+                if changesHue, let c = xs.first?.colour, c >= minColour {
+                    failures.append("\(layout) \(v) at 16:10: colour \(String(format: "%.2f", c)) ≥ \(minColour)")
+                }
+            }
             // Colour: a greyscale rendering of the exact picture loses it (the colour warning), even
             // darkening, fog, particles and a dark gradient keep it.
             let grey = scores(.greyscale)
@@ -1080,8 +1093,8 @@ enum ReferenceTests {
                 }
             }
             for v: ReferenceFixtures.Variant in [.stretched, .letterboxed] {
-                let xs = scores(v).map(\.score)
-                row(v, scores(v))
+                let measured = scores(v), xs = measured.map(\.score)
+                row(v, measured)
                 // What the aspect warning needs: 32:9 under 0.7 and ≥ 0.25 below 16:10.
                 if !(xs[1] < 0.7 && xs[0] - xs[1] >= 0.25) { failures.append("\(layout) \(v): 32:9 \(xs[1]) vs 16:10 \(xs[0])") }
             }

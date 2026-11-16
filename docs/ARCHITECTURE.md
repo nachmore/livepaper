@@ -498,7 +498,9 @@ picture with the same layout 0.39–0.66 (city, portrait; the lake generator's s
 layout dominates); mirrored 0.24–0.94 (symmetric pictures stay high); an unrelated aurora 0.01–0.28;
 stretched / letterboxed to 32:9 0.13–0.62 against 0.84–1.00 at 16:10. Colour match: greyscale 0
 (it warns; its score stays 0.74–0.75, which alone wouldn't), while the camera, darkening, fog,
-particles and the gradient keep it at 0.94–1.00. Cut-outs (a dark and a bright one, of the city and the
+particles and the gradient keep it at 0.94–1.00; a colour wash that shifts the hue (a warm dusk grade
+at 35–60 % over the cool lake, city and portrait, a blue one over the warm flowers) −0.38–0.12 at 16:10
+(it warns, at scores of 0.75–0.77), the other washes 0.36–0.83 (no warning). Cut-outs (a dark and a bright one, of the city and the
 flowers) shown exactly over black, grey, blue, a dusk gradient or a light sky 0.97–1.00, an unrelated
 aurora 0.00–0.14 (compared over black only, the lighter backdrops had scored 0.2–0.3 and failed). A soft,
 bright picture (mean 212, contrast 4.4) darkened by its own darkenTo 0.50: 1.00, with fog 0.87–0.96 (0
