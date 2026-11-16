@@ -172,7 +172,9 @@ stored record ended, so displays writing in any order keep each other's history.
 **Web scenes.** `loadHTMLString(_:baseURL: nil)` (scenes are self-contained; the sandboxed
 WebContent process couldn't read the bundle anyway), non-persistent data store, no navigation away
 from `about:`/`data:`/`blob:`. `window.LIVEPAPER_CONFIG = {clock, clockPosition, fps, scale, seed,
-power, lowPower}` is injected at document start using the runtime's keys. The page reports
+power, lowPower}` is injected at document start using the runtime's keys (plus `lockUI`; the span
+keys and `timeOrigin` on a spanning step; `paused` for a page created paused — a still display, or
+while the gate is closed). The page reports
 `{type:'ready'}` (or `ready` with `failed:true` when the scene never registered — treated as a
 failure), `{type:'error'}` (logged with os_log, category `scene`) and `{type:'stats'}`. The saver
 calls `LivePaper.host.pause()/resume()/lockUI(bool)/power({...})`; every call is guarded so it is a
