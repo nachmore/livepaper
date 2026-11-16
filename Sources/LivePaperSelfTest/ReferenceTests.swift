@@ -674,6 +674,30 @@ enum ReferenceTests {
                 try expect(made.transparent && !made.flattened)
             }
             print("  detailed cut-out → \(made.assetPath) \(made.width)x\(made.height), \(made.data.count >> 10) KB")
+            // Noise compresses worst: no PNG of it at 2048 px or more fits, so it becomes a JPEG
+            // flattened over black at ≥ 2048 px, and TASK.md says the black is part of it now.
+            let noiseCut = try prepare(write(png(ReferenceFixtures.noise(width: 2600, height: 1800)), sb.root.appendingPathComponent("in/noise-cut.png")),
+                                       role: .animate)
+            try expectEqual(noiseCut.master.format, .png)
+            let flattened = try builder(sb, library: lib).buildSession(.create(prompt: "animate it"), references: [noiseCut], sessionID: "m0b")
+            let jpg = try SelfTests.unwrap(flattened.references.animate)
+            try expectEqual(jpg.assetPath, "assets/reference.jpg")
+            try expect(jpg.flattened && !jpg.transparent && max(jpg.width, jpg.height) >= 2048, "\(jpg.width)x\(jpg.height) \(jpg.data.count)")
+            try expect(jpg.data.count <= SceneCompiler.maxAssetFileBytes - ReferenceLimits.assetMarginBytes)
+            let black = try SelfTests.unwrap(ReferenceFixtures.pixel(jpg.data, x: 3, y: 3))
+            try expect(black.r < 16 && black.g < 16 && black.b < 16 && black.a == 255, "the see-through corner is black: \(black)")
+            try expect(text(flattened.workspace.taskFile).contains("only a JPEG flattened over black fitted the asset limit: the black is part of the picture now"),
+                       text(flattened.workspace.taskFile))
+            // When nothing fits, whose fault it is: the picture's own detail (a smaller per-file limit,
+            // the scene's assets empty), or the scene's other assets (they leave less than that).
+            let dense = try prepare(write(png(ReferenceFixtures.noise(width: 1400, height: 1000, cutout: false)), sb.root.appendingPathComponent("in/dense.png")))
+            try expectEqual(dense.master.format, .jpeg)
+            try expectReferenceError({ $0 == .pictureTooDetailed(budgetKB: 472) }) {
+                _ = try ReferenceImporter.animateAsset(from: dense.master, otherAssetBytes: 0, fileLimit: 600 << 10)
+            }
+            try expectReferenceError({ $0 == .noRoomForAsset(availableKB: 500) }) {
+                _ = try ReferenceImporter.animateAsset(from: dense.master, otherAssetBytes: (8 << 20) - (500 << 10), fileLimit: 600 << 10)
+            }
 
             let full = try scene("full", assetBytes: 7_900_000)
             try expectReferenceError({ if case .noRoomForAsset = $0 { return true }; return false }) {

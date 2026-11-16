@@ -195,15 +195,16 @@ public enum ReferenceImporter {
     /// below that it is flattened over black into the JPEG ladder (sharp beats see-through for
     /// "this exact picture"). Throws `noRoomForAsset` when the other assets leave too little room
     /// (too little to try, or for every rung), `pictureTooDetailed` when even the last rung is over
-    /// the full per-file budget.
-    static func animateAsset(from master: EncodedReferenceImage, otherAssetBytes: Int) throws -> EncodedReferenceImage {
+    /// the full per-file budget. `fileLimit`: the compiler's per-file limit (tests use a smaller one).
+    public static func animateAsset(from master: EncodedReferenceImage, otherAssetBytes: Int,
+                             fileLimit: Int = SceneCompiler.maxAssetFileBytes) throws -> EncodedReferenceImage {
         let room = SceneCompiler.maxAssetTotalBytes - otherAssetBytes
-        let budget = min(SceneCompiler.maxAssetFileBytes, room) - ReferenceLimits.assetMarginBytes
+        let budget = min(fileLimit, room) - ReferenceLimits.assetMarginBytes
         let noRoom = ReferenceError.noRoomForAsset(availableKB: max(0, room) >> 10)
         guard budget >= ReferenceLimits.minAssetBytes else { throw noRoom }
         if master.data.count <= budget { return master }
         // Whose fault it is when nothing fits: the scene's other assets, or the picture itself.
-        let tooDetailed = room < SceneCompiler.maxAssetFileBytes ? noRoom : ReferenceError.pictureTooDetailed(budgetKB: budget >> 10)
+        let tooDetailed = room < fileLimit ? noRoom : ReferenceError.pictureTooDetailed(budgetKB: budget >> 10)
         guard let decoded = thumbnail(of: master.data, maxPixel: master.longEdge),
               let pixels = SRGBBitmap(image: decoded) else { throw tooDetailed }
         var scaled: [String: CGImage] = [:]

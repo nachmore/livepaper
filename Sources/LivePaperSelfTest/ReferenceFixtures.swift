@@ -504,6 +504,31 @@ enum ReferenceFixtures {
     }
 
     /// A PNG whose left half is transparent.
+    /// Per-pixel random colour — what compresses worst — inside a centred ellipse, transparent
+    /// around it (`cutout` false: everywhere, opaque). For the animate asset's size ladder.
+    static func noise(width: Int, height: Int, seed: UInt64 = 3, cutout: Bool = true) -> CGImage {
+        var bytes = [UInt8](repeating: 0, count: width * height * 4)
+        var state = seed &* 0x9E3779B97F4A7C15 &+ 1
+        let cx = Double(width) / 2, cy = Double(height) / 2
+        bytes.withUnsafeMutableBufferPointer { px in
+            for y in 0..<height {
+                let dy = (Double(y) + 0.5 - cy) / cy
+                for x in 0..<width {
+                    let dx = (Double(x) + 0.5 - cx) / cx
+                    guard !cutout || dx * dx + dy * dy <= 1 else { continue }   // premultiplied: all zero outside
+                    state = state &* 6364136223846793005 &+ 1442695040888963407
+                    let i = (y * width + x) * 4, v = state >> 24
+                    px[i] = UInt8(truncatingIfNeeded: v); px[i + 1] = UInt8(truncatingIfNeeded: v >> 8)
+                    px[i + 2] = UInt8(truncatingIfNeeded: v >> 16); px[i + 3] = 255
+                }
+            }
+        }
+        let provider = CGDataProvider(data: Data(bytes) as CFData)!
+        return CGImage(width: width, height: height, bitsPerComponent: 8, bitsPerPixel: 32, bytesPerRow: width * 4, space: sRGB,
+                       bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue), provider: provider,
+                       decode: nil, shouldInterpolate: false, intent: .defaultIntent)!
+    }
+
     static func transparentPNG(width: Int, height: Int) -> Data {
         let ctx = context(width, height, alpha: true)
         ctx.clear(CGRect(x: 0, y: 0, width: width, height: height))
