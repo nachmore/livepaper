@@ -774,6 +774,8 @@ enum ReferenceTests {
         try expectEqual(paths("from ~/Desktop/My Refs/heron.png"), ["/Users/tester/Desktop/My Refs/heron.png"])
         try expectEqual(paths("like ~/Pictures/photo (1).png"), ["/Users/tester/Pictures/photo (1).png"])
         try expectEqual(paths("see ~/Pictures/old photo.jpg"), ["/Users/tester/Pictures/old photo.jpg"])
+        try expectEqual(paths("animate ~/Desktop/My Holiday Photo.png gently"), ["/Users/tester/Desktop/My Holiday Photo.png"])
+        try expectEqual(paths("animate ~/Desktop/My Photo 3.png"), ["/Users/tester/Desktop/My Photo 3.png"])
         try expectEqual(found("the folder ~/Desktop/My Refs/ please").map { [$0.1, "\($0.2)"] }, [["/Users/tester/Desktop/My Refs", "folder"]])
         // …and not across ordinary words, or into another path.
         try expectEqual(found("compare /tmp/refs and sunset.png").map { [$0.1, "\($0.2)"] }, [["/tmp/refs", "folder"]])

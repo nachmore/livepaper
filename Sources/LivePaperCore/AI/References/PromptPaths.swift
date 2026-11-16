@@ -88,8 +88,9 @@ public enum PromptPaths {
     /// file name when that reads like one name — a single word ("old photo.jpg", "photo (1).png"),
     /// a folder name with a slash ("My Refs/heron.png"), a parenthesis that opens right after the
     /// token and closes in the file name ("photo (copy 2).png", not "refs (the folder) and x.png"),
-    /// or a word with a digit before the last ("Screenshot 2026-11-15 at 10.41.23.png") — and not
-    /// otherwise ("refs and sunset.png" stays the folder refs); or to a word ending in "/" within two
+    /// a word with a digit before the last ("Screenshot 2026-11-15 at 10.41.23.png"), or only
+    /// capitalised words before it ("My Holiday Photo.png") — and not otherwise ("refs and
+    /// sunset.png" stays the folder refs); or to a word ending in "/" within two
     /// words ("My Refs/"). A token directly followed by a word with a slash inside that leads
     /// nowhere is a `fragment`.
     static func extend(_ token: String, in text: NSString, after end: Int) -> Extension {
@@ -125,6 +126,7 @@ public enum PromptPaths {
                 let parenthesised = words[0].text.hasPrefix("(") && !extra.dropLast().contains { $0.contains(")") }
                 let reads = n == 0 || extra.contains { $0.contains("/") } || parenthesised
                     || extra.dropLast().contains { $0.contains(where: \.isNumber) }
+                    || extra.dropLast().allSatisfy { $0.first?.isUppercase == true }
                 return reads ? .extended(candidate, end: wordEnd) : .none
             }
             if n < 2, w.text.hasSuffix("/") || trimmed.hasSuffix("/") {
