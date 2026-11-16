@@ -163,17 +163,26 @@ public final class WorkspaceBuilder: @unchecked Sendable {
 
     /// Deletes workspaces older than `retention` and the check output (stills) and reference copies
     /// of those older than `checkRetention`, by the workspace directory's modification date (which
-    /// the partial clean-up keeps, so a workspace still goes after `retention`).
+    /// the partial clean-up keeps, so a workspace still goes after `retention`). A session's record
+    /// (AISessionRecord) goes with its workspace — an unreviewed recovered session included — and a
+    /// workspace whose session still runs (its agent, or the app or CLI running it) is never deleted.
+    /// - Parameter probe: the process now running as a pid (tests inject theirs).
     public func pruneWorkspaces(now: Date = Date(), retention: TimeInterval = WorkspaceBuilder.retention,
-                                checkRetention: TimeInterval = WorkspaceBuilder.checkRetention) {
+                                checkRetention: TimeInterval = WorkspaceBuilder.checkRetention,
+                                probe: (pid_t) -> LPProcessFacts? = ProcessProbe.facts) {
         let fm = FileManager.default
+        let records = AISessionRecordStore(workspacesDirectory: workspacesDirectory)
+        func inUse(_ id: String) -> Bool { records.load(id)?.isActive(probe: probe) ?? false }
+        defer { pruneRecords(records, probe: probe) }
         guard let entries = try? fm.contentsOfDirectory(at: workspacesDirectory, includingPropertiesForKeys: [.contentModificationDateKey],
                                                         options: [.skipsHiddenFiles]) else { return }
         for url in entries {
             guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate else { continue }
             let age = now.timeIntervalSince(date)
             if age > retention {
+                guard !inUse(url.lastPathComponent) else { continue }
                 try? fm.removeItem(at: url)
+                records.remove(url.lastPathComponent)
             } else if age > checkRetention {
                 try? fm.removeItem(at: AIWorkspace(root: url).scene.appendingPathComponent(SceneChecker.checkDirectory))
                 // The user's pictures only matter while the session is reviewed (the scene keeps its own asset).
@@ -191,6 +200,19 @@ public final class WorkspaceBuilder: @unchecked Sendable {
         for url in (try? fm.contentsOfDirectory(at: relays, includingPropertiesForKeys: [.contentModificationDateKey])) ?? [] {
             let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             if now.timeIntervalSince(date) > checkRetention { try? fm.removeItem(at: url) }
+        }
+    }
+
+    /// Records whose workspace is gone go too (unless their session still runs); settled ones keep
+    /// no image copies.
+    private func pruneRecords(_ records: AISessionRecordStore, probe: (pid_t) -> LPProcessFacts?) {
+        for id in records.folderIDs() {
+            let record = records.load(id)
+            if !FileOps.entryExists(workspacesDirectory.appendingPathComponent(id)) {
+                if record?.isActive(probe: probe) != true { records.remove(id) }
+            } else if record?.isSettled == true {
+                records.removeCopies(for: id)
+            }
         }
     }
 

@@ -324,9 +324,53 @@ public protocol AIServicing: AnyObject, Sendable {
     /// workspace, which decodes the picture to animate for its fingerprint and re-encodes it when it
     /// doesn't fit the scene's asset budget (up to about a second) — call it off the main thread.
     func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?) throws -> AISessionHandle
+    /// `start` with what the session's record keeps besides the request (who runs it, the feedback
+    /// of earlier attempts, the built-in scene a modified copy came from).
+    func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?,
+               details: AISessionDetails) throws -> AISessionHandle
     /// The stored settings, or defaults when there are none (never throws: a damaged file reads as defaults).
     func loadSettings() -> AISettings
     func saveSettings(_ settings: AISettings) throws
+    /// Takes over the sessions an earlier run left behind (a crash, a force quit, a restart —
+    /// AISessionRecovery): each is already watching its agent or checking its scene. Sessions in
+    /// which nothing happened are discarded quietly; old ones are pruned with their workspaces
+    /// first. Blocking (reads every record) — call it off the main thread, once at launch.
+    func recoverSessions() -> [RecoveredAISession]
+    /// Records what the user decided about a session (its image copies go: it won't be reviewed again).
+    func recordResolution(_ resolution: AISessionRecord.Resolution, sessionID: String)
+    /// Stops agents whose app or CLI is gone and that no session of this process watches (before
+    /// uninstalling deletes their workspaces) — only ones that provably are the recorded process.
+    /// Blocks for at most `grace` + `AISession.killWait`; returns how many were stopped.
+    func stopOrphanedAgents(grace: TimeInterval) -> Int
+    /// Deletes old workspaces and records (WorkspaceBuilder.pruneWorkspaces). Blocking.
+    func pruneSessions()
+}
+
+/// What a session's record keeps besides the request (AIServicing.start(…, details:)).
+public struct AISessionDetails: Sendable, Equatable {
+    public var origin: AISessionRecord.Origin
+    /// The feedback of earlier attempts, oldest first (already part of the request's prompt).
+    public var feedback: [String]
+    /// The built-in scene a modified copy was cloned from.
+    public var clonedFrom: String?
+    public init(origin: AISessionRecord.Origin = .app, feedback: [String] = [], clonedFrom: String? = nil) {
+        self.origin = origin; self.feedback = feedback; self.clonedFrom = clonedFrom
+    }
+}
+
+/// A session an earlier run left behind, taken over by this one (AIServicing.recoverSessions).
+public struct RecoveredAISession: Sendable {
+    /// The record as it was taken over.
+    public var record: AISessionRecord
+    /// Already running: watching the agent, or checking the scene it left.
+    public var handle: AISessionHandle
+    /// The session's images rebuilt from LivePaper's copies (thumbnails, Try Again); empty without.
+    public var references: [PreparedReference]
+    /// The agent was still running when the session was taken over.
+    public var agentRunning: Bool
+    public init(record: AISessionRecord, handle: AISessionHandle, references: [PreparedReference], agentRunning: Bool) {
+        self.record = record; self.handle = handle; self.references = references; self.agentRunning = agentRunning
+    }
 }
 
 public extension AIServicing {
@@ -334,6 +378,16 @@ public extension AIServicing {
     func start(_ request: AISessionRequest, harness: AIHarness, model: String?) throws -> AISessionHandle {
         try start(request, references: [], harness: harness, model: model)
     }
+
+    // Services without session records (mocks, test doubles): nothing to recover or record.
+    func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?,
+               details: AISessionDetails) throws -> AISessionHandle {
+        try start(request, references: references, harness: harness, model: model)
+    }
+    func recoverSessions() -> [RecoveredAISession] { [] }
+    func recordResolution(_ resolution: AISessionRecord.Resolution, sessionID: String) {}
+    func stopOrphanedAgents(grace: TimeInterval) -> Int { 0 }
+    func pruneSessions() {}
 }
 
 // MARK: - Install / system integration

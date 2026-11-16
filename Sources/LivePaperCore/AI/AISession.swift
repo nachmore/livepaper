@@ -10,6 +10,13 @@
 // launch is still warming up (login shell, capability probe, render server) ends the session before
 // anything is spawned. Everything mutable lives on one serial queue, except the stop request and
 // the harness's group (under `stopLock`, so stopping never waits behind a launch).
+//
+// The session's record (AISessionRecord, next to the workspace) is kept up to date as it goes:
+// the agent's pid, group and start time once spawned, the outcome when it ends. A session an
+// earlier run left behind is taken over with `resume(agent:)` instead of `start()`
+// (AISessionRecovery): a still-running agent is watched with a process source and stopped only
+// while it provably is the recorded process; when it exits — or at once, when it already had —
+// the rest is exactly as for a session this process started.
 import Darwin
 import Foundation
 import os
@@ -52,10 +59,27 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         var prepareRenderer: () -> Void = {}
         /// Relays the render requests a sandboxed agent can only leave in the spool (RenderSpool).
         var renderRelay: RenderRelay?
+        /// Where the session's record is kept up to date (nil: no record).
+        var records: AISessionRecordStore? = nil
     }
 
     private enum StopReason { case cancelled, timedOut }
     private enum Phase { case idle, running, checking, done }
+
+    /// The agent's process: one this process spawned, or one an earlier run did (a recovered session's).
+    private enum Agent {
+        case child(ChildProcess)
+        case attached(AttachedAgent)
+        func terminateGroup() {
+            switch self {
+            case .child(let c): c.terminateGroup()
+            case .attached(let a): a.terminateGroup()
+            }
+        }
+    }
+
+    /// The status a recovered session shows while its agent still runs.
+    public static let recoveredRunningStatus = "Still working (recovered)"
 
     /// How often scene/.check/ is scanned for new stills. Polling (rather than a kqueue/FSEvents
     /// watch) because the directory doesn't exist when the agent starts and `livepaper check`
@@ -88,7 +112,9 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     // Mutable state: touched only on `queue`.
     private var phase = Phase.idle
     private var stopReason: StopReason?
-    private var child: ChildProcess?
+    private var agent: Agent?
+    /// A recovered session's watch on its agent's exit.
+    private var exitSource: DispatchSourceProcess?
     private var parser: HarnessStreamParser?
     private var stdoutLines = LineSplitter()
     private var stderrLines = LineSplitter()
@@ -97,21 +123,35 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
     private var stderrLog: FileHandle?
     private var poller: DispatchSourceTimer?
     private var stillDates: [String: Date] = [:]
-    private var sceneBefore: Data?
+    /// SHA-256 of scene/scene.js before the agent ran (nil: none, or unknown for a recovered session).
+    private var sceneBefore: String?
     private var lastStatus: String?
+    private var lastReport: CheckReport?
     /// The prompt history.jsonl records (TASK.md's request, attached paths replaced); nil: the request's.
     private let recordedPrompt: String?
+    /// When the session started (a recovered one: in the earlier run); the timeout counts from here.
+    private let startedAt: Date
+    /// Set for a recovered session that can't be checked as it was meant to be (the picture to
+    /// animate's copy is gone): it fails with this instead of being checked.
+    private let recoveryProblem: String?
 
     init(id: String, workspace: AIWorkspace, request: AISessionRequest, harness: AIHarness, model: String?,
-         dependencies: Dependencies, references: SessionReferences = .init(), recordedPrompt: String? = nil) {
+         dependencies: Dependencies, references: SessionReferences = .init(), recordedPrompt: String? = nil,
+         startedAt: Date = Date(), sceneBefore: String? = nil, recoveryProblem: String? = nil) {
         self.id = id; self.ws = workspace; self.request = request; self.harness = harness
         self.model = model?.trimmingCharacters(in: .whitespaces).nilIfEmpty; self.deps = dependencies
         self.references = references; self.recordedPrompt = recordedPrompt
+        self.startedAt = startedAt; self.sceneBefore = sceneBefore; self.recoveryProblem = recoveryProblem
         (events, continuation) = AsyncStream<AISessionEvent>.makeStream()
     }
 
     /// Starts the harness asynchronously; events arrive on `events`.
     func start() { queue.async { self.launch() } }
+
+    /// Takes over a session an earlier run left behind (AISessionRecovery): `agent` is its agent,
+    /// still running and verified to be the recorded process, or nil when the agent is gone and the
+    /// scene is to be checked now. Events arrive on `events` as for `start()`.
+    func resume(agent: LPProcessFacts?) { queue.async { self.attach(agent) } }
 
     /// Stops the harness (SIGTERM to its process group, SIGKILL after a grace period). The stream
     /// ends with `.failed("Cancelled.")` once the harness is gone. Safe to call at any time; during
@@ -138,7 +178,7 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         if stopReason == nil { stopReason = .cancelled }
         switch phase {
         case .idle, .checking: finish(.failed("Cancelled."))
-        case .running: if terminate { child?.terminateGroup() }   // else terminateNow stops it; its exit ends the stream
+        case .running: if terminate { agent?.terminateGroup() }   // else terminateNow stops it; its exit ends the stream
         case .done: break
         }
     }
@@ -204,7 +244,7 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         } catch {
             finish(.failed(error.localizedDescription)); return
         }
-        sceneBefore = try? Data(contentsOf: sceneScript)
+        sceneBefore = FileDigest.sha256(sceneScript)
         deps.prepareRenderer()
         let environment = deps.environment()
         guard !stopped() else { return }
@@ -232,9 +272,13 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         case .failure(let error)?: finish(.failed(error.localizedDescription)); return
         case .success(let p)?: process = p
         }
-        child = process
+        agent = .child(process)
         phase = .running
         log.info("session \(self.id, privacy: .public): started \(invocation.executable, privacy: .public) pid \(process.pid)")
+        // What a later LivePaper needs to recognise this agent if this process goes away while it runs.
+        if let facts = ProcessProbe.facts(process.pid) {
+            deps.records?.update(id) { $0.agent = facts; return true }
+        }
 
         let pipes = DispatchGroup()
         pipes.enter()
@@ -258,11 +302,67 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         }.start()
     }
 
+    // MARK: - A recovered session
+
+    private func attach(_ recorded: LPProcessFacts?) {
+        guard phase == .idle else { return }
+        guard let recorded else {
+            // The agent finished (or was stopped) while nobody watched: check what it left.
+            if isStopRequested { finish(.failed("Cancelled.")); return }
+            emit(.status("Recovered: \(harness.name) finished while LivePaper wasn't running."))
+            phase = .running
+            deps.prepareRenderer()
+            harnessExited(status: nil)
+            return
+        }
+        let attached = AttachedAgent(recorded)
+        // As for a spawn: a stop either came first (then the agent is stopped here) or finds the group.
+        let stopFirst = stopLock.withLock { () -> Bool in
+            group = recorded.group
+            return stopRequested
+        }
+        agent = .attached(attached)
+        phase = .running
+        log.info("session \(self.id, privacy: .public): watching recovered agent pid \(recorded.pid)")
+        emit(.status(Self.recoveredRunningStatus))
+        deps.prepareRenderer()
+        deps.renderRelay?.start()
+        scanStills()
+        startPolling()
+        let remaining = deps.timeout - Date().timeIntervalSince(startedAt)
+        queue.asyncAfter(deadline: .now() + max(0, remaining)) { [weak self] in self?.timeoutFired() }
+        // No polling: the kernel says when it exits (a process source fires at once for one that is
+        // already gone).
+        let source = DispatchSource.makeProcessSource(identifier: recorded.pid, eventMask: .exit, queue: queue)
+        source.setEventHandler { [weak self] in self?.attachedAgentExited(recorded) }
+        exitSource = source
+        source.resume()
+        if stopFirst {
+            if stopReason == nil { stopReason = .cancelled }
+            attached.terminateGroup()
+        }
+        // Gone between the decision and the watch (its pid may even be another process's by now).
+        if !attached.isRunning { attachedAgentExited(recorded) }
+    }
+
+    private func attachedAgentExited(_ recorded: LPProcessFacts) {
+        guard let source = exitSource else { return }
+        source.cancel()
+        exitSource = nil
+        Thread {
+            // As after a spawned harness: what it left in its group goes too. Its group id can't be
+            // anyone else's while something is left in it (and is empty, ESRCH, otherwise).
+            if killpg(recorded.group, 0) == 0 { _ = Self.stopGroup(recorded.group, grace: Self.leftoverGrace) }
+            self.stopLock.withLock { self.group = nil }
+            self.queue.async { self.harnessExited(status: nil) }
+        }.start()
+    }
+
     private func timeoutFired() {
-        guard phase == .running, stopReason == nil else { return }
+        guard phase == .running, stopReason == nil, agent != nil else { return }
         stopReason = .timedOut
         log.notice("session \(self.id, privacy: .public): timed out")
-        child?.terminateGroup()
+        agent?.terminateGroup()
     }
 
     private func received(stdout data: Data) {
@@ -284,11 +384,13 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         if stderrTail.count > Self.stderrTailLines { stderrTail.removeFirst(stderrTail.count - Self.stderrTailLines) }
     }
 
-    private func harnessExited(status: Int32) {
+    /// - Parameter status: the harness's exit status; nil for a recovered session's agent (only its
+    ///   parent could know it), whose result the check alone judges.
+    private func harnessExited(status: Int32?) {
         guard phase == .running else { return }
         // A stop whose queued half hasn't run yet still counts.
         if stopReason == nil, isStopRequested { stopReason = .cancelled }
-        child = nil
+        agent = nil
         deps.renderRelay?.stop()
         stopPolling()
         scanStills()
@@ -298,7 +400,7 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         }
         if let rest = stderrLines.flush() { keepStderr(rest) }
         closeLogs()
-        log.info("session \(self.id, privacy: .public): harness exited with \(status)")
+        log.info("session \(self.id, privacy: .public): harness exited with \(status.map(String.init) ?? "an unknown status")")
 
         switch stopReason {
         case .cancelled: finish(.failed("Cancelled.")); return
@@ -307,8 +409,9 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
             return
         case nil: break
         }
-        guard status == 0 else { finish(.failed(exitFailure(status))); return }
-        guard (try? Data(contentsOf: sceneScript)) != sceneBefore else {
+        if let status, status != 0 { finish(.failed(exitFailure(status))); return }
+        if let recoveryProblem { finish(.failed(recoveryProblem)); return }
+        guard FileDigest.sha256(sceneScript) != sceneBefore else {
             finish(.failed("\(harness.name) finished without changing the scene.")); return
         }
         // Everything below runs with the user's full rights, outside any sandbox the agent had: a
@@ -360,6 +463,7 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
             let url = still.path.hasPrefix("/") ? URL(fileURLWithPath: still.path) : ws.scene.appendingPathComponent(still.path)
             reportStill(url)
         }
+        lastReport = report
         emit(.checkResult(report))
         guard report.passed else { finish(.failed(Self.checkFailure(report))); return }
         do {
@@ -471,10 +575,33 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         stopPolling()
         deps.renderRelay?.stop()
         closeLogs()
-        child?.terminateGroup()
+        agent?.terminateGroup()
+        exitSource?.cancel(); exitSource = nil
         if case .failed(let reason) = event { log.notice("session \(self.id, privacy: .public) failed: \(reason, privacy: .public)") }
+        recordOutcome(event)
         emit(event)
         continuation.finish()
+    }
+
+    /// The record says how the session ended; one that can't be reviewed keeps no image copies.
+    private func recordOutcome(_ event: AISessionEvent) {
+        guard let records = deps.records else { return }
+        let outcome: AISessionRecord.Outcome
+        switch event {
+        case .finished:
+            outcome = .init(status: .passed, checkPassed: true)
+        case .failed(let message):
+            outcome = .init(status: stopReason == .cancelled ? .cancelled : .failed, message: message, checkPassed: lastReport?.passed,
+                            problems: Array((lastReport?.problems ?? []).prefix(3)))
+        default:
+            return
+        }
+        records.update(id) { record in
+            record.finishedAt = Date()
+            record.outcome = outcome
+            return true
+        }
+        if outcome.status != .passed { records.removeCopies(for: id) }
     }
 
     private func closeLogs() {
