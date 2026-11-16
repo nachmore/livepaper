@@ -140,15 +140,20 @@ re-run from Settings and only changes what still needs it.
   usual (`livepaper ai sessions` lists them).
 * **By hand.** `livepaper new "Aurora Lake"` scaffolds a web scene from the template; edit its
   `scene.js` (see [Runtime/SCENE_API.md](Runtime/SCENE_API.md)) and run `livepaper check` on it.
-* **Collections.** Gather scenes into named collections — *New Collection…* in the sidebar, *Add to
-  Collection* in a scene's menu or its detail view, or drag scene cards onto a collection in the
-  sidebar (⌘-click and ⇧-click choose several cards at once). A scene can be in any number of
-  collections; renaming or deleting a collection never deletes a scene, and deleting a scene takes it
-  out of every collection. On a collection's screen, drag cards to change the order, move scenes to
-  another collection, preview it full screen, or *Use as Screen Saver*: the screen saver then follows
-  the collection — adding, removing or reordering its scenes updates it. *Export…* writes one
-  `Name.lpcollection` file with the collection and your scenes in it (built-in scenes are named, not
-  copied); double-click it, drop it on the sidebar or use *File › Import Collection…* on another Mac.
+* **Collections.** Gather scenes into named collections, right in the Library: each collection is a
+  section above *Your Scenes* and *Included with LivePaper*, and every section collapses and expands
+  (click its header, or ← → on it; LivePaper remembers). Make one with *New Collection* in the Library's
+  toolbar (or *File › New Collection…*, ⌥⌘N), then drag scene cards onto it, or use *Add to Collection*
+  in a scene's menu or its detail view (⌘-click and ⇧-click choose several cards at once). Dragging
+  adds — a scene can be in any number of collections and stays in the others; drag within a collection
+  to change its order, and use *Move to* in a card's menu or the selection bar to move scenes from one
+  collection to another. Drop cards on *New Collection* to make a collection with them. Renaming or
+  deleting a collection never deletes a scene, and deleting a scene takes it out of every collection.
+  A collection's *…* menu plays it as the screen saver (the screen saver then follows the collection —
+  adding, removing or reordering its scenes updates it), previews it full screen, exports, renames or
+  deletes it. *Export…* writes one `Name.lpcollection` file with the collection and your scenes in it
+  (built-in scenes are named, not copied); double-click it, drop it on the Library or use *File ›
+  Import Collection…* on another Mac.
   Scenes the library already has aren't imported again, and importing a collection you already have
   changes nothing unless you ask (*Add N Scenes* / *Import as a Copy*).
   From the terminal: `livepaper collection new "Night Skies" aurora-lake neon-rain`,

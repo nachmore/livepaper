@@ -120,10 +120,11 @@ struct LibraryView: View {
         } else {
             let collections = sections.filter { $0.collection != nil }
             let others = sections.filter { $0.collection == nil }
+            let order = LibrarySections.sceneOrder(sections)
             ScrollViewReader { proxy in
                 ScrollView {
                     VStack(alignment: .leading, spacing: 26) {
-                        ForEach(collections) { sectionView($0, in: sections) }
+                        ForEach(collections) { sectionView($0, in: sections, order: order) }
                         // Searching is about finding: the row comes back with the full Library.
                         if !model.query.isActive {
                             NewCollectionRow(targeted: dropTarget == .newCollection) { model.collectionAction = .new(sceneIDs: []) }
@@ -132,7 +133,7 @@ struct LibraryView: View {
                                 } isTargeted: { track(.newCollection, $0) }
                                 .padding(.top, collections.isEmpty ? 0 : -8)
                         }
-                        ForEach(others) { sectionView($0, in: sections) }
+                        ForEach(others) { sectionView($0, in: sections, order: order) }
                     }
                     .padding(24)
                 }
@@ -153,9 +154,9 @@ struct LibraryView: View {
 
     // MARK: - A section
 
+    /// - Parameter order: every shown scene, once each (LibrarySections.sceneOrder): the selection's order.
     @ViewBuilder
-    private func sectionView(_ section: LibrarySection, in sections: [LibrarySection]) -> some View {
-        let order = LibrarySections.sceneOrder(sections)
+    private func sectionView(_ section: LibrarySection, in sections: [LibrarySection], order: [String]) -> some View {
         let bodyTargeted = section.collection != nil && dropTarget == .body(section.id) && !section.entries.isEmpty
         let stack = VStack(alignment: .leading, spacing: 12) {
             LibrarySectionHeader(section: section, focus: $focus, dropLabel: dropLabel(for: section),

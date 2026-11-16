@@ -1134,33 +1134,65 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   isn't required immediately, Lock Now is disabled with a one-line explanation and an "Open Lock
   Screen Settings…" item (the status is re-read when the user leaves System Settings).
 * **Main window (NavigationSplitView):**
-  * *Library* — grid of live thumbnails (hover = live preview), badges (video/web/AI, energy class).
-    ⌘-click toggles a card's selection, ⇧-click adds the range from the last card clicked, a plain click
-    opens the card (and ends the selection), Esc or Done ends it (`Logic/LibrarySelection.swift`; cards a
-    search or filter hides leave it). While cards are selected a bar shows the count, "Add to Collection ▾",
-    Select All and Done; a selected card gets an accent border and a checkmark in its badge row. Dragging
-    a card carries every selected card when it is one of them (`SceneDragPayload`, the private type
-    `com.nachmore.livepaper.scene-references`), else just it, with a count badge on the drag image.
-  * *Collections* (§4.6; `Views/Collections/`, `Model/AppModel+Collections.swift`, `Logic/CollectionText.swift`)
-    — a sidebar section: each collection by name with the number of its scenes in the library and a ▶ on
-    the one the screen saver plays; context menu Open / Preview Full Screen / Use as Screen Saver / Export…
-    / Rename… / Delete Collection…; "New Collection…" (also File › New Collection…, ⌥⌘N). Scene cards
-    dropped on a collection are added (dropped back on their own collection: nothing), dropped on "New
-    Collection…" they open the sheet for a collection with them; `.lpcollection` and `.lpscene` files
-    dropped anywhere on the sidebar are imported. The new / rename sheet proposes "New Collection",
-    "New Collection 2", … and says when a name is taken; deleting asks first ("Its 4 scenes stay in your
-    library", and when it plays: "The screen saver keeps playing these scenes"). An empty collection
-    created from the sidebar opens; one created with scenes stays put and offers Show. A collection's
-    screen is the library grid limited to it, in its order: drag a card onto another to move it there (the
-    dragged scenes — the selection — take its place; dropped on the empty space they go to the end;
-    scenes from elsewhere are added there), the card menu adds Remove from “X” and Move to Collection ▸
-    (applied to the selection when the card is selected), and the selection bar Move to ▾ / Remove. The
-    header: the name and count, **Use as Screen Saver** (or "Plays in the screen saver" with Screen Saver
-    Settings… and the line "The screen saver follows “X”: adding, removing or reordering its scenes
-    updates it."), Export…; the toolbar Preview Full Screen (← → step through the collection in its order,
-    `FullScreenPreviewSource.collection`; Space on a card starts at it) and More. Empty: a drop zone saying
-    how to add scenes. Opening a scene pushes its detail onto the collection's own navigation stack
-    (`AppModel.collectionPath`; the Scene menu acts on it); changing screens drops that and the selection.
+  * *Library* (`Views/Library/`: `LibraryView`, `SceneCard`, `LibrarySectionViews`; the rules in
+    `Logic/LibrarySections.swift`; for collections also `Views/Collections/` — menus, sheets, the drag
+    payload — `Model/AppModel+Collections.swift` and `Logic/CollectionText.swift`) — sections of cards with live thumbnails (hover = live preview) and
+    badges (video/web/AI, energy class): **every collection** (§4.6, in the order the collections are
+    listed: by name), then **Your Scenes**, then **Included with LivePaper**. A collection's section shows
+    its scenes that the library has, in its order; a scene can be in several sections (collections group
+    scenes; Your Scenes lists everything you made), so a card is identified by its section and its scene
+    (`LibraryCardID`). Every section header has a disclosure chevron, the title and the count ("2 of 6"
+    while a search or filter hides some) and collapses or expands on a click, with ← / → or Space (Return
+    too) when focused; VoiceOver reads it as a header button whose value is "Expanded"/"Collapsed" with
+    the count. The collapsed state is remembered across launches (`LibraryCollapsedSections`: the
+    sections' keys — `collection:<id>`, so a rename keeps it, `your-scenes`, `builtin` — as a JSON array
+    in the PreferenceStore, `libraryCollapsedSections`); new collections start expanded and a deleted
+    one's key is dropped. Search and the kind filter apply inside every section; while they are active a
+    section without matches isn't shown, collapsed or not, and nothing matching anywhere shows the usual
+    no-results view. A collection's header also shows "Plays in the screen saver" when the screen saver
+    follows it, and a trailing "…" menu — the same as its context menu (`CollectionMenuItems`): **Play as
+    Screen Saver** (the screen saver follows the collection, a live link; when it already does: "Playing
+    in the Screen Saver" and Screen Saver Settings…), **Preview Full Screen** (← → step through the
+    collection in its order, `FullScreenPreviewSource.collection`; ⇧⌘F on a focused header too),
+    **Export…**, **Rename…**, **Delete Collection…** (asks first: "Its 4 scenes stay in your library", and
+    when it plays: "The screen saver keeps playing these scenes"; never deletes scenes). An empty
+    collection shows a slim dashed drop hint ("Drag scenes here or choose Add to Collection in a scene's
+    menu") instead of a grid. After the collections (hidden while searching) a quiet "New Collection…"
+    row; the toolbar has **New Collection** too (also File › New Collection…, ⌥⌘N), next to Import Scene
+    and New Scene. The new / rename sheet proposes "New Collection", "New Collection 2", … and says when
+    a name is taken; an empty collection created this way is revealed (`AppModel.revealCollection`: the
+    Library, its section expanded, scrolled to and its header focused, clearing a search that would hide
+    it), one created with scenes stays put and offers Show — as do the banners after adding and moving,
+    and an import. The Screen Saver screen's "Edit in Library" reveals the followed collection.
+    **Organising** (`CollectionDropPlan`, `AppModel.dropPlan` / `performDrop`): dragging a card carries
+    every selected card when it is one of them (`SceneDragPayload`, the private type
+    `com.nachmore.livepaper.scene-references`, with the collection whose section it came from), else
+    just it, with a count badge on the drag image. **A drag adds:** dropped on a collection's header or
+    its empty space the scenes go to its end, dropped on one of its cards they take that card's place
+    (`CollectionOrder.dropPlacement`); they stay wherever else they are, and when they came from another
+    collection the banner says so ("It stays in “Night Skies” too. To move scenes instead, use Move to
+    Collection in their menu."). Scenes dragged within their own collection — all of them already in it —
+    are **reordered** instead (no banner; dropped back on its header or on themselves: nothing). While
+    cards are dragged over a collection its header says what the drop does ("Add to “Calm Water”", "Add
+    3 to …", "Move here", "Already here"), the targeted card or section is outlined, and scenes the
+    collection has already get an info banner. **Moving** between collections is "Move to Collection ▸"
+    in the card menu of a card in a collection's section (with "Remove from “X”"; both act on the
+    selected cards that are in X when the card is selected) and the selection bar's Move to ▾ / Remove.
+    Dropping cards on New Collection (the toolbar button or the row) opens the sheet for a collection with
+    them. `.lpcollection` and `.lpscene` files dropped on the Library (or the sidebar) are imported.
+    **Selecting:** ⌘-click toggles a card, ⇧-click adds the range from the last card clicked (in that
+    section's order), a plain click opens the card (and ends the selection), Esc or Done ends it
+    (`Logic/LibrarySelection.swift`). The selection is of scenes, so a scene selected in one section is
+    selected in each; cards a search, a filter or a collapsed section hides leave it. While cards are
+    selected a bar shows the count (and "in “X”" when they were all chosen in collection X's section,
+    `LibrarySelection.section`), Add to Collection ▾, for such a selection Move to ▾ and Remove from “X”,
+    Select All (that section's cards, else every shown scene) and Done; a selected card gets an accent
+    border and a checkmark in its badge row. **Keyboard:** cards and headers are focusable; ← → move
+    between cards in the order the Library shows them, across sections (collapsed ones skipped); a card's
+    Space previews full screen (the library order; in a collection's section, the collection from that
+    card) and Return opens it; collapsing the section of the focused card moves the focus to its header.
+    Opening a scene pushes its detail onto the Library's navigation stack (`AppModel.libraryPath`; the
+    Scene menu acts on it); changing screens ends the selection.
     **Add to Collection ▸** in the card menu and in the scene detail view's actions lists every collection
     with a checkmark when it has the scene(s) ("Night Skies (2 of 3)" when it has some): choosing a
     checked one takes them out, otherwise adds the missing ones (`CollectionMembership`), then "New
@@ -1239,7 +1271,7 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     Save & Publish; a publish that left scenes out lists them with the reason (and a banner says so).
     **Play** (`PlaylistSource`, `PlaylistDraft.setSource`): All scenes (new ones join) / Scenes you
     choose (ordered, removable, "Add Scene") / a collection (§4.6: "The screen saver follows “X”: …" with
-    Edit Collection and its scenes, read-only, in order; "“X” is empty, so the screen saver plays every
+    Edit in Library and its scenes, read-only, in order; "“X” is empty, so the screen saver plays every
     scene"; a deleted one says so). Choosing scenes starts from what plays now (a copy of a collection's
     scenes, which no longer follows it). The summary — publish bar, menu bar, sidebar footer — starts with
     the collection's name ("“Night Skies” · Shuffle · 4 scenes · every 5 minutes"); the menu bar's Preview
@@ -1299,8 +1331,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   `LibraryWatcher` watches the support directory with one FSEvents stream (`Workspaces/`, `Logs/`
   and `backups/` excluded). Only `Library/<id>.lpscene` entries, their `scene.json`,
   `thumbnail.jpg`, `history.jsonl`, `.check/report.json`, `scene.js` and `assets/` (what the live
-  previews compile), `playlist-settings.json` and `collections.json` count (a collection on screen that
-  was deleted elsewhere goes back to the library);
+  previews compile), `playlist-settings.json` and `collections.json` count (the Library's collection
+  sections follow; a selection made in a collection's section that was deleted elsewhere ends);
   a burst becomes one refresh about 0.5 s after the last change (FSEvents latency 0.2 s + a 0.3 s
   debounce, at most 2 s). Becoming active and opening the main window refresh too, as a safety
   net. Refreshes are quiet: no loading state, unchanged data isn't reassigned (selection, scroll
@@ -1391,7 +1423,7 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   Scene"), so such a package is imported as a copy, as is anything else. The CLI's
   `livepaper import` always imports.
   `.lpcollection` (`com.nachmore.livepaper.collection`, a zip conforming to `public.data`; §4.6):
-  double-click in Finder, File › Import Collection… (⇧⌘O, several at once) and drops on the sidebar go
+  double-click in Finder, File › Import Collection… (⇧⌘O, several at once) and drops on the Library (or the sidebar) go
   through `AppModel.importCollection` (`CollectionServicing.importCollection`, `.automatic`). Info.plist also
   declares the private drag type `com.nachmore.livepaper.scene-references` (never written to disk).
 * **Replacing a scene in the playlist** ("Replace with This Version", accepting an AI modify)
@@ -1412,10 +1444,12 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   display with the menu bar and a 2560×1440 one to its right, made-up ids; mock mode uses them too).
   Mock mode and the snapshots also have sample collections (`MockSampleData.collections()`: Night Skies,
   Calm Water and an empty Warm Evenings, fixed ids) through the real CollectionService over the mock
-  library; `collections-select-light` (three cards chosen, the selection bar, the sidebar section),
-  `collection-dark` (a collection the screen saver follows), `collection-empty-light`,
-  `sheet-new-collection-light`, `sheet-delete-collection-dark` and `playlist-collection-light` (Play: a
-  collection) show them.
+  library; `library-collections-light` / `-dark` (the Library's sections: Night Skies followed by the
+  screen saver, Calm Water collapsed, the empty Warm Evenings with its drop hint, the New Collection
+  row, Your Scenes and Included), `library-collections-select-light` (two cards chosen in Night Skies:
+  the selection bar with Move to and Remove), `library-collections-search-dark` (a search: "3 of 4",
+  sections without matches hidden), `sheet-new-collection-light`, `sheet-delete-collection-dark` and
+  `playlist-collection-light` (Play: a collection) show them.
 
 ## 12. Performance & battery policy
 * Budgets enforced by `livepaper check` (§9), shown in the UI as energy badges.

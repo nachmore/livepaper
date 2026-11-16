@@ -166,9 +166,12 @@ struct NewCollectionRow: View {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(targeted ? Color.accentColor.opacity(0.1) : .clear)
             }
+            // Outlined only while scenes are dragged over it: at rest it is a quiet line, like a header.
             .overlay {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .strokeBorder(targeted ? Color.accentColor : Color.primary.opacity(0.1), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                if targeted {
+                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        .strokeBorder(Color.accentColor, style: StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
+                }
             }
             .contentShape(Rectangle())
         }
