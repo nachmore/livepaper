@@ -152,6 +152,7 @@ private struct ReferenceTile: View {
     @FocusState private var focused: Bool
 
     private var isAnimate: Bool { item.role == .animate && !item.isFailed }
+    private var isReady: Bool { if case .ready = item.state { return true } else { return false } }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -196,8 +197,13 @@ private struct ReferenceTile: View {
             .accessibilityLabel(ReferenceTrayText.tileLabel(item, index: index, count: count))
             .accessibilityAddTraits(.isImage)
             .accessibilityAction(named: "Remove") { tray.remove(item.id) }
-            .accessibilityAction(named: isAnimate ? "Use as Reference" : "Animate This Image") {
-                tray.setRole(isAnimate ? .reference : .animate, for: item.id)
+            .accessibilityActions {
+                // Like the role menu: only a prepared image can be the one to animate.
+                if isReady {
+                    Button(isAnimate ? "Use as Reference" : "Animate This Image") {
+                        tray.setRole(isAnimate ? .reference : .animate, for: item.id)
+                    }
+                }
             }
     }
 

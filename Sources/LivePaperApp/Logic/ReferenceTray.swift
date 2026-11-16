@@ -51,6 +51,8 @@ final class ReferenceTray {
     private let home: URL
     private var queue: Task<Void, Never>?
     private var dismissed: Set<String> = []
+    /// An image still preparing that becomes the one to animate once it is ready.
+    private var pendingAnimate: UUID?
     private var dataCounters: [String: Int] = [:]
     private var suggestionGeneration = 0
     /// Batches (adds, attaches) queued or running.
@@ -126,18 +128,31 @@ final class ReferenceTray {
         for note in new where !note.isEmpty && !notes.contains(note) { notes.append(note) }
     }
 
-    func remove(_ id: UUID) { items.removeAll { $0.id == id } }
+    func remove(_ id: UUID) {
+        items.removeAll { $0.id == id }
+        if pendingAnimate == id { pendingAnimate = nil }
+    }
 
-    /// Choosing "Animate this image" for one item makes every other item a reference.
+    /// Choosing "Animate this image" for one item makes every other item a reference. Only a
+    /// ready image can be the one to animate (one still preparing gets it once it is ready, if the
+    /// user didn't choose another meanwhile; one that failed never does).
     func setRole(_ role: AIReferenceRole, for id: UUID) {
-        guard items.contains(where: { $0.id == id }) else { return }
+        guard let target = items.first(where: { $0.id == id }) else { return }
+        if role == .animate {
+            switch target.state {
+            case .ready: break
+            case .preparing: pendingAnimate = id; return
+            case .failed: return
+            }
+        }
+        if pendingAnimate == id || role == .animate { pendingAnimate = nil }
         for i in items.indices {
             if items[i].id == id { items[i].role = role } else if role == .animate, items[i].role == .animate { items[i].role = .reference }
         }
     }
 
     func clear() {
-        items = []; notes = []; suggestions = []
+        items = []; notes = []; suggestions = []; pendingAnimate = nil
     }
 
     func dismissNote(at index: Int) {
@@ -178,6 +193,10 @@ final class ReferenceTray {
                 accepted.append((.file(url, role: role), origin, url.standardizedFileURL.path))
             }
             room -= expansion.files.count
+            // Folders with nothing in them to attach (empty, hidden files only): say so.
+            if expansion.files.isEmpty, expansion.leftOut.isEmpty {
+                addNotes([ReferenceTrayText.nothingFound(in: fileInputs.map(\.0))])
+            }
         }
         // Pasted or dropped data.
         for input in inputs {
@@ -191,7 +210,7 @@ final class ReferenceTray {
             accepted.append((named, nil, nil))
             room -= 1
         }
-        if let sentence = leftOut.sentence() { addNotes([sentence.prefix(1).uppercased() + sentence.dropFirst() + "."]) }
+        if let note = leftOut.note { addNotes([note]) }
 
         var added: [(UUID, ReferenceInput)] = []
         for (i, (input, origin, requested)) in accepted.enumerated() {
@@ -200,7 +219,8 @@ final class ReferenceTray {
             let item = Item(id: UUID(), displayName: input.displayName, role: .reference, state: .preparing, originPath: origin,
                             requestedPath: requested)
             items.append(item)
-            if role == .animate { setRole(.animate, for: item.id) }
+            // Promoted once it is ready: an image that fails must not cost the current one its role.
+            if role == .animate { pendingAnimate = item.id }
             added.append((item.id, input))
         }
         // One at a time: a photo takes a few hundred ms and up to ~100 MB while it is decoded.
@@ -211,10 +231,13 @@ final class ReferenceTray {
             let result = await Task.detached { Result { try prepare(input) } }.value
             guard let i = items.firstIndex(where: { $0.id == id }) else { continue }
             switch result {
-            case .success(let prepared): items[i].state = .ready(prepared)
+            case .success(let prepared):
+                items[i].state = .ready(prepared)
+                if pendingAnimate == id { setRole(.animate, for: id) }
             case .failure(let error):
                 items[i].state = .failed(error.localizedDescription)
                 failed.append(error.localizedDescription)
+                if pendingAnimate == id { pendingAnimate = nil }
             }
         }
         if !failed.isEmpty { onFailures?(failed) }
@@ -248,7 +271,7 @@ final class ReferenceTray {
                 switch resolve(m) {
                 case .image: var x = m; x.kind = .image; out.append(x)
                 case .folder: var x = m; x.kind = .folder; out.append(x)
-                case .missing, .notAnImage: continue
+                case .missing, .notAnImage, .notPermitted: continue
                 }
             }
             return out
@@ -257,9 +280,11 @@ final class ReferenceTray {
         suggestions = kept
     }
 
-    /// Attaches what a suggestion names (looked up now, on the user's click).
+    /// Attaches what a suggestion names (looked up now, on the user's click). Whatever came of it,
+    /// the same path isn't suggested again (attached, or explained by a note).
     func attach(_ m: PromptPathMention, animate: Bool = false) {
         suggestions.removeAll { $0.url == m.url }
+        dismissed.insert(m.url.path)
         let resolve = self.resolve
         enqueue { [self] in
             let found = await Task.detached { resolve(m) }.value
@@ -269,6 +294,7 @@ final class ReferenceTray {
             case .folder(let url): await self.process([.file(url)], animate: false)
             case .missing: self.addNotes(["\u{201C}\(name)\u{201D} wasn't found; check the path in the prompt."])
             case .notAnImage: self.addNotes(["\u{201C}\(name)\u{201D} isn't an image or a folder."])
+            case .notPermitted: self.addNotes([ReferenceTrayText.notPermitted(m.url, home: self.home)])
             }
         }
     }
@@ -307,15 +333,38 @@ enum ReferencePasteRules {
         types.first { UTType($0)?.conforms(to: .image) == true }
     }
 
+    /// File URLs of a paste or a drop split into what to attach (image files by name, and folders,
+    /// which expand in the tray) and how many other files were left out (a Finder selection may hold
+    /// documents too; they get one note instead of failed tiles).
+    nonisolated static func imagesAndFolders(_ urls: [URL]) -> (kept: [URL], notImages: Int) {
+        var kept: [URL] = [], left = 0
+        for url in urls {
+            var isDir: ObjCBool = false
+            let folder = url.hasDirectoryPath || (FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue)
+            if folder || ReferenceFolders.isImageFileName(url.lastPathComponent) { kept.append(url) } else { left += 1 }
+        }
+        return (kept, left)
+    }
+
+    /// "Left out 2 files that aren't images." for `n` files, or nil.
+    nonisolated static func notImagesNote(_ n: Int) -> String? {
+        var left = ReferenceExpansion.LeftOut()
+        left.notImages = n
+        return left.note
+    }
+
     /// What to attach from a paste (or a drop onto the prompt) that `classify` calls images: the
-    /// file URLs (folders expand in the tray, other files are counted as left out there), else the
-    /// image data of each item, read through `data(item, type)` (the AppKit side reads the
-    /// pasteboard). Data is checked against `maxBytes` once read; nothing is written anywhere.
+    /// file URLs of images and folders (folders expand in the tray; other files are left out with a
+    /// note), else the image data of each item, read through `data(item, type)` (the AppKit side
+    /// reads the pasteboard). Data is checked against `maxBytes` once read; nothing is written anywhere.
     static func inputs(itemTypes: [[String]], fileURLs: [URL], data: (Int, String) -> Data?,
                        dataName: String = ReferenceTray.pastedName,
                        maxBytes: Int = ReferenceLimits.maxFileBytes) -> (inputs: [ReferenceInput], notes: [String]) {
         guard classify(itemTypes: itemTypes, fileURLs: fileURLs) == .images else { return ([], []) }
-        if !fileURLs.isEmpty { return (fileURLs.map { ReferenceInput.file($0) }, []) }
+        if !fileURLs.isEmpty {
+            let split = imagesAndFolders(fileURLs)
+            return (split.kept.map { ReferenceInput.file($0) }, notImagesNote(split.notImages).map { [$0] } ?? [])
+        }
         var inputs: [ReferenceInput] = [], notes: [String] = []
         for (i, types) in itemTypes.enumerated() {
             guard let type = imageType(in: types) else { continue }
@@ -349,10 +398,12 @@ enum ReferenceDropReader {
     static func inputs(from providers: [NSItemProvider], dataName: String = ReferenceTray.droppedName,
                        maxBytes: Int = ReferenceLimits.maxFileBytes) async -> (inputs: [ReferenceInput], notes: [String]) {
         var inputs: [ReferenceInput] = [], notes: [String] = []
+        var notImages = 0
         func note(_ text: String) { if !notes.contains(text) { notes.append(text) } }
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier), let url = await fileURL(provider) {
-                inputs.append(.file(url))
+                // Images and folders; other files (a Finder selection with documents in it) get one note.
+                if ReferencePasteRules.imagesAndFolders([url]).kept.isEmpty { notImages += 1 } else { inputs.append(.file(url)) }
             } else if let type = ReferencePasteRules.imageType(in: provider.registeredTypeIdentifiers) {
                 let name = provider.suggestedName.flatMap { $0.isEmpty ? nil : $0 } ?? dataName
                 switch await load(provider, type: type, maxBytes: maxBytes) {
@@ -367,6 +418,7 @@ enum ReferenceDropReader {
                 note(webNote)
             }
         }
+        if let left = ReferencePasteRules.notImagesNote(notImages) { note(left) }
         return (inputs, notes)
     }
 
@@ -430,20 +482,37 @@ enum ReferenceTrayText {
     }
 
     /// " on your Desktop", " in Downloads", " in iCloud Drive", " on “Backup”", or "" — where a
-    /// mentioned path lives, for the suggestion chips.
+    /// mentioned path lives, for the suggestion chips (case-insensitive, like the volume).
     static func location(of url: URL, home: URL = LPPaths.home) -> String {
-        let path = url.deletingLastPathComponent().standardizedFileURL.path
+        let path = url.deletingLastPathComponent().standardizedFileURL.path.lowercased()
         func under(_ rel: String) -> Bool {
-            let root = home.appendingPathComponent(rel).path
+            let root = home.appendingPathComponent(rel).path.lowercased()
             return path == root || path.hasPrefix(root + "/")
         }
         if under("Desktop") { return " on your Desktop" }
         if under("Documents") { return " in Documents" }
         if under("Downloads") { return " in Downloads" }
         if under("Library/Mobile Documents") { return " in iCloud Drive" }
+        if under("Library/CloudStorage") { return " in cloud storage" }
         let parts = url.standardizedFileURL.pathComponents
-        if parts.count > 2, parts[1] == "Volumes" { return " on \u{201C}\(parts[2])\u{201D}" }
+        if parts.count > 2, parts[1].lowercased() == "volumes" { return " on \u{201C}\(parts[2])\u{201D}" }
         return ""
+    }
+
+    /// A suggestion LivePaper wasn't allowed to look up (the user declined, or never gave, access
+    /// to that folder): what works instead.
+    static func notPermitted(_ url: URL, home: URL = LPPaths.home) -> String {
+        let place = location(of: url, home: home)
+        return "LivePaper isn\u{2019}t allowed to open \u{201C}\(url.lastPathComponent)\u{201D}\(place.isEmpty ? "" : " (\(place.dropFirst()))"). " +
+            "Drag it onto the card or use Add Images\u{2026}, or allow access in System Settings \u{203A} Privacy & Security \u{203A} Files and Folders."
+    }
+
+    /// Folders that held nothing to attach: "“refs” has no images in it (LivePaper looks 3 folders deep)."
+    static func nothingFound(in urls: [URL]) -> String {
+        if urls.count == 1, let url = urls.first {
+            return "\u{201C}\(url.lastPathComponent)\u{201D} has no images in it (LivePaper looks \(ReferenceLimits.folderDepth) folders deep)."
+        }
+        return "No images were found in what you added (LivePaper looks \(ReferenceLimits.folderDepth) folders deep)."
     }
 
     /// "The agent can't open “refs” on your Desktop. Attach copies of its images?"

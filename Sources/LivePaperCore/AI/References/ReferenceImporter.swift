@@ -11,7 +11,8 @@
 //   5. normalise: drawn into 8-bit sRGB (P3, CMYK, grey, 16-bit and HDR become sRGB SDR); the draw
 //      carries no metadata, so EXIF, GPS, TIFF, IPTC and XMP are gone
 //   6. encode: from that pixel buffer only (never CGImageDestinationAddImageFromSource), JPEG, or
-//      PNG when any pixel is transparent: a master (≤ 3840 px) and a vision copy (≤ 2000 px)
+//      PNG when the picture is meaningfully transparent (a cut-out; not a photo with a few soft
+//      corner pixels, which become black): a master (≤ 3840 px) and a vision copy (≤ 2000 px)
 //   7. summary: ReferenceSummary from a ≤ 96 px analysis draw
 //
 // Synchronous and CPU-heavy (≈ 0.1–1 s per photo): call it off the main thread, one image at a
@@ -32,6 +33,8 @@ public enum ReferenceImporter {
     static let jpegLadder: [(longEdge: Int, quality: Double)] = [(3840, 0.88), (3840, 0.8), (3200, 0.8), (2880, 0.78), (2560, 0.76),
                                                                  (2048, 0.74), (1600, 0.72), (1280, 0.7)]
     static let pngLadder = [3840, 3200, 2560, 2048, 1600, 1280]
+    /// A transparent picture to animate stays PNG down to this long edge, then becomes a JPEG.
+    static let minTransparentEdge = 2048
 
     // MARK: - Probing
 
@@ -58,7 +61,8 @@ public enum ReferenceImporter {
             let path = url.standardizedFileURL.path
             requested = path
             extensionHint = url.pathExtension
-            guard let real = AISessionPolicy.realPath(path) else { throw ReferenceError.notFound(name: name) }
+            let found = AISessionPolicy.lookUp(path)
+            guard let real = found.real else { throw found.denied ? ReferenceError.notPermitted(name: name) : ReferenceError.notFound(name: name) }
             var st = stat()
             guard lstat(real, &st) == 0 else { throw ReferenceError.notFound(name: name) }
             guard (st.st_mode & S_IFMT) == S_IFREG else { throw ReferenceError.notAFile(name: name) }
@@ -129,7 +133,7 @@ public enum ReferenceImporter {
         ]
         guard let decoded = CGImageSourceCreateThumbnailAtIndex(opened.source, 0, options as CFDictionary),
               let pixels = SRGBBitmap(image: decoded) else { throw ReferenceError.unreadable(name: name) }
-        let transparent = pixels.hasTransparency
+        let transparent = pixels.isMeaningfullyTransparent()
         let format: EncodedReferenceImage.Format = transparent ? .png : .jpeg
         guard let masterImage = pixels.cgImage(opaque: !transparent) else { throw ReferenceError.unreadable(name: name) }
         let master = try encode(masterImage, format: format, quality: masterQuality, name: name)
@@ -187,34 +191,44 @@ public enum ReferenceImporter {
 
     /// The copy of the picture that goes into the scene's assets (`assets/reference.jpg`): the
     /// master when it fits the compiler's limits next to the scene's other assets, else the first
-    /// rung of the ladder that does. Throws `noRoomForAsset` when nothing sensible fits.
+    /// rung of the ladder that does. A transparent picture stays PNG down to `minTransparentEdge`;
+    /// below that it is flattened over black into the JPEG ladder (sharp beats see-through for
+    /// "this exact picture"). Throws `noRoomForAsset` when the other assets leave too little room
+    /// (too little to try, or for every rung), `pictureTooDetailed` when even the last rung is over
+    /// the full per-file budget.
     static func animateAsset(from master: EncodedReferenceImage, otherAssetBytes: Int) throws -> EncodedReferenceImage {
         let room = SceneCompiler.maxAssetTotalBytes - otherAssetBytes
         let budget = min(SceneCompiler.maxAssetFileBytes, room) - ReferenceLimits.assetMarginBytes
-        let none = ReferenceError.noRoomForAsset(availableKB: max(0, room) >> 10)
-        guard budget >= ReferenceLimits.minAssetBytes else { throw none }
+        let noRoom = ReferenceError.noRoomForAsset(availableKB: max(0, room) >> 10)
+        guard budget >= ReferenceLimits.minAssetBytes else { throw noRoom }
         if master.data.count <= budget { return master }
+        // Whose fault it is when nothing fits: the scene's other assets, or the picture itself.
+        let tooDetailed = room < SceneCompiler.maxAssetFileBytes ? noRoom : ReferenceError.pictureTooDetailed(budgetKB: budget >> 10)
         guard let decoded = thumbnail(of: master.data, maxPixel: master.longEdge),
-              let pixels = SRGBBitmap(image: decoded) else { throw none }
-        let transparent = master.format == .png
-        var scaled: [Int: CGImage] = [:]
-        func image(longEdge: Int) -> CGImage? {
-            let edge = min(longEdge, master.longEdge)
-            if let cached = scaled[edge] { return cached }
-            let made = edge >= master.longEdge ? pixels.cgImage(opaque: !transparent)
-                : SRGBBitmap(image: decoded, maxPixel: edge)?.cgImage(opaque: !transparent)
-            scaled[edge] = made
+              let pixels = SRGBBitmap(image: decoded) else { throw tooDetailed }
+        var scaled: [String: CGImage] = [:]
+        func image(longEdge: Int, opaque: Bool) -> CGImage? {
+            let edge = min(longEdge, master.longEdge), key = "\(edge) \(opaque)"
+            if let cached = scaled[key] { return cached }
+            let made = edge >= master.longEdge ? pixels.cgImage(opaque: opaque)
+                : SRGBBitmap(image: decoded, maxPixel: edge)?.cgImage(opaque: opaque)
+            scaled[key] = made
             return made
         }
-        let rungs: [(Int, Double)] = transparent ? pngLadder.map { ($0, 1) } : jpegLadder.map { ($0.longEdge, $0.quality) }
-        var tried = Set<String>()
-        for (edge, quality) in rungs {
-            let key = "\(min(edge, master.longEdge))@\(quality)"
-            guard tried.insert(key).inserted, let img = image(longEdge: edge) else { continue }
-            let encoded = try encode(img, format: master.format, quality: quality, name: "reference")
+        typealias Rung = (edge: Int, quality: Double, format: EncodedReferenceImage.Format)
+        let jpeg: [Rung] = jpegLadder.map { ($0.longEdge, $0.quality, .jpeg) }
+        let rungs: [Rung] = master.format == .png
+            ? pngLadder.filter { $0 >= minTransparentEdge }.map { ($0, 1, .png) } + jpeg
+            : jpeg
+        // The master's own settings give the master's size again: never worth an encode.
+        var tried: Set<String> = ["\(master.longEdge)@\(master.format == .png ? 1 : masterQuality) \(master.format)"]
+        for rung in rungs {
+            let key = "\(min(rung.edge, master.longEdge))@\(rung.quality) \(rung.format)"
+            guard tried.insert(key).inserted, let img = image(longEdge: rung.edge, opaque: rung.format == .jpeg) else { continue }
+            let encoded = try encode(img, format: rung.format, quality: rung.quality, name: "reference")
             if encoded.data.count <= budget { return encoded }
         }
-        throw none
+        throw tooDetailed
     }
 
     /// Lower-case hex SHA-256.

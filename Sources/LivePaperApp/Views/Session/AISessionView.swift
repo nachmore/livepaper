@@ -487,7 +487,8 @@ private struct SessionDecisionBar: View {
             TextField("Feedback", text: $feedback, prompt: Text("What should be different? (optional)"), axis: .vertical)
                 .lineLimit(2...4)
                 .textFieldStyle(.roundedBorder)
-            Button(buttonTitle) { model.retry(session, feedback: feedback) }
+            Button(buttonTitle) { Task { await model.retry(session, feedback: feedback) } }
+                .disabled(model.isStartingSession)
                 .help(session.references.isEmpty
                       ? "Starts a new session that keeps the prompt, with your feedback added"
                       : "Starts a new session that keeps the prompt and reference images, with your feedback added")

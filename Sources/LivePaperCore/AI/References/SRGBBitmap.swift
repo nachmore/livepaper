@@ -1,6 +1,6 @@
 // SRGBBitmap — a small sRGB, 8-bit RGBA pixel buffer (premultiplied, i.e. composited over black),
-// plus a summed-area table for exact area averages. Shared by the reference importer (summary,
-// transparency) and the resemblance check. CoreGraphics only.
+// plus a summed-area table for exact area averages (of alpha too, for transparent pictures).
+// Shared by the reference importer (summary, transparency) and the resemblance check. CoreGraphics only.
 import CoreGraphics
 import Foundation
 
@@ -55,6 +55,24 @@ struct SRGBBitmap: Sendable, Equatable {
         return false
     }
 
+    /// Share of the pixels that aren't fully opaque (0–1).
+    var nonOpaqueShare: Double {
+        guard width * height > 0 else { return 0 }
+        var n = 0, i = 3
+        while i < rgba.count { if rgba[i] != 255 { n += 1 }; i += 4 }
+        return Double(n) / Double(width * height)
+    }
+
+    /// Transparent in a way that matters: more than `minShare` of the pixels aren't opaque and
+    /// some are clearly see-through (alpha < 250). A photo with rounded or slightly feathered
+    /// corners, or a stray pixel, counts as opaque (those pixels become black over JPEG).
+    func isMeaningfullyTransparent(minShare: Double = 0.005) -> Bool {
+        guard nonOpaqueShare > minShare else { return false }
+        var i = 3
+        while i < rgba.count { if rgba[i] < 250 { return true }; i += 4 }
+        return false
+    }
+
     /// The pixels as a CGImage: with alpha (`opaque` false) or without (alpha ignored).
     func cgImage(opaque: Bool) -> CGImage? {
         guard let provider = CGDataProvider(data: Data(rgba) as CFData) else { return nil }
@@ -78,32 +96,38 @@ struct SRGBBitmap: Sendable, Equatable {
     }
 }
 
-/// Integral images of R, G and B: the exact mean colour of any (fractional) rectangle of a
-/// piecewise-constant image in O(1). Bilinear interpolation of the integer-grid table is exact
-/// here, because within one pixel the integral is bilinear in x and y.
+/// Integral images of R, G and B (and alpha, when asked for): the exact mean colour of any
+/// (fractional) rectangle of a piecewise-constant image in O(1). Bilinear interpolation of the
+/// integer-grid table is exact here, because within one pixel the integral is bilinear in x and y.
 struct SummedArea: Sendable {
     let width: Int
     let height: Int
     private var r: [Double], g: [Double], b: [Double]
+    /// nil unless built `withAlpha`.
+    private var a: [Double]?
 
-    init(_ bmp: SRGBBitmap) {
+    init(_ bmp: SRGBBitmap, withAlpha: Bool = false) {
         let w = bmp.width, h = bmp.height
         width = w; height = h
         let stride = w + 1
         var r = [Double](repeating: 0, count: stride * (h + 1)), g = r, b = r
+        var a: [Double] = withAlpha ? r : []
         bmp.rgba.withUnsafeBufferPointer { px in
             for y in 0..<h {
-                var rr = 0.0, gg = 0.0, bb = 0.0
+                var rr = 0.0, gg = 0.0, bb = 0.0, aa = 0.0
                 for x in 0..<w {
                     let i = (y * w + x) * 4
                     rr += Double(px[i]); gg += Double(px[i + 1]); bb += Double(px[i + 2])
                     let o = (y + 1) * stride + x + 1, above = y * stride + x + 1
                     r[o] = r[above] + rr; g[o] = g[above] + gg; b[o] = b[above] + bb
+                    if withAlpha { aa += Double(px[i + 3]); a[o] = a[above] + aa }
                 }
             }
         }
-        self.r = r; self.g = g; self.b = b
+        self.r = r; self.g = g; self.b = b; self.a = withAlpha ? a : nil
     }
+
+    var hasAlpha: Bool { a != nil }
 
     private func integral(_ t: [Double], _ x: Double, _ y: Double) -> Double {
         let x = min(max(x, 0), Double(width)), y = min(max(y, 0), Double(height))
@@ -122,28 +146,34 @@ struct SummedArea: Sendable {
     /// Mean R, G, B of every cell of a `cols`×`rows` grid laid over `rect` (row-major, top row
     /// first): one integral lookup per grid corner, so it is cheap enough for many framings.
     func cellMeans(rect: CGRect, cols: Int, rows: Int) -> (r: [Double], g: [Double], b: [Double]) {
+        (grid(r, rect: rect, cols: cols, rows: rows), grid(g, rect: rect, cols: cols, rows: rows), grid(b, rect: rect, cols: cols, rows: rows))
+    }
+
+    /// Mean alpha (0–255) of every cell of the grid, or nil without an alpha table.
+    func cellAlpha(rect: CGRect, cols: Int, rows: Int) -> [Double]? {
+        a.map { grid($0, rect: rect, cols: cols, rows: rows) }
+    }
+
+    private func grid(_ t: [Double], rect: CGRect, cols: Int, rows: Int) -> [Double] {
         let cw = rect.width / Double(cols), ch = rect.height / Double(rows)
         let area = cw * ch
-        func grid(_ t: [Double]) -> [Double] {
-            var corners = [Double](repeating: 0, count: (cols + 1) * (rows + 1))
-            for j in 0...rows {
-                let y = rect.minY + Double(j) * ch
-                for i in 0...cols { corners[j * (cols + 1) + i] = integral(t, rect.minX + Double(i) * cw, y) }
-            }
-            var out = [Double](repeating: 0, count: cols * rows)
-            corners.withUnsafeBufferPointer { c in
-                out.withUnsafeMutableBufferPointer { o in
-                    let s = cols + 1
-                    for j in 0..<rows {
-                        for i in 0..<cols {
-                            o[j * cols + i] = (c[(j + 1) * s + i + 1] - c[(j + 1) * s + i] - c[j * s + i + 1] + c[j * s + i]) / area
-                        }
+        var corners = [Double](repeating: 0, count: (cols + 1) * (rows + 1))
+        for j in 0...rows {
+            let y = rect.minY + Double(j) * ch
+            for i in 0...cols { corners[j * (cols + 1) + i] = integral(t, rect.minX + Double(i) * cw, y) }
+        }
+        var out = [Double](repeating: 0, count: cols * rows)
+        corners.withUnsafeBufferPointer { c in
+            out.withUnsafeMutableBufferPointer { o in
+                let s = cols + 1
+                for j in 0..<rows {
+                    for i in 0..<cols {
+                        o[j * cols + i] = (c[(j + 1) * s + i + 1] - c[(j + 1) * s + i] - c[j * s + i + 1] + c[j * s + i]) / area
                     }
                 }
             }
-            return out
         }
-        return (grid(r), grid(g), grid(b))
+        return out
     }
 
     /// Mean R, G, B over `rect` (pixels, top-left origin), clipped to the image.

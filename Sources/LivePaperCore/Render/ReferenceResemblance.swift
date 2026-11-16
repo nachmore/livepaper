@@ -12,10 +12,12 @@
 //           (negatives count as 0), 0…1
 //
 // Correlations ignore even darkening and contrast changes (the brightness budgets often force
-// those), the clock's cells are masked, and a flat still scores 0. Measured bands (§9): the picture
-// with a slow camera, darkening, fog or particles ≥ 0.75; the same layout with another picture
-// 0.35–0.7; an unrelated scene ≤ 0.3. Only the deterministic rules (the scene never loads the
-// picture) and a median below `failBelow` fail; everything else only warns.
+// those), the clock's cells are masked, and so are the cells where a transparent picture (a
+// cut-out) is see-through: whatever the scene puts behind it isn't compared. A still that is flat
+// next to the picture's own contrast scores 0. Measured bands (§9): the picture with a slow camera,
+// darkening, fog or particles ≥ 0.75; the same layout with another picture 0.35–0.7; an unrelated
+// scene ≤ 0.3. Only the deterministic rules (the scene never loads the picture) and a median below
+// `failBelow` fail; everything else only warns.
 import Accelerate
 import CoreGraphics
 import Foundation
@@ -28,6 +30,13 @@ public struct ReferenceFingerprint: Sendable, Equatable {
     public let height: Int
     /// RGBA (premultiplied, i.e. over black), top row first.
     public let rgba: [UInt8]
+
+    /// Some pixel isn't fully opaque (the comparison then leaves out the see-through cells).
+    public var hasAlpha: Bool {
+        var i = 3
+        while i < rgba.count { if rgba[i] != 255 { return true }; i += 4 }
+        return false
+    }
 
     public init(image: CGImage) {
         let bmp = SRGBBitmap(image: image, maxPixel: Self.longEdge) ?? SRGBBitmap(width: 1, height: 1, rgba: [0, 0, 0, 255])
@@ -67,11 +76,15 @@ public struct ResemblanceScore: Codable, Sendable, Equatable {
     /// The framing that matched best: zoom of the cover-fit crop and its offset (share of the crop).
     public var zoom: Double
     public var offset: [Double]
-    /// Standard deviation of the still's luma over the grid (a flat frame scores 0).
+    /// Standard deviation of the still's luma over the grid.
     public var stillContrast: Double
-    public init(score: Double, low: Double? = nil, band: Double? = nil, colour: Double? = nil, zoom: Double, offset: [Double], stillContrast: Double) {
+    /// The still was too flat to compare (scored 0): darkened, fogged or covered until the
+    /// picture's detail is gone.
+    public var flat: Bool
+    public init(score: Double, low: Double? = nil, band: Double? = nil, colour: Double? = nil, zoom: Double, offset: [Double], stillContrast: Double,
+                flat: Bool = false) {
         self.score = score; self.low = low; self.band = band; self.colour = colour; self.zoom = zoom; self.offset = offset
-        self.stillContrast = stillContrast
+        self.stillContrast = stillContrast; self.flat = flat
     }
 }
 
@@ -83,11 +96,13 @@ public struct ReferenceMeasurement: Sendable {
     public var referencedInScene: Bool
     /// The picture has enough detail to compare with.
     public var referenceMeasurable: Bool
+    /// Share of the picture that is opaque enough to compare (1 without transparency).
+    public var opaqueShare: Double
     public var frames: [(frame: CheckFrame, score: ResemblanceScore)]
-    public init(assetPath: String, assetIntact: Bool, referencedInScene: Bool, referenceMeasurable: Bool,
+    public init(assetPath: String, assetIntact: Bool, referencedInScene: Bool, referenceMeasurable: Bool, opaqueShare: Double = 1,
                 frames: [(frame: CheckFrame, score: ResemblanceScore)]) {
         self.assetPath = assetPath; self.assetIntact = assetIntact; self.referencedInScene = referencedInScene
-        self.referenceMeasurable = referenceMeasurable; self.frames = frames
+        self.referenceMeasurable = referenceMeasurable; self.opaqueShare = opaqueShare; self.frames = frames
     }
 }
 
@@ -99,10 +114,22 @@ public struct ReferenceBudgets: Sendable, Equatable {
     public var warnBelow = 0.70
     /// 32:9 / 5:4 warn when their median is this far under the primary size's.
     public var aspectGap = 0.25
-    /// A still flatter than this (luma standard deviation) scores 0.
+    /// A still is flat (scores 0) when its luma standard deviation is under
+    /// max(`flatStillFloor`, min(`minStillContrast`, `flatStillShare` × the cover-fit picture's own)):
+    /// relative, so a soft, bright picture darkened by TASK.md's darkenTo (≥ 0.42) still counts.
     public var minStillContrast = 3.0
+    public var flatStillShare = 0.2
+    public var flatStillFloor = 1.0
     /// A picture flatter than this can't be compared (warns "check by eye").
     public var minReferenceContrast = 4.0
+    /// Cells of a transparent picture whose mean opacity is under this aren't compared (the
+    /// scene's backdrop shows there).
+    public var minCellOpacity = 0.9
+    /// A transparent picture with less of its grid opaque than this can't be compared (warns).
+    public var minOpaqueShare = 0.2
+    /// The median colour match of the primary stills under which the picture's colours count as
+    /// gone or changed (warns; greyscale scores 0, even darkening and fog stay near 1).
+    public var minColour = 0.3
     public init() {}
 }
 
@@ -166,7 +193,6 @@ public enum ReferenceResemblance {
 
     // MARK: - Features
 
-    /// One grid's measures, with the clock's cells filled with the grid's own mean.
     /// One grid's measures over its unmasked cells (the clock's cells filled with the grid's own
     /// mean before blurring): z-scored blurred luma and detail, and the unit chroma vector, so that
     /// comparing two grids is three dot products.
@@ -175,6 +201,7 @@ public enum ReferenceResemblance {
         var lumaStd: Double, bandStd: Double, chromaRMS: Double
     }
 
+    /// The clock's cells (its rect plus one cell around it) in a `cols`×`rows` grid over the viewport.
     static func mask(cols: Int, rows: Int, cssWidth: Double, cssHeight: Double, clock: LPClockPosition) -> [Bool] {
         let cw = cssWidth / Double(cols), ch = cssHeight / Double(rows)
         let r = clockRect(clock, width: cssWidth, height: cssHeight).insetBy(dx: -cw, dy: -ch)
@@ -294,30 +321,44 @@ public enum ReferenceResemblance {
     public final class Scorer {
         public let reference: ReferenceFingerprint
         public let clock: LPClockPosition
+        public let budgets: ReferenceBudgets
         private let sat: SummedArea
-        private var candidates: [String: [(zoom: Double, offset: [Double], features: Features)]] = [:]
 
-        public init(reference: ReferenceFingerprint, clock: LPClockPosition) {
-            self.reference = reference; self.clock = clock
-            sat = SummedArea(reference.bitmap)
+        /// One framing of the picture: its features, and — when the picture is see-through somewhere
+        /// in it — the cells left out (clock + transparent), which the still is then measured with too.
+        private struct Candidate {
+            var zoom: Double, offset: [Double], features: Features, mask: [Bool]?
+        }
+        private struct Viewport {
+            var cols: Int, rows: Int, clockMask: [Bool], candidates: [Candidate]
+            /// The cover-fit framing itself (zoom 1, centred).
+            var centre: Candidate
+        }
+        private var viewports: [String: Viewport] = [:]
+
+        public init(reference: ReferenceFingerprint, clock: LPClockPosition, budgets: ReferenceBudgets = .init()) {
+            self.reference = reference; self.clock = clock; self.budgets = budgets
+            sat = SummedArea(reference.bitmap, withAlpha: reference.hasAlpha)
         }
 
         public func score(still: CGImage, cssWidth: Double, cssHeight: Double) -> ResemblanceScore {
-            let aspect = cssWidth / cssHeight
-            let cols = ReferenceResemblance.columns, rows = ReferenceResemblance.rows(aspect: aspect)
-            let masked = ReferenceResemblance.mask(cols: cols, rows: rows, cssWidth: cssWidth, cssHeight: cssHeight, clock: clock)
+            let vp = viewport(cssWidth: cssWidth, cssHeight: cssHeight)
             guard let bmp = SRGBBitmap(image: still, maxPixel: ReferenceResemblance.stillPixels) else {
                 return ResemblanceScore(score: 0, zoom: 1, offset: [0, 0], stillContrast: 0)
             }
-            let s = ReferenceResemblance.features(SummedArea(bmp), rect: CGRect(x: 0, y: 0, width: bmp.width, height: bmp.height),
-                                                  cols: cols, rows: rows, masked: masked)
-            let contrast = (s.lumaStd * 100).rounded() / 100
-            guard s.lumaStd >= ReferenceBudgets().minStillContrast else {
-                return ResemblanceScore(score: 0, zoom: 1, offset: [0, 0], stillContrast: contrast)
+            let stillSAT = SummedArea(bmp), full = CGRect(x: 0, y: 0, width: bmp.width, height: bmp.height)
+            let base = ReferenceResemblance.features(stillSAT, rect: full, cols: vp.cols, rows: vp.rows, masked: vp.clockMask)
+            func stillFeatures(_ c: Candidate) -> Features {
+                c.mask.map { ReferenceResemblance.features(stillSAT, rect: full, cols: vp.cols, rows: vp.rows, masked: $0) } ?? base
+            }
+            let centre = stillFeatures(vp.centre)
+            let contrast = ReferenceResemblance.rounded(centre.lumaStd)
+            guard centre.lumaStd >= flatBelow(vp) else {
+                return ResemblanceScore(score: 0, zoom: 1, offset: [0, 0], stillContrast: contrast, flat: true)
             }
             var best: ResemblanceScore?
-            for c in framings(aspect: aspect, cols: cols, rows: rows, masked: masked, key: "\(cssWidth)x\(cssHeight)") {
-                let m = ReferenceResemblance.compare(still: s, reference: c.features)
+            for c in vp.candidates {
+                let m = ReferenceResemblance.compare(still: stillFeatures(c), reference: c.features)
                 if best == nil || m.score > best!.score + 1e-12 {
                     best = ResemblanceScore(score: m.score, low: m.low, band: m.band, colour: m.colour, zoom: c.zoom, offset: c.offset,
                                             stillContrast: contrast)
@@ -326,48 +367,83 @@ public enum ReferenceResemblance {
             return best ?? ResemblanceScore(score: 0, zoom: 1, offset: [0, 0], stillContrast: contrast)
         }
 
-        private func framings(aspect: Double, cols: Int, rows: Int, masked: [Bool], key: String)
-            -> [(zoom: Double, offset: [Double], features: Features)] {
-            if let known = candidates[key] { return known }
-            var list: [(zoom: Double, offset: [Double], features: Features)] = []
+        /// The luma contrast under which a still at this viewport is flat: relative to the
+        /// cover-fit picture's own, capped by `minStillContrast`.
+        private func flatBelow(_ vp: Viewport) -> Double {
+            max(budgets.flatStillFloor, min(budgets.minStillContrast, budgets.flatStillShare * vp.centre.features.lumaStd))
+        }
+
+        private func viewport(cssWidth: Double, cssHeight: Double) -> Viewport {
+            let key = "\(cssWidth)x\(cssHeight)"
+            if let known = viewports[key] { return known }
+            let aspect = cssWidth / cssHeight
+            let cols = ReferenceResemblance.columns, rows = ReferenceResemblance.rows(aspect: aspect)
+            let clockMask = ReferenceResemblance.mask(cols: cols, rows: rows, cssWidth: cssWidth, cssHeight: cssHeight, clock: clock)
+            var list: [Candidate] = []
             for z in ReferenceResemblance.zooms {
                 for dy in ReferenceResemblance.shifts {
                     for dx in ReferenceResemblance.shifts {
                         let crop = ReferenceResemblance.coverCrop(width: reference.width, height: reference.height, aspect: aspect, zoom: z, dx: dx, dy: dy)
-                        list.append((z, [dx, dy], ReferenceResemblance.features(sat, rect: crop, cols: cols, rows: rows, masked: masked)))
+                        let masked = maskWithTransparency(clockMask, crop: crop, cols: cols, rows: rows)
+                        list.append(Candidate(zoom: z, offset: [dx, dy],
+                                              features: ReferenceResemblance.features(sat, rect: crop, cols: cols, rows: rows, masked: masked ?? clockMask),
+                                              mask: masked))
                     }
                 }
             }
-            candidates[key] = list
-            return list
+            let centre = list.first { $0.zoom == 1 && $0.offset == [0, 0] } ?? list[0]
+            let vp = Viewport(cols: cols, rows: rows, clockMask: clockMask, candidates: list, centre: centre)
+            viewports[key] = vp
+            return vp
         }
 
-        /// Luma contrast of the whole picture on the comparison grid.
+        /// `base` plus the cells of `crop` the picture doesn't cover opaquely enough, or nil when
+        /// that adds nothing (an opaque picture, or an opaque part of it).
+        private func maskWithTransparency(_ base: [Bool], crop: CGRect, cols: Int, rows: Int) -> [Bool]? {
+            guard let alpha = sat.cellAlpha(rect: crop, cols: cols, rows: rows) else { return nil }
+            let limit = budgets.minCellOpacity * 255
+            var m = base, changed = false
+            for i in m.indices where !m[i] && alpha[i] < limit { m[i] = true; changed = true }
+            return changed ? m : nil
+        }
+
+        /// Luma contrast of the whole picture on the comparison grid (its opaque parts).
         public var referenceContrast: Double {
+            let (cols, rows, rect, masked) = wholeGrid()
+            return ReferenceResemblance.features(sat, rect: rect, cols: cols, rows: rows, masked: masked).lumaStd
+        }
+
+        /// Share of the whole picture's grid that is opaque enough to compare (1 without transparency).
+        public var opaqueShare: Double {
+            let (_, _, _, masked) = wholeGrid()
+            return masked.isEmpty ? 1 : Double(masked.filter { !$0 }.count) / Double(masked.count)
+        }
+
+        private func wholeGrid() -> (cols: Int, rows: Int, rect: CGRect, masked: [Bool]) {
             let aspect = Double(reference.width) / Double(max(reference.height, 1))
             let cols = ReferenceResemblance.columns, rows = ReferenceResemblance.rows(aspect: aspect)
-            let f = ReferenceResemblance.features(sat, rect: CGRect(x: 0, y: 0, width: reference.width, height: reference.height),
-                                                  cols: cols, rows: rows, masked: [Bool](repeating: false, count: cols * rows))
-            return f.lumaStd
+            let rect = CGRect(x: 0, y: 0, width: reference.width, height: reference.height)
+            let none = [Bool](repeating: false, count: cols * rows)
+            return (cols, rows, rect, maskWithTransparency(none, crop: rect, cols: cols, rows: rows) ?? none)
         }
     }
 
     /// How much `still` (a frame laid out at `cssWidth`×`cssHeight`) looks like the cover-fit picture.
     public static func score(still: CGImage, cssWidth: Double, cssHeight: Double, reference: ReferenceFingerprint,
-                             clock: LPClockPosition) -> ResemblanceScore {
-        Scorer(reference: reference, clock: clock).score(still: still, cssWidth: cssWidth, cssHeight: cssHeight)
+                             clock: LPClockPosition, budgets: ReferenceBudgets = .init()) -> ResemblanceScore {
+        Scorer(reference: reference, clock: clock, budgets: budgets).score(still: still, cssWidth: cssWidth, cssHeight: cssHeight)
     }
 
     /// Scores every still (PNG paths, absolute or relative to `package`) and checks the package's
     /// copy of the picture.
     public static func measure(package: URL, target: ReferenceTarget, stills: [(frame: CheckFrame, path: String)],
-                               clock: LPClockPosition) -> ReferenceMeasurement {
+                               clock: LPClockPosition, budgets: ReferenceBudgets = .init()) -> ReferenceMeasurement {
         let assetURL = package.appendingPathComponent(target.assetPath)
         let intact = FileOps.isRegularFile(assetURL) && (try? Data(contentsOf: assetURL)).map(ReferenceImporter.sha256) == target.assetSHA256
         let name = (target.assetPath as NSString).lastPathComponent
         let js = (try? String(contentsOf: package.appendingPathComponent(SceneCompiler.sceneFile), encoding: .utf8)) ?? ""
         let referenced = JSTokenizer.tokens(js).contains { $0.kind == .string && $0.text.contains(name) }
-        let scorer = Scorer(reference: target.fingerprint, clock: clock)
+        let scorer = Scorer(reference: target.fingerprint, clock: clock, budgets: budgets)
         var frames: [(frame: CheckFrame, score: ResemblanceScore)] = []
         for (frame, path) in stills {
             let url = path.hasPrefix("/") ? URL(fileURLWithPath: path) : package.appendingPathComponent(path)
@@ -375,7 +451,8 @@ public enum ReferenceResemblance {
             frames.append((frame, scorer.score(still: image, cssWidth: Double(frame.width), cssHeight: Double(frame.height))))
         }
         return ReferenceMeasurement(assetPath: target.assetPath, assetIntact: intact, referencedInScene: referenced,
-                                    referenceMeasurable: scorer.referenceContrast >= ReferenceBudgets().minReferenceContrast, frames: frames)
+                                    referenceMeasurable: scorer.referenceContrast >= budgets.minReferenceContrast,
+                                    opaqueShare: rounded(scorer.opaqueShare), frames: frames)
     }
 
     // MARK: - Verdict
@@ -416,12 +493,25 @@ public enum ReferenceResemblance {
             warnings.append("scene/\(m.assetPath) is not the file LivePaper provided (changed, replaced or removed). Leave it exactly as it is: " +
                             "LivePaper puts the original back when you finish, and the scene is checked with that file.")
         }
+        guard m.opaqueShare >= b.minOpaqueShare else {
+            warnings.append("Too little of the picture to animate is opaque to compare with the stills (\(Int((m.opaqueShare * 100).rounded())) % " +
+                            "of it); check by eye that every still shows it.")
+            return (problems, warnings, summary)
+        }
         guard m.referenceMeasurable else {
             warnings.append("The picture to animate has too little detail to compare with the stills; check by eye that every still shows it.")
             return (problems, warnings, summary)
         }
         guard let med, m.referencedInScene else { return (problems, warnings, summary) }
         if med < b.failBelow {
+            let flat = m.frames.filter(\.score.flat)
+            if flat.count * 2 > m.frames.count {
+                let most = flat.map(\.score.stillContrast).max() ?? 0
+                problems.append("The stills are too flat to show the user's picture: at \(SceneChecker.frameList(flat.map(\.frame))) its detail " +
+                                "is gone (luma contrast \(two(most)) or less) \u{2014} darkened, fogged or covered too much. Darken evenly no further " +
+                                "than TASK.md's darkenTo, keep fog and overlays light and local, and put the dark gradient only behind the clock.")
+                return (problems, warnings, summary)
+            }
             let worst = m.frames.sorted { $0.score.score < $1.score.score }.map(\.frame)
             problems.append("The stills don't show the user's picture: similarity to the cover-fit reference is \(two(med)) (needs ≥ " +
                             "\(two(b.failBelow)); 1 = identical) across \(SceneChecker.frameList(worst)). Draw assets/\(name) as the " +
@@ -441,6 +531,12 @@ public enum ReferenceResemblance {
                 warnings.append("At \(label) the picture doesn't line up with a cover-fit crop (\(two(there)) vs \(two(primaryMedian)) at " +
                                 "16:10): scale with max(lp.w / img.width, lp.h / img.height) and centre it; never stretch or letterbox.")
             }
+        }
+        // Colour is only defined when the picture has some (a grey picture can't lose it).
+        let colours = primary.filter { !$0.score.flat }.compactMap(\.score.colour)
+        if !colours.isEmpty, let colour = median(colours), colour < b.minColour {
+            warnings.append("The picture's colours are gone or changed (colour match \(two(colour)) at 16:10, aim ≥ \(two(b.minColour))): keep its " +
+                            "own colours \u{2014} darken evenly with black at a low alpha; don't desaturate, tint or recolour it.")
         }
         return (problems, warnings, summary)
     }

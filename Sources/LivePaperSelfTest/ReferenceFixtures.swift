@@ -1,7 +1,9 @@
 // ReferenceFixtures — generated pictures for the reference-image tests (no personal files, ever):
 // seeded synthetic "photos" (lake, city, portrait, flowers), the stills a scene might render from
 // them (cover-fit with a camera offset, darkened, fogged, mirrored, stretched, …), JPEGs carrying
-// EXIF/GPS/TIFF/IPTC metadata, a PNG whose header claims 30000 × 30000 px, and a sparse 101 MB file.
+// EXIF/GPS/TIFF/IPTC metadata, a PNG whose header claims 30000 × 30000 px, valid blank PNGs of any
+// size (a few KB, for the pixel caps), cut-outs on transparency, soft bright pictures, and a sparse
+// 101 MB file.
 // CoreGraphics + ImageIO only.
 import CoreGraphics
 import Foundation
@@ -195,6 +197,10 @@ enum ReferenceFixtures {
         case letterboxed
         case unrelated
         case otherPicture(UInt64)
+        /// A transparent picture cover-fit over a backdrop (what a scene animating a cut-out draws).
+        case over(Backdrop)
+        /// Evenly darkened to `k` and fogged: `fog` adds the fog layer too.
+        case darkenedFog(Double, fog: Bool)
 
         var description: String {
             switch self {
@@ -209,8 +215,78 @@ enum ReferenceFixtures {
             case .letterboxed: return "letterboxed"
             case .unrelated: return "unrelated aurora"
             case .otherPicture(let s): return "same layout, seed \(s)"
+            case .over(let b): return "over \(b)"
+            case .darkenedFog(let k, let fog): return "darken \(k)\(fog ? " + fog" : "")"
             }
         }
+    }
+
+    enum Backdrop: CustomStringConvertible {
+        case black
+        case grey(Double)
+        case colour(Double, Double, Double)
+        /// Top to bottom.
+        case gradient((Double, Double, Double), (Double, Double, Double))
+        var description: String {
+            switch self {
+            case .black: return "black"
+            case .grey(let v): return "grey \(Int(v * 255))"
+            case .colour(let r, let g, let b): return String(format: "rgb %.2f,%.2f,%.2f", r, g, b)
+            case .gradient(let a, let b): return String(format: "gradient %.2f→%.2f", (a.0 + a.1 + a.2) / 3, (b.0 + b.1 + b.2) / 3)
+            }
+        }
+        func fill(_ ctx: CGContext, _ w: Double, _ h: Double) {
+            let rect = CGRect(x: 0, y: 0, width: w, height: h)
+            switch self {
+            case .black: ctx.setFillColor(rgb(0, 0, 0)); ctx.fill(rect)
+            case .grey(let v): ctx.setFillColor(rgb(v, v, v)); ctx.fill(rect)
+            case .colour(let r, let g, let b): ctx.setFillColor(rgb(r, g, b)); ctx.fill(rect)
+            case .gradient(let a, let b): verticalGradient(ctx, rect, [(0, rgb(a.0, a.1, a.2)), (1, rgb(b.0, b.1, b.2))])
+            }
+        }
+    }
+
+    /// `photo` (scaled by `brightness`) cut out as an irregular blob covering about half of the
+    /// picture, on full transparency: a sticker or illustration.
+    static func cutout(_ photo: CGImage, brightness: Double = 1) -> CGImage {
+        let w = photo.width, h = photo.height
+        let ctx = context(w, h, alpha: true)
+        ctx.clear(CGRect(x: 0, y: 0, width: w, height: h))
+        let path = CGMutablePath()
+        let cx = Double(w) / 2, cy = Double(h) / 2, r = Double(min(w, h)) * 0.42
+        for i in 0...72 {
+            let a = Double(i) / 72 * 2 * .pi, k = 1 + 0.18 * sin(a * 3) + 0.08 * cos(a * 5)
+            let p = CGPoint(x: cx + cos(a) * r * k * 1.25, y: cy + sin(a) * r * k)
+            if i == 0 { path.move(to: p) } else { path.addLine(to: p) }
+        }
+        path.closeSubpath()
+        ctx.saveGState(); ctx.addPath(path); ctx.clip()
+        drawImage(ctx, photo, CGRect(x: 0, y: 0, width: w, height: h))
+        if brightness < 1 { ctx.setFillColor(rgb(0, 0, 0, 1 - brightness)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h)) }
+        ctx.restoreGState()
+        return ctx.makeImage()!
+    }
+
+    /// A soft, high-key picture (snow field, fog, pale watercolour): mean luma about 215, little
+    /// contrast — a gentle gradient, a few faint shapes and grain.
+    static func softBright(width: Int = 1200, height: Int = 800, seed: UInt64 = 4) -> CGImage {
+        let ctx = context(width, height)
+        let w = Double(width), h = Double(height)
+        var rng = RNG(seed)
+        verticalGradient(ctx, CGRect(x: 0, y: 0, width: w, height: h), [(0, rgb(0.80, 0.83, 0.87)), (1, rgb(0.86, 0.86, 0.88))])
+        for _ in 0..<9 {
+            softBlob(ctx, x: rng.range(0, w), y: rng.range(h * 0.3, h), r: h * rng.range(0.1, 0.25), color: (0.72, 0.75, 0.79), alpha: 0.6)
+        }
+        for _ in 0..<7 {
+            ctx.setFillColor(rgb(0.70, 0.72, 0.75, 0.6))
+            let x = rng.range(0, w), y = h * rng.range(0.55, 0.8)
+            ctx.fillEllipse(in: CGRect(x: x, y: y, width: w * rng.range(0.05, 0.15), height: h * rng.range(0.02, 0.05)))
+        }
+        for _ in 0..<(width * height / 40) {
+            let v = rng.next()
+            ctx.setFillColor(rgb(v, v, v, 0.04)); ctx.fill(CGRect(x: rng.range(0, w), y: rng.range(0, h), width: 1, height: 1))
+        }
+        return ctx.makeImage()!
     }
 
     /// Draws `photo` cover-fit into a `w`×`h` context: zoomed in by `zoom` around the centre,
@@ -263,6 +339,17 @@ enum ReferenceFixtures {
             drawImage(ctx, photo, CGRect(x: (w - dw) / 2, y: (h - dh) / 2, width: dw, height: dh))
         case .unrelated: drawImage(ctx, aurora(width: width, height: height), CGRect(x: 0, y: 0, width: w, height: h))
         case .otherPicture(let seed): drawCover(ctx, ReferenceFixtures.photo(layout, seed: seed), w, h)
+        case .over(let backdrop):
+            backdrop.fill(ctx, w, h)
+            drawCover(ctx, photo, w, h)
+        case .darkenedFog(let k, let fog):
+            drawCover(ctx, photo, w, h, zoom: 1.03)
+            ctx.setFillColor(rgb(0, 0, 0, 1 - k)); ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+            if fog {
+                for _ in 0..<10 {
+                    softBlob(ctx, x: rng.range(0, w), y: rng.range(h * 0.4, h), r: h * rng.range(0.12, 0.25), color: (0.8, 0.85, 0.9), alpha: 0.12 * k)
+                }
+            }
         }
         if clock { drawFakeClock(ctx, w, h) }
         return ctx.makeImage()!
@@ -343,6 +430,32 @@ enum ReferenceFixtures {
         }
         let ihdr = be(width) + be(height) + [8, 6, 0, 0, 0]
         return Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] + chunk("IHDR", ihdr) + chunk("IEND", []))
+    }
+
+    /// A valid, all-black 1-bit greyscale PNG of `width`×`height` pixels that is only a few KB on
+    /// disk (its zero rows deflate to almost nothing): for the importer's pixel caps.
+    static func blankPNG(width: UInt32, height: UInt32) -> Data {
+        func be(_ v: UInt32) -> [UInt8] { [UInt8(v >> 24), UInt8((v >> 16) & 0xFF), UInt8((v >> 8) & 0xFF), UInt8(v & 0xFF)] }
+        func chunk(_ type: String, _ body: [UInt8]) -> [UInt8] {
+            let t = Array(type.utf8)
+            return be(UInt32(body.count)) + t + body + be(crc32(t + body))
+        }
+        let rawCount = Int(height) * (1 + (Int(width) + 7) / 8)   // a filter byte and the bits of each row, all 0
+        let deflated = try! (Data(count: rawCount) as NSData).compressed(using: .zlib) as Data   // raw DEFLATE
+        // zlib wrapper: header, the deflate stream, Adler-32 (of zeros: a = 1, b = n mod 65521).
+        let adler = (UInt32(rawCount % 65521) << 16) | 1
+        let idat = [0x78, 0x9C] + [UInt8](deflated) + be(adler)
+        let ihdr = be(width) + be(height) + [1, 0, 0, 0, 0]
+        return Data([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] + chunk("IHDR", ihdr) + chunk("IDAT", idat) + chunk("IEND", []))
+    }
+
+    /// A photo whose only transparency is a small corner (rounded or feathered corners, a stray
+    /// pixel): `corner`×`corner` px, alpha 0.
+    static func nearlyOpaquePNG(_ photo: CGImage, corner: Int = 8) -> Data {
+        let ctx = context(photo.width, photo.height, alpha: true)
+        drawImage(ctx, photo, CGRect(x: 0, y: 0, width: photo.width, height: photo.height))
+        ctx.clear(CGRect(x: 0, y: 0, width: corner, height: corner))
+        return encode(ctx.makeImage()!, type: .png)
     }
 
     /// A file of `bytes` bytes that takes no disk space (ftruncate).

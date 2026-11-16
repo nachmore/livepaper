@@ -165,7 +165,7 @@ private struct ModifySheet: View {
         guard let harness = selectedHarness, canStart else { return }
         busy = true
         let references = tray.references
-        let request = PromptComposer.effectivePrompt(prompt, roles: references.map(\.role))
+        let request = PromptComposer.effectivePrompt(prompt, roles: references.map(\.role), modify: true)
         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
             let session = await model.startModify(sceneID: entry.id, prompt: request, references: references, harness: harness,

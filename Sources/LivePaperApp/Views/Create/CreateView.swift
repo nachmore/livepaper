@@ -257,7 +257,8 @@ struct DescribeCreateCard: View {
     private var selectedHarness: AIHarness? { model.availableHarnesses.first { $0.id == harnessID } }
 
     private var canGenerate: Bool {
-        !tray.isBusy && selectedHarness != nil && PromptComposer.isUsable(prompt, hasReferences: !tray.references.isEmpty)
+        !model.isStartingSession && !tray.isBusy && selectedHarness != nil &&
+            PromptComposer.isUsable(prompt, hasReferences: !tray.references.isEmpty)
     }
 
     private func generate() {
@@ -265,10 +266,12 @@ struct DescribeCreateCard: View {
         let references = tray.references
         let request = PromptComposer.effectivePrompt(prompt, roles: references.map(\.role))
         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if model.startSession(.create(prompt: request), references: references, harness: harness,
-                              model: trimmed.isEmpty ? nil : trimmed) != nil {
-            prompt = ""
-            tray.clear()
+        Task {
+            if await model.startSession(.create(prompt: request), references: references, harness: harness,
+                                        model: trimmed.isEmpty ? nil : trimmed) != nil {
+                prompt = ""
+                tray.clear()
+            }
         }
     }
 }

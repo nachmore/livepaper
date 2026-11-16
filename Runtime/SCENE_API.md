@@ -308,12 +308,19 @@ Sometimes the user hands you a photo or painting and asks you to *animate this e
 picture**, recognisably the same, on every screen shape — and bring it to life subtly:
 
 * **Cover-fit, every frame.** `s = Math.max(lp.w / img.width, lp.h / img.height)`, centred: the
-  picture fills 16:10, 32:9 (a horizontal band of it) and 5:4 (the sides cropped) with no bars,
-  stretching or mirroring. Draw it once per frame with the 9-argument `drawImage` as the base layer.
+  picture fills 16:10, 32:9 (a horizontal band of it) and 5:4 (the sides of a landscape picture
+  cropped, the top and bottom of a portrait one) with no bars, stretching or mirroring. Draw it once
+  per frame with the 9-argument `drawImage` as the base layer.
 * **Keep it the same picture.** Composition, colours and details stay; don't redraw, restyle,
   recolour or replace it. If it is too bright for the budgets (TASK.md gives its brightness and a
-  `darkenTo` factor), darken it *evenly* (black at a low alpha over it) and/or add a soft dark
-  gradient behind the clock — the check compares structure and hue, so even darkening is fine.
+  `darkenTo` factor, which covers the clock at every screen shape — on 32:9 it sits lower on the
+  picture), darken it *evenly* (black at a low alpha over it) and/or add a soft dark gradient behind
+  the clock — the check compares structure and hue, so even darkening is fine; desaturating or tinting
+  it warns.
+* **Transparent pictures** (a cut-out, `reference.png`): fill a backdrop every frame first —
+  whatever fits the picture; a dark one keeps the clock readable — then draw the picture over it.
+  The check compares only the picture's opaque parts, so any backdrop is fine. (The example below
+  never clears the canvas because its opaque picture covers it; a cut-out would smear trails.)
 * **Motion that belongs to what it shows:** water shimmering (horizontal strips of the picture,
   each offset by smooth noise), clouds, mist or fog drifting (soft low-alpha layers), foliage
   swaying (strips or cut-outs), particles that fit (snow, rain, dust, fireflies, embers), slow light
@@ -585,11 +592,13 @@ jumping between successive frames (§7).
 **Animating a picture.** In an AI session that animates one of the user's pictures, the check also
 compares 7 stills (1512×982 at t = 4, 12, 90, 600; 2560×720 at t = 12, 90; 1280×1024 at t = 12; the
 quick check: 3) with the cover-fit picture on a coarse grid, allowing a slow camera (zoom ≤ 16 %,
-offset ≤ 6 %) and ignoring the clock and even darkening: similarity 0–1, where the picture shown
-as described in §7 scores about 0.8–1. It **fails** when scene.js never loads `reference.jpg`, or
-when the median similarity is below 0.35 (the stills don't show the picture); it **warns** below
-0.70 at 16:10, when 32:9 or 5:4 fall far below 16:10 (stretched or letterboxed instead of
-cover-fit), and when `assets/reference.jpg` was changed. `livepaper check` prints a `picture` line.
+offset ≤ 6 %) and ignoring the clock, even darkening and — for a transparent picture — whatever is
+behind its transparent parts: similarity 0–1, where the picture shown as described in §7 scores about
+0.8–1. It **fails** when scene.js never loads `reference.jpg`, or when the median similarity is below
+0.35 (the stills don't show the picture, or are darkened or fogged until they are flat); it **warns**
+below 0.70 at 16:10, when 32:9 or 5:4 fall far below 16:10 (stretched or letterboxed instead of
+cover-fit), when the picture's colours are gone (desaturated, tinted), and when `assets/reference.jpg`
+was changed. `livepaper check` prints a `picture` line.
 
 ## 15. Host bridge (for host developers)
 

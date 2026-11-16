@@ -44,12 +44,14 @@ enum SnapshotHarness {
 
         // One finished session (succeeded) and one frozen mid-run.
         let harness = model.harnesses.first ?? AIHarness(kind: .claude, name: "Claude Code", executable: "claude", version: "2.1.4")
-        let done = model.startSession(.create(prompt: "Paper lanterns drifting upward through a warm summer night"),
-                                      harness: harness, model: nil)
+        var done: AISessionModel?
+        wait { done = await model.startSession(.create(prompt: "Paper lanterns drifting upward through a warm summer night"),
+                                               harness: harness, model: nil) }
         waitUntil { done?.isRunning == false }
         (services.ai as? MockAIService)?.holdAfterSteps = 13
-        let running = model.startSession(.create(prompt: "A calm aurora over a mirror-still lake, slowly shifting greens and violets"),
-                                         harness: harness, model: "opus")
+        var running: AISessionModel?
+        wait { running = await model.startSession(.create(prompt: "A calm aurora over a mirror-still lake, slowly shifting greens and violets"),
+                                                  harness: harness, model: "opus") }
         waitUntil { (running?.state.stills.count ?? 0) >= 1 }
 
         let main = CGSize(width: 1180, height: 760)
@@ -141,7 +143,8 @@ enum SnapshotHarness {
         shoot("modify-references-dark", CGSize(width: 480, height: 500), dark: true,
               SceneActionSheet(action: .modify("aurora-lake"), modifyTray: modifyTray, modifyPrompt: "Warmer, with lanterns like these"))
         (services.ai as? MockAIService)?.holdAfterSteps = nil   // this one runs to the end
-        let withImages = model.startSession(.create(prompt: createPrompt), references: createTray.references, harness: harness, model: nil)
+        var withImages: AISessionModel?
+        wait { withImages = await model.startSession(.create(prompt: createPrompt), references: createTray.references, harness: harness, model: nil) }
         waitUntil { withImages?.isRunning == false }
         if let withImages { model.section = .session(withImages.id) }
         shoot("session-references-light", main, dark: false, MainWindowView())

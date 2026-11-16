@@ -49,6 +49,9 @@ public struct ReferenceExpansion: Sendable, Equatable {
             guard let last = parts.popLast() else { return nil }
             return "left out " + (parts.isEmpty ? last : parts.joined(separator: ", ") + " and " + last)
         }
+
+        /// The sentence as a note of its own: "Left out 3 files that aren't images."
+        public var note: String? { sentence().map { $0.prefix(1).uppercased() + $0.dropFirst() + "." } }
     }
 
     public var files: [URL]
@@ -139,6 +142,16 @@ public enum ReferenceFolders {
             .map { folder.appendingPathComponent($0, isDirectory: false) }
     }
 
+    /// The real path of a file the user named, or `notFound` / `notPermitted` (a privacy-protected
+    /// folder this process may not read, e.g. the terminal without Files and Folders access).
+    static func lookUp(_ url: URL) throws -> String {
+        let found = AISessionPolicy.lookUp(url.path)
+        guard let real = found.real else {
+            throw found.denied ? ReferenceError.notPermitted(name: url.lastPathComponent) : ReferenceError.notFound(name: url.lastPathComponent)
+        }
+        return real
+    }
+
     static func fileType(_ path: String) -> mode_t {
         var st = stat()
         return lstat(path, &st) == 0 ? st.st_mode & S_IFMT : 0
@@ -154,7 +167,7 @@ public enum ReferenceFolders {
         var taken = Set<String>()
         if let animate {
             let url = animate.standardizedFileURL
-            guard let real = AISessionPolicy.realPath(url.path) else { throw ReferenceError.notFound(name: url.lastPathComponent) }
+            let real = try lookUp(url)
             guard fileType(real) != S_IFDIR else { throw ReferenceError.animateNeedsFile(name: url.lastPathComponent) }
             inputs.append(.file(url, role: .animate))
             taken.insert(real)
@@ -162,7 +175,7 @@ public enum ReferenceFolders {
         var files: [(URL, String)] = [], folders: [URL] = []
         for given in references {
             let url = given.standardizedFileURL
-            guard let real = AISessionPolicy.realPath(url.path) else { throw ReferenceError.notFound(name: url.lastPathComponent) }
+            let real = try lookUp(url)
             if fileType(real) == S_IFDIR { folders.append(url) } else { files.append((url, real)) }
         }
         for (url, real) in files {

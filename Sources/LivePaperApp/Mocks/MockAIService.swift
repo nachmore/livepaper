@@ -58,7 +58,7 @@ final class MockAIService: AIServicing, @unchecked Sendable {
         if !references.isEmpty {
             let dir = workspace.appendingPathComponent(ReferenceWorkspace.directoryName)
             try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            for (i, ref) in references.enumerated() {
+            for (i, ref) in ReferenceWorkspace.numbered(references).enumerated() {   // ref-01 = the picture to animate
                 let rel = ReferenceWorkspace.relativeImagePath(index: i + 1, format: ref.vision.format)
                 try ref.vision.data.write(to: workspace.appendingPathComponent(rel), options: .atomic)
                 files.append(.init(path: rel, role: ref.role, data: ref.vision.data, format: ref.vision.format))

@@ -97,10 +97,13 @@ public final class WorkspaceBuilder: @unchecked Sendable {
         try buildSession(request, sessionID: sessionID).workspace
     }
 
-    /// Creates the workspace for `request` with `references` (in order: ref-01 is the first).
-    public func buildSession(_ request: AISessionRequest, references refs: [PreparedReference] = [],
+    /// Creates the workspace for `request` with `references` (numbered in order, the picture to
+    /// animate first: `ReferenceWorkspace.numbered`).
+    public func buildSession(_ request: AISessionRequest, references given: [PreparedReference] = [],
                              sessionID: String) throws -> BuiltWorkspace {
         let fm = FileManager.default
+        // One numbering for the files, the rewritten prompt and the harness's attachments.
+        let refs = ReferenceWorkspace.numbered(given)
         let guide = runtimeDirectory.appendingPathComponent("AGENTS.md")
         guard let guideText = try? String(contentsOf: guide, encoding: .utf8) else {
             throw AIError.missingResource(guide.path)
@@ -158,8 +161,9 @@ public final class WorkspaceBuilder: @unchecked Sendable {
         }
     }
 
-    /// Deletes workspaces older than `retention` and the check output (stills) of those older than
-    /// `checkRetention`, by the workspace directory's modification date.
+    /// Deletes workspaces older than `retention` and the check output (stills) and reference copies
+    /// of those older than `checkRetention`, by the workspace directory's modification date (which
+    /// the partial clean-up keeps, so a workspace still goes after `retention`).
     public func pruneWorkspaces(now: Date = Date(), retention: TimeInterval = WorkspaceBuilder.retention,
                                 checkRetention: TimeInterval = WorkspaceBuilder.checkRetention) {
         let fm = FileManager.default
@@ -173,7 +177,13 @@ public final class WorkspaceBuilder: @unchecked Sendable {
             } else if age > checkRetention {
                 try? fm.removeItem(at: AIWorkspace(root: url).scene.appendingPathComponent(SceneChecker.checkDirectory))
                 // The user's pictures only matter while the session is reviewed (the scene keeps its own asset).
-                try? fm.removeItem(at: AIWorkspace(root: url).references)
+                // Removing an entry of the root touches its date: put it back, or the workspace would
+                // outlive `retention` by however old it was now.
+                let refs = AIWorkspace(root: url).references
+                if FileOps.entryExists(refs) {
+                    try? fm.removeItem(at: refs)
+                    try? fm.setAttributes([.modificationDate: date], ofItemAtPath: url.path)
+                }
             }
         }
         // Relay leftovers of sessions that ended without cleaning up (a crash): a day is plenty.

@@ -104,20 +104,24 @@ public struct ClaudeAdapter: HarnessAdapter {
 /// Reference images are attached to the first message with `-i`. That option takes any number of
 /// values (and splits them at commas), so every `-i <path>` comes straight after `exec`, where the
 /// next token is always another option, and paths are workspace-relative. Requests past a few MB
-/// fail on some providers ("request_too_large"), so images are attached — the one to animate
-/// first — only up to `maxAttachedBytes`; TASK.md lists them all.
+/// fail on some providers ("request_too_large"), so only the first images (ref-01 — the one to
+/// animate, if any — then ref-02, …) are attached, up to `maxAttachedBytes`. Codex labels them
+/// "[Image #1]", "[Image #2]", … by position only, so the attached ones are always a prefix of
+/// TASK.md's table, which says attachment k is ref-0k and to open the rest with view_image.
 public struct CodexAdapter: HarnessAdapter {
     public static let maxAttachedBytes = 6 << 20
     public init() {}
 
-    /// The images passed with `-i`: in order, while their total stays within `maxAttachedBytes`.
+    /// The images passed with `-i`: the longest prefix whose total stays within `maxAttachedBytes`.
     public static func attachedImages(_ images: [HarnessReferenceImage]) -> [HarnessReferenceImage] {
         var total = 0
-        return images.filter { image in
-            guard total + image.byteCount <= maxAttachedBytes else { return false }
+        var out: [HarnessReferenceImage] = []
+        for image in images {
+            guard total + image.byteCount <= maxAttachedBytes else { break }
             total += image.byteCount
-            return true
+            out.append(image)
         }
+        return out
     }
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
@@ -177,7 +181,8 @@ public struct KiroAdapter: HarnessAdapter {
 /// A user-defined command template, e.g. `mytool --prompt-file {prompt_file} --cwd {workspace}`.
 ///
 /// Placeholders: `{prompt_file}` (TASK.md), `{workspace}`, `{scene}`, `{model}`, `{instructions}`
-/// (the fixed bootstrap sentence), `{references}` (the reference images' absolute paths). A token
+/// (the fixed bootstrap sentence), `{references}` (the reference images' absolute paths, ref-01
+/// first). A token
 /// that is exactly `{model}` is dropped when no model is chosen; a token that is exactly
 /// `{references}` becomes one argument per image (none without images), and inside a longer token
 /// it becomes the paths joined with commas. Quoting follows POSIX shell rules ('…', "…",

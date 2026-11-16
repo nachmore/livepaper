@@ -34,12 +34,15 @@ extension ReferenceTests {
                         data: { _, _ in png }, dataName: ReferenceTray.droppedName)
         try expectEqual(read.inputs.map(\.displayName), [ReferenceTray.droppedName, ReferenceTray.droppedName])
         try expectEqual(read.inputs.map(\.source), [.data(png, typeIdentifier: "public.jpeg"), .data(png, typeIdentifier: "public.heic")])
-        // A Finder copy: the files (the tray expands folders and counts files that aren't images).
+        // A Finder copy: the images and folders (the tray expands folders); other files are left out
+        // with one note instead of becoming failed tiles.
         let finder = [["public.file-url", "public.utf8-plain-text", "com.apple.icns", "public.tiff"]]
-        let files = [URL(fileURLWithPath: "/tmp/a/heron.png"), URL(fileURLWithPath: "/tmp/a/notes.txt")]
+        let files = [URL(fileURLWithPath: "/tmp/a/heron.png"), URL(fileURLWithPath: "/tmp/a/notes.txt"), URL(fileURLWithPath: "/tmp/a/brief.docx"),
+                     URL(fileURLWithPath: "/tmp/a/refs", isDirectory: true)]
         var reads = 0
         read = R.inputs(itemTypes: finder, fileURLs: files, data: { _, _ in reads += 1; return nil })
-        try expectEqual(read.inputs, files.map { ReferenceInput.file($0) })
+        try expectEqual(read.inputs, [files[0], files[3]].map { ReferenceInput.file($0) })
+        try expectEqual(read.notes, ["Left out 2 files that aren't images."])
         // Text stays text: nothing to attach, nothing read.
         read = R.inputs(itemTypes: finder, fileURLs: [URL(fileURLWithPath: "/tmp/notes.txt")], data: { _, _ in reads += 1; return nil })
         try expect(read.inputs.isEmpty && read.notes.isEmpty)

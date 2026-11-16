@@ -3,8 +3,9 @@
 // The user attaches up to `ReferenceLimits.maxImages` pictures to a create or modify session, each
 // either as inspiration (`reference`) or as THE picture to bring to life (`animate`, at most one).
 // LivePaper decodes, re-encodes and strips every image once, when it is added (app tray or CLI),
-// into a `PreparedReference` held in memory; starting a session then only writes bytes into the
-// workspace (ReferenceWorkspace). Nothing here ever leaves the Mac, and file names and paths are
+// into a `PreparedReference` held in memory; starting a session then writes them into the
+// workspace (ReferenceWorkspace) — mostly bytes, but the picture to animate is decoded for its
+// fingerprint and re-encoded when it doesn't fit the scene's asset budget. Nothing here ever leaves the Mac, and file names and paths are
 // for the UI only: they never reach the workspace, logs or the scene's history.
 import Foundation
 
@@ -151,12 +152,16 @@ public enum ReferenceError: Error, LocalizedError, Sendable, Equatable {
     case tooMany(count: Int)
     case tooManyAnimated(count: Int)
     case notFound(name: String)
+    /// macOS refused access (a privacy-protected folder this process may not read).
+    case notPermitted(name: String)
     case notAFile(name: String)
     case tooLarge(name: String, bytes: Int)
     case tooManyPixels(name: String, width: Int, height: Int)
     case unsupported(name: String, kind: String?)
     case unreadable(name: String)
     case noRoomForAsset(availableKB: Int)
+    /// Even the smallest re-encode of the picture to animate is over the asset budget.
+    case pictureTooDetailed(budgetKB: Int)
     case animateNeedsFile(name: String)
 
     public var errorDescription: String? {
@@ -167,6 +172,9 @@ public enum ReferenceError: Error, LocalizedError, Sendable, Equatable {
             return "Only one image per session can be animated (\(n) are marked \u{201C}Animate\u{201D})."
         case .notFound(let name):
             return "\u{201C}\(name)\u{201D} doesn't exist (or is a link to nothing). Check the path and try again."
+        case .notPermitted(let name):
+            return "macOS doesn't let LivePaper open \u{201C}\(name)\u{201D} (it is in a folder macOS keeps private). Allow access in " +
+                "System Settings \u{203A} Privacy & Security \u{203A} Files and Folders, or copy the image somewhere else and add that."
         case .notAFile(let name):
             return "\u{201C}\(name)\u{201D} isn't a regular file. Add an image file (JPEG, PNG, HEIC, …) or a folder of them."
         case .tooLarge(let name, let bytes):
@@ -186,6 +194,9 @@ public enum ReferenceError: Error, LocalizedError, Sendable, Equatable {
         case .noRoomForAsset(let kb):
             return "The scene's own assets leave only \(kb) KB of the \(SceneCompiler.maxAssetTotalBytes >> 20) MB asset limit \u{2014} too " +
                 "little for the picture to animate. Remove large files from its assets/ folder first."
+        case .pictureTooDetailed(let kb):
+            return "The picture to animate is too detailed to fit the scene's asset limit (\(kb) KB for it) even as a 1280-px JPEG. " +
+                "Export a smaller or simpler copy (JPEG) and add that."
         case .animateNeedsFile(let name):
             return "\u{201C}\(name)\u{201D} is a folder; --animate takes one image file (use --ref for folders)."
         }
@@ -197,12 +208,18 @@ public enum ReferenceError: Error, LocalizedError, Sendable, Equatable {
 }
 
 public enum ReferencePrompts {
-    /// The request used when the user attached images but typed nothing.
-    public static func defaultPrompt(roles: [AIReferenceRole]) -> String? {
+    /// The request used when the user attached images but typed nothing; `modify`: for a session
+    /// that changes an existing scene (which it should keep, not replace).
+    public static func defaultPrompt(roles: [AIReferenceRole], modify: Bool = false) -> String? {
+        guard !roles.isEmpty else { return nil }
         if roles.contains(.animate) {
-            return "Bring the attached picture to life: animate it subtly and keep it recognisably the same picture."
+            return modify
+                ? "Make this scene show the attached picture and bring it to life subtly; keep it recognisably the same picture."
+                : "Bring the attached picture to life: animate it subtly and keep it recognisably the same picture."
         }
-        return roles.isEmpty ? nil : "Create a scene inspired by the attached reference images."
+        return modify
+            ? "Restyle this scene after the attached reference images (palette, light, mood, style), keeping what it is."
+            : "Create a scene inspired by the attached reference images."
     }
 
     /// Throws unless `refs` respects the per-session limits.

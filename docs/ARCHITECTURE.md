@@ -129,8 +129,10 @@ directories and inject fakes for commands, preferences and login items.
     TASK.md                       the user's request (reaches the harness only through this file)
     sdk/  scene/  bin/livepaper   API docs + examples, the candidate package, CLI shim
     references/                   only with reference images (§10): ref-01.jpg … (copies LivePaper made: ≤ 2000 px,
-                                  sRGB, no metadata, 0o444), ref-01.json (ReferenceSummary), references.json (index:
-                                  file, role, size, the animate asset and its SHA-256); pruned with .check after a day
+                                  sRGB, no metadata, 0o444; ref-01 is the picture to animate, if any), ref-01.json
+                                  (ReferenceSummary), references.json (index: file, role, size, the animate asset and
+                                  its SHA-256); pruned with .check after a day (the workspace keeps its date, so it
+                                  still goes after 7 days)
     .livepaper/                   stdout.log, stderr.log, last-message.txt (codex), render-spool/; agents keep out
     .kiro/agents/                 the restricted agent Kiro sessions run as
   Workspaces/.render-relay/<id>/  scenes compiled by the session runner for relayed render requests
@@ -434,6 +436,14 @@ coverage, regions, busy, flicker, map per size; + `reference` for animate scenes
 summary for humans and agents (with the motion map when motion needs attention, and a `picture` line);
 exit 0 only if it passes.
 
+`ai create|modify` without `--ref`/`--animate` prints a note (a `note` event with `--json`) for up to
+3 image or folder paths typed into the prompt, suggesting `--ref`/`--animate`: the agent can't open
+them. Paths in Desktop/Documents/Downloads/iCloud Drive/cloud storage/volumes (any letter case) are
+judged by syntax alone — never looked up, so the terminal gets no privacy prompt for a hint; other
+paths get a note only if they exist. Unquoted paths with plain spaces (Finder's Copy as Pathname,
+screenshot names) are read whole (`PromptPaths`). `--ref` on a file the terminal may not open
+(Files and Folders access) says so (`ReferenceError.notPermitted`) rather than "doesn't exist".
+
 **Resemblance** (`ReferenceResemblance.swift`; only when `CheckOptions.reference` is set: LivePaper's
 final check of a session that animates a picture, and `livepaper check` run inside such a session on its
 own candidate, `ReferenceWorkspace.checkTarget`): 7 of the stills (1512×982 t = 4, 12, 90, 600;
@@ -441,12 +451,16 @@ own candidate, `ReferenceWorkspace.checkTarget`): 7 of the stills (1512×982 t =
 ≤ 192 px, are compared with the picture's cover-fit crop for each still's aspect on a 48-column grid
 (cells averaged exactly from summed-area tables), trying 125 framings (zoom 1–1.16, offsets ±6 % of the
 crop) so a slow camera is allowed. The clock's cells (its rect + one cell) are filled with the grid's
-mean on both sides. Per framing: low = Pearson of the 5×5-cell blurred luma, band = Pearson of luma −
-blur (undefined for a flat picture), colour = cosine of the blurred chroma (R−G, (R+G)/2−B; undefined for
-a grey picture, 0 for a grey still); score = (0.25·low + 0.5·band + 0.25·colour) over the defined parts,
-negatives as 0; a still with luma std < 3 scores 0; the best framing counts. Even darkening and contrast
-changes don't move it. Deterministic checks: scene.js has a string naming the asset; the asset's SHA-256
-is the one LivePaper wrote.
+mean on both sides. For a transparent picture (a cut-out, kept as PNG) the cells of each framing whose
+mean opacity is under 0.9 are left out the same way, on both sides, so whatever the scene draws behind
+it isn't compared (a picture with less than 20 % of its grid opaque warns "check by eye"). Per framing:
+low = Pearson of the 5×5-cell blurred luma, band = Pearson of luma − blur (undefined for a flat
+picture), colour = cosine of the blurred chroma (R−G, (R+G)/2−B; undefined for a grey picture, 0 for a
+grey still); score = (0.25·low + 0.5·band + 0.25·colour) over the defined parts, negatives as 0; the
+best framing counts. A still is flat and scores 0 when its luma std is under max(1, min(3, 0.2 × the
+cover-fit picture's own)) — relative, so a soft, bright picture darkened by TASK.md's darkenTo (≥ 0.42)
+still counts. Even darkening and contrast changes don't move it. Deterministic checks: scene.js has a
+string naming the asset; the asset's SHA-256 is the one LivePaper wrote.
 `--quick`: three stills + one 32:9, motion at 16:9 only, one 60-frame bench at 1512×982@2, no
 ultra-wide bench.
 
@@ -466,7 +480,7 @@ Budgets (`CheckBudgets`):
 | Flicker: tiles with a frame-to-frame step ≥ 10 | > 30 % of the frame | |
 | Motion not measured (render server too old) | | always |
 | Animate scenes: scene.js loads `assets/reference.*` (`ReferenceBudgets`) | no string names it | |
-| Animate scenes: resemblance to the cover-fit picture (0–1) | median < 0.35 | a 16:10 still < 0.70; 32:9 or 5:4 median < 0.70 and ≥ 0.25 under 16:10 (stretched / letterboxed); asset changed; picture too flat to compare (luma std < 4) |
+| Animate scenes: resemblance to the cover-fit picture (0–1) | median < 0.35 (most stills flat: "too flat", darkened or fogged too much) | a 16:10 still < 0.70; 32:9 or 5:4 median < 0.70 and ≥ 0.25 under 16:10 (stretched / letterboxed); median colour match of the 16:10 stills < 0.3 (desaturated, tinted, recoloured); asset changed; picture too flat to compare (luma std < 4) or < 20 % opaque |
 
 Motion calibration (2026-11, the built-ins as they were before their motion pass, at 16:9 / 5:4;
 docs/SCENES.md has the current numbers): Ringed Giant 7 / 9 % in 2 / 1 regions
@@ -482,7 +496,14 @@ camera of up to 12 % zoom and 3 % offset 0.77–1.00, darkened to 55 % 0.95–1.
 0.87–0.99, fog 0.70–0.96, a dark gradient over the top 45 % 0.76–0.92; greyscale 0.74–0.75; another
 picture with the same layout 0.39–0.66 (city, portrait; the lake generator's seeds stay ≈ 0.8, its
 layout dominates); mirrored 0.24–0.94 (symmetric pictures stay high); an unrelated aurora 0.01–0.28;
-stretched / letterboxed to 32:9 0.13–0.62 against 0.84–1.00 at 16:10. The design started with 0.4/0.4/0.2
+stretched / letterboxed to 32:9 0.13–0.62 against 0.84–1.00 at 16:10. Colour match: greyscale 0
+(it warns; its score stays 0.74–0.75, which alone wouldn't), while the camera, darkening, fog,
+particles and the gradient keep it at 0.94–1.00. Cut-outs (a dark and a bright one, of the city and the
+flowers) shown exactly over black, grey, blue, a dusk gradient or a light sky 0.97–1.00, an unrelated
+aurora 0.00–0.14 (compared over black only, the lighter backdrops had scored 0.2–0.3 and failed). A soft,
+bright picture (mean 212, contrast 4.4) darkened by its own darkenTo 0.50: 1.00, with fog 0.87–0.96 (0
+under the earlier absolute flat-still rule of std < 3); with so little detail an unrelated scene scores
+0.36–0.42 there (a warning, not a failure). The design started with 0.4/0.4/0.2
 weights; detail now counts most because blurred luma alone correlated 0.69 between the sunset lake and
 the unrelated aurora. SCENE_API's example through the real render server (`LIVEPAPER_SELFTEST_E2E=1 …
 runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 ms per frame.
@@ -507,9 +528,11 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   * Codex: `codex exec [-i references/ref-01.jpg]… -C <ws> -s workspace-write --skip-git-repo-check
     --json -o <ws>/.livepaper/last-message.txt [-m M] <extra> -`, TASK.md on stdin. `-i` takes any
     number of values (comma-split), so every `-i` comes straight after `exec`, with workspace-relative
-    paths; the picture to animate first, then index order, while their total stays ≤ 6 MB
-    (`CodexAdapter.maxAttachedBytes`; some providers fail whole turns past a few MB) — TASK.md lists
-    them all and Codex's image viewer opens the rest. Without references the arguments are unchanged. The sandbox keeps its
+    paths: the longest prefix of ref-01, ref-02, … (ref-01 is the picture to animate) whose total stays
+    ≤ 6 MB (`CodexAdapter.maxAttachedBytes`; some providers fail whole turns past a few MB). Codex
+    labels attachments by position only ("[Image #1]"), so a prefix keeps "[Image #k]" = ref-0k, which
+    is what TASK.md says; it lists them all and Codex's view_image opens the rest. Without references
+    the arguments are unchanged. The sandbox keeps its
     defaults (writes only in the workspace, no network). It also blocks the Unix socket `livepaper
     check` needs, so the CLI falls back to the **render spool**: in a session, when the socket
     can't be reached, `RenderClient` writes `<id>.request.json` into `LIVEPAPER_RENDER_SPOOL`
@@ -537,7 +560,7 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   * Custom: a template such as `mytool --prompt-file {prompt_file} --cwd {workspace}`; placeholders
     `{prompt_file}` `{workspace}` `{scene}` `{model}` `{instructions}` `{references}` (a lone `{model}`
     token is dropped without a model; a lone `{references}` token becomes one argument per reference
-    image — absolute paths of the workspace copies, the one to animate first — or nothing, and inside a
+    image — absolute paths of the workspace copies, ref-01 (the one to animate) first — or nothing, and inside a
     longer token the paths joined with commas); POSIX-style quoting, no shell; TASK.md also on stdin.
     Validated by `CustomAdapter.templateProblem`.
   * `<bootstrap>` / `{instructions}`: "Read TASK.md in the current directory and carry out the task it
@@ -555,14 +578,24 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   (`ReferenceImporter`: realpath + lstat, regular files ≤ 100 MB checked before opening, ≤ 120 MP from
   the header, an ImageIO-thumbnail decode at ≤ 3840 px so huge pictures are never decoded in full, a
   redraw into 8-bit sRGB that drops all metadata, re-encoded from the pixels: a master ≤ 3840 px and a
-  vision copy ≤ 2000 px / 3.5 MB, JPEG or PNG when transparent, plus a `ReferenceSummary`). Starting a
-  session only writes bytes: `references/` (§4.1) and, for the picture to animate,
+  vision copy ≤ 2000 px / 3.5 MB, JPEG, or PNG when meaningfully transparent — over 0.5 % of the pixels
+  not opaque and some clearly see-through; a photo with soft corners or a stray pixel stays JPEG, those
+  pixels black — plus a `ReferenceSummary` whose brightness covers the clock at each of the check's
+  screen shapes: 16:10, 32:9, 5:4, and `darkenTo` the brightest). Starting a session numbers them —
+  the picture to animate is always ref-01, so the files, the rewritten prompt and the harnesses'
+  attachments agree — and writes `references/` (§4.1) and, for the picture to animate,
   `scene/assets/reference.jpg|png` — the master if it fits the compiler's limits next to the scene's
-  other assets, else a smaller re-encode (≥ 300 KB, else the session is refused with
-  `noRoomForAsset`). TASK.md gets "Reference images" (what each is, how to look at it per harness, the
-  table of sizes/brightness/palette, and for animate the cover-fit rules); attached paths typed into the
-  prompt read `references/ref-NN…` there (`PromptPaths.rewrite`, no file-system access), others are
-  named as not attached. When the harness exits LivePaper puts the picture back if it changed (and says
+  other assets, else a smaller re-encode (a transparent picture stays PNG down to 2048 px, then
+  becomes a sharp JPEG flattened over black; at least 300 KB, else the session is refused:
+  `noRoomForAsset` when the scene's other assets take the room, `pictureTooDetailed` otherwise). That
+  decodes the picture for its fingerprint and may re-encode it (up to about a second), so the app
+  builds the workspace off the main thread. TASK.md gets "Reference images" (what each is, how to look
+  at it per harness and which attachment is which, the table of sizes/brightness/palette, and for
+  animate: open it first, the cover-fit rules worded by the picture's orientation, brightness per
+  screen shape, and what goes behind transparent areas); attached paths typed into the prompt read
+  `references/ref-NN…` there (`PromptPaths.rewrite`, no file-system access: the mentions, and every
+  literal occurrence of an attached file's path — as given, real, `~/…`, with `\ ` escapes, as a file
+  URL), others are named as not attached. When the harness exits LivePaper puts the picture back if it changed (and says
   so), and the final check compares the stills with it (`CheckOptions.reference`, kept in memory — the
   index in the workspace is in the agent's reach). Nothing is fetched or uploaded; pasted or dropped
   image data stays in memory — LivePaper writes no temporary files (a drop that macOS hands over as a
@@ -614,30 +647,40 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     focus (`onPasteCommand`), drops anywhere on the card or sheet (Finder files and folders, Photos,
     a browser's image data; the prompt box takes image drops itself and leaves text drops alone), and
     "Add Images…" (an open panel for images and folders, several at once). Images, folders and
-    pasted/dropped image data are prepared when added — off the main thread, one at a time — so
-    starting the session only hands over bytes; at most 10 (failed ones don't count), duplicates by
-    real path skipped, a note for whatever was left out. Each tile (88 pt, 72 in the sheet; the
+    pasted/dropped image data are prepared when added — off the main thread, one at a time — and the
+    session's workspace is built off the main thread too (Generate / Start / Try Again wait
+    meanwhile, `AppModel.isStartingSession`); at most 10 (failed ones don't count), duplicates by
+    real path skipped, a note for whatever was left out (also for a folder with no images in it, and
+    for the documents of a pasted or dropped Finder selection, which become one note, not failed tiles). Each tile (88 pt, 72 in the sheet; the
     thumbnail is the prepared copy decoded small off the main thread through `ThumbnailCache`) has a
     remove button, a role menu ("Reference — inspiration for style, colours and composition" /
     "Animate this image — the scene shows this exact picture, brought to life"; choosing it for one
-    demotes the other; the picture to animate gets an accent border and a film badge), the same in
+    demotes the other, once that one is ready — an image that fails to prepare leaves the current
+    choice alone; the picture to animate gets an accent border and a film badge), the same in
     its context menu, Delete when focused, and a VoiceOver label ("Reference image 2 of 4,
-    sunset.heic, animate") with Remove / Animate actions. Images that can't be added stay as marked
+    sunset.heic, animate") with Remove / Animate actions (Animate only on ready tiles). Images that can't be added stay as marked
     tiles with the reason listed under the tray (and, on the Create card, in a banner); "Preparing 2
     images…" replaces the footer line and Generate / Start wait meanwhile. With images attached the
-    prompt may be left empty (`PromptComposer.effectivePrompt` asks for the default request). Paths
+    prompt may be left empty (`PromptComposer.effectivePrompt` asks for the default request — in the
+    Modify sheet one worded as a change to the scene, which the agent keeps). Paths
     typed into the prompt are offered, about 0.4 s after typing pauses, as "Attach" chips ("The agent
     can't open “refs” on your Desktop. Attach copies of its images?" — Attach Folder, or Attach /
-    Animate It for an image; × hides it); never attached silently, and paths in
-    Desktop/Documents/Downloads/iCloud Drive/volumes aren't looked at until clicked, so typing never
-    raises a privacy prompt. In the prompt box Tab moves to the next control and quotes and dashes
+    Animate It for an image; × hides it; once clicked a path isn't offered again); never attached
+    silently, and paths in Desktop/Documents/Downloads/iCloud Drive/cloud storage
+    (`~/Library/CloudStorage`)/volumes, in any letter case, aren't looked at until clicked, so typing
+    never raises a privacy prompt. A click LivePaper isn't allowed to follow (access to that folder
+    declined) gets a note saying what works instead (drag it in, Add Images…, or Files and Folders in
+    System Settings), not "wasn't found". Unquoted paths with plain spaces (screenshot names) are
+    read whole (`PromptPaths`). In the prompt box Tab moves to the next control and quotes and dashes
     stay as typed (paths and code survive). `ReferencePasteRules` decides whether a paste is images
     (a screenshot, Finder copies of images or folders, Safari's Copy Image) or text and what it
     holds; `ReferenceDropReader` turns drops into files, image data or — for web URLs — a note
     (nothing is downloaded). The session view shows the session's references (header "· 3
     references"; a References box of thumbnails with the "Animate" badge, from the copies held in
     memory, as the workspace's are pruned after a day), and a session keeps its prepared references,
-    so Try Again / Try Again with Feedback / Start Again reuse them (`AppModel.retry`). A check
+    so Try Again / Try Again with Feedback / Start Again reuse them (`AppModel.retry`) — of the
+    full-size masters only the picture to animate's, and not even that once the session is accepted
+    (`AISessionModel.slimmed`; this menu-bar app runs for days). A check
     report of an animate session adds "Looks like the picture: 0.92" (§9), and the scene's history
     "· 3 reference images (1 animated)".
   * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a

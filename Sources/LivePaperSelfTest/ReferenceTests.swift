@@ -145,6 +145,14 @@ enum ReferenceTests {
         let t = try prepare(write(ReferenceFixtures.transparentPNG(width: 600, height: 400), dir.appendingPathComponent("cut-out.png")))
         try expectEqual(t.master.format, .png); try expectEqual(t.vision.format, .png)
         try expectEqual(t.summary.original.transparent, true)
+        // A photo whose only transparency is an 8×8 corner (rounded corners, a window shadow's stray
+        // pixel) is a photo: JPEG copies, the corner black.
+        let cornered = try prepare(write(ReferenceFixtures.nearlyOpaquePNG(ReferenceFixtures.photo(.flowers, width: 1200, height: 900)),
+                                         dir.appendingPathComponent("rounded.png")))
+        try expectEqual(cornered.master.format, .jpeg); try expectEqual(cornered.vision.format, .jpeg)
+        try expectEqual(cornered.summary.original.transparent, false)
+        let corner = try SelfTests.unwrap(ReferenceFixtures.pixel(cornered.master.data, x: 1, y: 1))
+        try expect(corner.r < 40 && corner.g < 40 && corner.b < 40, "the corner is black: \(corner)")
         try expectEqual(ReferenceFixtures.pixel(t.vision.data, x: 10, y: 10)?.a, 0)
         try expectEqual(ReferenceFixtures.pixel(t.vision.data, x: 590, y: 10)?.a, 255)
 
@@ -207,15 +215,26 @@ enum ReferenceTests {
             _ = try ReferenceImporter.prepare(ReferenceInput(source: .data(bigData, typeIdentifier: nil), role: .reference, displayName: "Pasted image 1"))
         }
 
-        // A header claiming 30000 × 30000 px: refused from the header alone (ImageIO itself won't
-        // describe it without plausible pixel data, so it reads as unreadable; real files that big
-        // hit the 120-megapixel cap), quickly and without allocating the pixels.
+        // A header without pixel data (claiming 30000 × 30000 px): ImageIO won't describe it, so it
+        // is refused as unreadable, quickly and without allocating anything.
         let bomb = try write(ReferenceFixtures.pngHeaderOnly(width: 30000, height: 30000), dir.appendingPathComponent("bomb.png"))
-        let started = Date()
-        try expectReferenceError({
-            switch $0 { case .tooManyPixels, .unreadable: return true; default: return false }
-        }) { _ = try prepare(bomb) }
+        var started = Date()
+        try expectReferenceError({ if case .unreadable = $0 { return true }; return false }) { _ = try prepare(bomb) }
         try expect(Date().timeIntervalSince(started) < 2, "rejected without decoding")
+        // Real (blank, a few KB) PNGs over the caps: a side over 32,768 px, and 121 megapixels with
+        // both sides within it — refused from the header, before anything is decoded.
+        let wide = try write(ReferenceFixtures.blankPNG(width: 33000, height: 8), dir.appendingPathComponent("wide.png"))
+        try expect(((try? Data(contentsOf: wide))?.count ?? 0) < 64 << 10, "the fixture is small")
+        try expectReferenceError({ if case .tooManyPixels("wide.png", 33000, 8) = $0 { return true }; return false }) { _ = try prepare(wide) }
+        let tall = try write(ReferenceFixtures.blankPNG(width: 8, height: 32769), dir.appendingPathComponent("tall.png"))
+        try expectReferenceError({ if case .tooManyPixels("tall.png", 8, 32769) = $0 { return true }; return false }) { _ = try prepare(tall) }
+        let square = try write(ReferenceFixtures.blankPNG(width: 11000, height: 11000), dir.appendingPathComponent("square.png"))
+        started = Date()
+        try expectReferenceError({ if case .tooManyPixels("square.png", 11000, 11000) = $0 { return true }; return false }) { _ = try prepare(square) }
+        try expect(Date().timeIntervalSince(started) < 2, "121 MP refused without decoding")
+        // Just within both caps: decoded (as a thumbnail) and prepared.
+        let edge = try prepare(write(ReferenceFixtures.blankPNG(width: 32768, height: 16), dir.appendingPathComponent("edge.png")))
+        try expectEqual(edge.original.width, 32768); try expectEqual(edge.master.longEdge, ReferenceLimits.masterLongEdge)
         try expectEqual(ReferenceError.tooManyPixels(name: "pano.tif", width: 60000, height: 20000).localizedDescription,
                         "\u{201C}pano.tif\u{201D} is 60000 \u{00D7} 20000 px (1200 megapixels); LivePaper takes images up to " +
                         "120 megapixels. Export a smaller copy (JPEG or PNG) and add that.")
@@ -275,9 +294,19 @@ enum ReferenceTests {
         try expectEqual(ReferenceError.noRoomForAsset(availableKB: 210).localizedDescription,
                         "The scene's own assets leave only 210 KB of the 8 MB asset limit \u{2014} too little for the picture to animate. " +
                         "Remove large files from its assets/ folder first.")
+        try expectEqual(ReferenceError.pictureTooDetailed(budgetKB: 3968).localizedDescription,
+                        "The picture to animate is too detailed to fit the scene's asset limit (3968 KB for it) even as a 1280-px JPEG. " +
+                        "Export a smaller or simpler copy (JPEG) and add that.")
+        try expect(ReferenceError.notPermitted(name: "refs").localizedDescription.hasPrefix(
+            "macOS doesn't let LivePaper open \u{201C}refs\u{201D} (it is in a folder macOS keeps private). Allow access in System Settings"))
         try expectEqual(ReferencePrompts.defaultPrompt(roles: []), nil)
+        try expectEqual(ReferencePrompts.defaultPrompt(roles: [], modify: true), nil)
         try expect(ReferencePrompts.defaultPrompt(roles: [.reference, .animate])?.hasPrefix("Bring the attached picture to life") == true)
         try expectEqual(ReferencePrompts.defaultPrompt(roles: [.reference]), "Create a scene inspired by the attached reference images.")
+        // Modify: a change to the scene, never "create a scene".
+        try expectEqual(ReferencePrompts.defaultPrompt(roles: [.reference], modify: true),
+                        "Restyle this scene after the attached reference images (palette, light, mood, style), keeping what it is.")
+        try expect(ReferencePrompts.defaultPrompt(roles: [.animate, .reference], modify: true)?.hasPrefix("Make this scene show the attached picture") == true)
     }
 
     // MARK: - Folders
@@ -389,6 +418,20 @@ enum ReferenceTests {
         topBright.setFillColor(ReferenceFixtures.rgb(1, 1, 1)); topBright.fill(CGRect(x: 0, y: 0, width: 400, height: 90))
         let tb = try prepare(write(png(topBright.makeImage()!), dir.appendingPathComponent("top.png"))).summary
         try expect(tb.brightness.mean < 165 && tb.brightness.behindClock > 200 && (tb.brightness.darkenTo ?? 1) < 0.6, "\(tb.brightness)")
+        try expectEqual(tb.brightness.sizes.map(\.aspect), ["16:10", "32:9", "5:4"])
+        try expectEqual(tb.brightness.sizes.map(\.size), ["1512x982", "2560x720", "1280x1024"])
+        // A sunset: dark sky, a bright horizon band at 30–42 % of the height, dark water. Behind the
+        // 16:10 clock (8–29 % of a 3:2 picture) it is dark; at 32:9 the clock sits on the horizon
+        // (32–41 %): the summary takes the brightest size, so TASK.md asks to darken.
+        let sunset = ReferenceFixtures.context(1500, 1000)
+        sunset.setFillColor(ReferenceFixtures.rgb(0.2, 0.2, 0.22)); sunset.fill(CGRect(x: 0, y: 0, width: 1500, height: 1000))
+        sunset.setFillColor(ReferenceFixtures.rgb(0.9, 0.9, 0.88)); sunset.fill(CGRect(x: 0, y: 300, width: 1500, height: 120))
+        let sun = try prepare(write(png(sunset.makeImage()!), dir.appendingPathComponent("sunset.png"))).summary
+        let at = Dictionary(uniqueKeysWithValues: sun.brightness.sizes.map { ($0.aspect, $0) })
+        try expect((at["16:10"]?.behindClock ?? 255) < 120 && (at["32:9"]?.behindClock ?? 0) > 120, "\(sun.brightness.sizes)")
+        try expectEqual(sun.brightness.behindClock, at["32:9"]?.behindClock)
+        try expect(sun.brightness.mean < 165, "the whole picture is dark enough: \(sun.brightness.mean)")
+        try expect((sun.brightness.darkenTo ?? 1) < 1, "darkenTo covers the 32:9 clock: \(sun.brightness)")
 
         // Stable keys, no names or paths.
         let json = try ReferenceSummary.encoder().encode(s)
@@ -482,6 +525,11 @@ enum ReferenceTests {
                            "Full-resolution copy: `scene/assets/reference.jpg` (1800\u{00D7}1200).", "LivePaper.image('reference.jpg')",
                            "Math.max(lp.w / img.width, lp.h / img.height)", "Absolute folder: `\(ws.references.path)`",
                            "Kiro: read with mode \"Image\" and image_paths", "sdk/SCENE_API.md` \u{00A7}7 \"Animating a still picture\"",
+                           "Images attached to this conversation are these files in the table's order (the first attachment is ref-01, " +
+                           "the second ref-02, \u{2026}), possibly only the first few; open the others with your image tool",
+                           "Open `references/ref-01.jpg` with your image tool before you plan",
+                           "(16:10 crops its top and bottom, 32:9 shows a horizontal band of it, 5:4 crops its sides)",
+                           "behind the clock up to ", "(16:10 ", ", 32:9 ", ", 5:4 ",
                            "The request mentions files on the user's Mac that weren't attached; you can't open them."] {
                 try expect(task.contains(needle), "TASK.md lacks: \(needle)\n\(task)")
             }
@@ -521,11 +569,51 @@ enum ReferenceTests {
             let mentioned = try builder(sb).buildSession(.create(prompt: "like ~/Desktop/heron.png"), sessionID: "r3")
             try expect(text(mentioned.workspace.taskFile).contains("## Files mentioned in the request"), text(mentioned.workspace.taskFile))
 
-            // A day later the copies go with the stills; the scene keeps its asset.
-            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-2 * 86_400)], ofItemAtPath: ws.root.path)
+            // Numbered with the picture to animate first, whatever order they were given in: the
+            // files, the rewritten prompt and the harness's attachments agree.
+            let reordered = try builder(sb).buildSession(.create(prompt: "Animate \(src.path)/refs/heron-secret-name.jpg"),
+                                                         references: [refs[1], refs[2], refs[0]], sessionID: "r4")
+            let rIndex = try JSONDecoder().decode(ReferenceIndex.self, from: Data(contentsOf: reordered.workspace.references.appendingPathComponent("references.json")))
+            try expectEqual(rIndex.images.map(\.role), [.animate, .reference, .reference])
+            try expectEqual(try Data(contentsOf: reordered.workspace.references.appendingPathComponent("ref-01.jpg")), refs[0].vision.data)
+            try expectEqual(try Data(contentsOf: reordered.workspace.references.appendingPathComponent("ref-02.png")), refs[1].vision.data)
+            try expectEqual(reordered.taskPrompt, "Animate `references/ref-01.jpg`")
+            try expectEqual(reordered.references.harnessImages.map(\.path), ["references/ref-01.jpg", "references/ref-02.png", "references/ref-03.jpg"])
+
+            // A transparent picture to animate: a PNG asset, and TASK.md says what goes behind it.
+            var cut = try prepare(write(ReferenceFixtures.transparentPNG(width: 800, height: 500), src.appendingPathComponent("cut.png")))
+            cut.role = .animate
+            let cutout = try builder(sb).buildSession(.create(prompt: "x"), references: [cut], sessionID: "r5")
+            try expect(FileManager.default.fileExists(atPath: cutout.workspace.scene.appendingPathComponent("assets/reference.png").path))
+            try expectEqual(cutout.references.animate?.transparent, true)
+            try expect(text(cutout.workspace.taskFile).contains("The picture has transparent areas (a cut-out). Draw whatever fits behind them first"),
+                       text(cutout.workspace.taskFile))
+            try expect(!task.contains("transparent areas"), "an opaque picture gets no such note")
+            // A picture that is only too bright behind the 32:9 clock: TASK.md asks to darken it.
+            let sunset = ReferenceFixtures.context(1500, 1000)
+            sunset.setFillColor(ReferenceFixtures.rgb(0.2, 0.2, 0.22)); sunset.fill(CGRect(x: 0, y: 0, width: 1500, height: 1000))
+            sunset.setFillColor(ReferenceFixtures.rgb(0.9, 0.9, 0.88)); sunset.fill(CGRect(x: 0, y: 300, width: 1500, height: 120))
+            let lit = try prepare(write(png(sunset.makeImage()!), src.appendingPathComponent("sunset.png")), role: .animate)
+            let litTask = text(try builder(sb).buildSession(.create(prompt: "x"), references: [lit], sessionID: "r6").workspace.taskFile)
+            try expect(litTask.contains("That is too bright for the check: darken evenly to about") && !litTask.contains("Keep it that way"), litTask)
+            // A portrait picture: 16:10 and 5:4 crop its top and bottom.
+            try expectEqual(ReferenceWorkspace.cropNote(aspect: 0.75),
+                            "16:10 crops its top and bottom, 32:9 shows a horizontal band of it, 5:4 crops its top and bottom")
+            try expectEqual(ReferenceWorkspace.cropNote(aspect: 4), "16:10 crops its sides, 32:9 crops its sides, 5:4 crops its sides")
+
+            // A day later the copies go with the stills; the scene keeps its asset, and the workspace
+            // keeps its age (removing references/ would otherwise make it look new).
+            let twoDaysAgo = Date().addingTimeInterval(-2 * 86_400)
+            try FileManager.default.setAttributes([.modificationDate: twoDaysAgo], ofItemAtPath: ws.root.path)
             builder(sb).pruneWorkspaces()
             try expect(!FileManager.default.fileExists(atPath: ws.references.path), "references pruned after a day")
             try expect(FileManager.default.fileExists(atPath: asset.path))
+            let kept = try SelfTests.unwrap((try FileManager.default.attributesOfItem(atPath: ws.root.path))[.modificationDate] as? Date)
+            try expect(abs(kept.timeIntervalSince(twoDaysAgo)) < 2, "the workspace's date is kept: \(kept)")
+            // …so a week after the session it goes as a whole.
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-8 * 86_400)], ofItemAtPath: ws.root.path)
+            builder(sb).pruneWorkspaces()
+            try expect(!FileManager.default.fileExists(atPath: ws.root.path), "pruned after the retention")
         }
     }
 
@@ -566,6 +654,26 @@ enum ReferenceTests {
             try expectEqual(built.references.animate?.sha256, sha256(asset))
             try expectNoMetadata(asset, "asset")
             _ = try SceneCompiler(runtimeDir: CLITestSupport.repo.appendingPathComponent("Runtime")).build(package: built.workspace.scene)
+
+            // A detailed transparent picture: PNG down to 2048 px, else a sharp JPEG flattened over black
+            // (never a soft 1280-px PNG, never a misleading "no room" error).
+            let cutCtx = ReferenceFixtures.context(3600, 2400, alpha: true)
+            cutCtx.clear(CGRect(x: 0, y: 0, width: 3600, height: 2400))
+            cutCtx.draw(ReferenceFixtures.cutout(noisy.makeImage()!), in: CGRect(x: 0, y: 0, width: 3600, height: 2400))
+            let detailed = try prepare(write(png(cutCtx.makeImage()!), sb.root.appendingPathComponent("in/noisy-cut.png")), role: .animate)
+            try expectEqual(detailed.master.format, .png)
+            try expect(detailed.master.data.count > SceneCompiler.maxAssetFileBytes, "the PNG master is over the limit: \(detailed.master.data.count)")
+            let flat = try builder(sb, library: lib).buildSession(.create(prompt: "animate it"), references: [detailed], sessionID: "m0")
+            let made = try SelfTests.unwrap(flat.references.animate)
+            try expect(max(made.width, made.height) >= 2048, "sharp enough: \(made.width)x\(made.height) \(made.assetPath)")
+            try expect(made.data.count <= SceneCompiler.maxAssetFileBytes - ReferenceLimits.assetMarginBytes)
+            if made.assetPath.hasSuffix(".jpg") {
+                try expect(made.flattened && !made.transparent)
+                try expect(text(flat.workspace.taskFile).contains("only a JPEG flattened over black fitted the asset limit"), text(flat.workspace.taskFile))
+            } else {
+                try expect(made.transparent && !made.flattened)
+            }
+            print("  detailed cut-out → \(made.assetPath) \(made.width)x\(made.height), \(made.data.count >> 10) KB")
 
             let full = try scene("full", assetBytes: 7_900_000)
             try expectReferenceError({ if case .noRoomForAsset = $0 { return true }; return false }) {
@@ -608,11 +716,45 @@ enum ReferenceTests {
         let q = "x '/tmp/a.png' y"
         try expectEqual(PromptPaths.mentions(in: q, home: home).first.map { String(q[$0.range]) }, "'/tmp/a.png'")
 
+        // Unquoted paths with plain spaces (Finder's Copy as Pathname, screenshot names) are carried
+        // on to the image name when that reads like one name.
+        let shot = "animate /Users/tester/Desktop/Screenshot 2026-11-15 at 10.41.23.png please."
+        try expectEqual(found(shot).map(\.1), ["/Users/tester/Desktop/Screenshot 2026-11-15 at 10.41.23.png"])
+        try expectEqual(found(shot).map(\.2), [.image])
+        try expectEqual(PromptPaths.mentions(in: shot, home: home).first.map { String(shot[$0.range]) },
+                        "/Users/tester/Desktop/Screenshot 2026-11-15 at 10.41.23.png")
+        try expectEqual(paths("~/Desktop/Screenshot 2026-11-15 at 10.41.23\u{202F}AM.png"),
+                        ["/Users/tester/Desktop/Screenshot 2026-11-15 at 10.41.23\u{202F}AM.png"])
+        try expectEqual(paths("~/Desktop/Screen Shot 2020-01-02 at 1.23.45 PM.png, then"), ["/Users/tester/Desktop/Screen Shot 2020-01-02 at 1.23.45 PM.png"])
+        try expectEqual(paths("from ~/Desktop/My Refs/heron.png"), ["/Users/tester/Desktop/My Refs/heron.png"])
+        try expectEqual(paths("like ~/Pictures/photo (1).png"), ["/Users/tester/Pictures/photo (1).png"])
+        try expectEqual(paths("see ~/Pictures/old photo.jpg"), ["/Users/tester/Pictures/old photo.jpg"])
+        try expectEqual(found("the folder ~/Desktop/My Refs/ please").map { [$0.1, "\($0.2)"] }, [["/Users/tester/Desktop/My Refs", "folder"]])
+        // …and not across ordinary words, or into another path.
+        try expectEqual(found("compare /tmp/refs and sunset.png").map { [$0.1, "\($0.2)"] }, [["/tmp/refs", "folder"]])
+        try expectEqual(paths("~/Desktop/refs with 3.png files"), ["/Users/tester/Desktop/refs"])
+        try expectEqual(paths("~/Desktop/a b /tmp/c.png"), ["/Users/tester/Desktop/a", "/tmp/c.png"])
+        // A fragment of a longer path that can't be read is no folder.
+        try expectEqual(paths("~/Desktop/My Refs/notes and more"), [])
+        // Folder names with dots; trailing punctuation; markdown; globs; ‘…’ quotes.
+        try expectEqual(found("style from ~/Desktop/refs.old").map { [$0.1, "\($0.2)"] }, [["/Users/tester/Desktop/refs.old", "folder"]])
+        try expectEqual(paths("in ~/Desktop/refs\u{2026}"), ["/Users/tester/Desktop/refs"])
+        try expectEqual(paths("**~/Desktop/a.png**"), ["/Users/tester/Desktop/a.png"])
+        try expectEqual(paths("all of ~/Desktop/*.png"), [])
+        try expectEqual(paths("\u{2018}~/Desktop/x y.png\u{2019}"), ["/Users/tester/Desktop/x y.png"])
+
         try expect(PromptPaths.isPrivacyProtected(URL(fileURLWithPath: "/Users/tester/Desktop/x.png"), home: home))
         try expect(PromptPaths.isPrivacyProtected(URL(fileURLWithPath: "/Users/tester/Library/Mobile Documents/x"), home: home))
         try expect(PromptPaths.isPrivacyProtected(URL(fileURLWithPath: "/Volumes/Card/DCIM"), home: home))
         try expect(!PromptPaths.isPrivacyProtected(URL(fileURLWithPath: "/Users/tester/Pictures/x.png"), home: home))
         try expect(!PromptPaths.isPrivacyProtected(URL(fileURLWithPath: "/Users/tester/Desktopia/x.png"), home: home))
+        // The volume is case-insensitive: so is the check (~/desktop/x is the Desktop). Cloud
+        // storage providers (File Provider) are guarded too.
+        for p in ["/Users/tester/desktop/x.png", "/Users/tester/DESKTOP/x", "/users/tester/Documents/a", "/volumes/Card/DCIM",
+                  "/Users/tester/Library/CloudStorage/Dropbox/x.png"] {
+            try expect(PromptPaths.isPrivacyProtected(URL(fileURLWithPath: p), home: home), p)
+        }
+        try expect(!PromptPaths.isPrivacyProtected(URL(fileURLWithPath: "/Users/tester/desktopia/x.png"), home: home))
 
         // Resolve (the file system) and rewrite (no file system).
         let dir = try tempDir("ref-prompt").resolvingSymlinksInPath()
@@ -631,6 +773,22 @@ enum ReferenceTests {
         try expectEqual(r.unattached.map(\.text), ["~/Desktop/else.jpg"])
         let none = PromptPaths.rewrite("No paths here.", attached: refs, home: home)
         try expectEqual(none.text, "No paths here."); try expectEqual(none.unattached.count, 0)
+
+        // An attached file whose path has spaces is replaced wherever it appears literally (as
+        // given, ~/…, escaped), so it never survives into TASK.md or the history.
+        let spaced = "/Users/tester/Desktop/Summer Trip/heron.png"
+        let template = refs[1]
+        let heron = PreparedReference(role: .animate, displayName: "heron.png", requestedPath: spaced, originPath: spaced, original: template.original,
+                                      master: template.master, vision: template.vision, summary: template.summary)
+        for prompt in ["animate \(spaced) please", "animate ~/Desktop/Summer Trip/heron.png please", "animate '\(spaced)' please",
+                       #"animate ~/Desktop/Summer\ Trip/heron.png please"#] {
+            let rw = PromptPaths.rewrite(prompt, attached: [heron], home: home)
+            try expectEqual(rw.text, "animate `references/ref-01.jpg` please")
+            try expectEqual(rw.unattached.count, 0)
+        }
+        // Not inside a longer name.
+        let longer = PromptPaths.rewrite("see \(spaced).bak and \(spaced)", attached: [heron], home: home)
+        try expect(longer.text.hasPrefix("see \(spaced).bak and") && longer.text.hasSuffix("`references/ref-01.jpg`"), longer.text)
     }
 
     // MARK: - The in-session check target
@@ -677,8 +835,8 @@ enum ReferenceTests {
         try expectEqual(ClaudeAdapter.disallowedTools, "WebFetch,WebSearch,Edit(./bin/**),Edit(./sdk/**),Edit(./.livepaper/**),Edit(./.kiro/**)," +
                         "Edit(./AGENTS.md),Edit(./CLAUDE.md),Edit(./TASK.md),Edit(./references/**),Edit(./scene/assets/reference.*)")
         try expect(ClaudeAdapter.allowedTools.hasPrefix("Read(./**),Edit(./scene/**),"), "Read(./**) covers ./references")
-        let images = [HarnessReferenceImage(path: "references/ref-02.jpg", role: .animate, byteCount: 3 << 20),
-                      HarnessReferenceImage(path: "references/ref-01.jpg", role: .reference, byteCount: 2 << 20),
+        let images = [HarnessReferenceImage(path: "references/ref-01.jpg", role: .animate, byteCount: 3 << 20),
+                      HarnessReferenceImage(path: "references/ref-02.jpg", role: .reference, byteCount: 2 << 20),
                       HarnessReferenceImage(path: "references/ref-03.png", role: .reference, byteCount: 2 << 20),
                       HarnessReferenceImage(path: "references/ref-04.jpg", role: .reference, byteCount: 500 << 10)]
         let claude = try ClaudeAdapter().invocation(for: AIHarness(kind: .claude, name: "Claude Code", executable: "/bin/claude"),
@@ -688,10 +846,12 @@ enum ReferenceTests {
         let codex = try CodexAdapter().invocation(for: AIHarness(kind: .codex, name: "Codex", executable: "/bin/codex"),
                                                   context: HarnessContext(workspace: ws, model: "m", searchPath: [], extraArguments: ["--x"],
                                                                           referenceImages: images))
-        // -i first (it takes any number of values), the one to animate first, within 6 MB.
-        try expectEqual(codex.arguments, ["exec", "-i", "references/ref-02.jpg", "-i", "references/ref-01.jpg", "-i", "references/ref-04.jpg",
+        // -i first (it takes any number of values); a prefix of the table within 6 MB, so Codex's
+        // "[Image #k]" is ref-0k (ref-04 would fit, but after the gap it would be "[Image #3]").
+        try expectEqual(codex.arguments, ["exec", "-i", "references/ref-01.jpg", "-i", "references/ref-02.jpg",
                                           "-C", "/tmp/lp-ws", "-s", "workspace-write", "--skip-git-repo-check", "--json",
                                           "-o", "/tmp/lp-ws/.livepaper/last-message.txt", "-m", "m", "--x", "-"])
+        try expectEqual(CodexAdapter.attachedImages([HarnessReferenceImage(path: "references/ref-01.jpg", role: .animate, byteCount: 7 << 20)]), [])
         let plainCodex = try CodexAdapter().invocation(for: AIHarness(kind: .codex, name: "Codex", executable: "/bin/codex"),
                                                        context: HarnessContext(workspace: ws, model: nil, searchPath: []))
         try expectEqual(plainCodex.arguments.prefix(2), ["exec", "-C"])
@@ -723,8 +883,8 @@ enum ReferenceTests {
             let two = Array(images.prefix(2))
             let with = try CustomAdapter().invocation(for: harness, context: HarnessContext(workspace: ws, model: nil, searchPath: [tool.deletingLastPathComponent().path],
                                                                                           referenceImages: two))
-            try expectEqual(with.arguments, ["--images", "/tmp/lp-ws/references/ref-02.jpg", "/tmp/lp-ws/references/ref-01.jpg",
-                                             "--list=/tmp/lp-ws/references/ref-02.jpg,/tmp/lp-ws/references/ref-01.jpg", "/tmp/lp-ws/TASK.md"])
+            try expectEqual(with.arguments, ["--images", "/tmp/lp-ws/references/ref-01.jpg", "/tmp/lp-ws/references/ref-02.jpg",
+                                             "--list=/tmp/lp-ws/references/ref-01.jpg,/tmp/lp-ws/references/ref-02.jpg", "/tmp/lp-ws/TASK.md"])
             let without = try CustomAdapter().invocation(for: harness, context: HarnessContext(workspace: ws, model: nil, searchPath: [tool.deletingLastPathComponent().path]))
             try expectEqual(without.arguments, ["--images", "--list=", "/tmp/lp-ws/TASK.md"])
         }
@@ -825,26 +985,36 @@ enum ReferenceTests {
     static func calibration() throws {
         var failures: [String] = []
         var table: [String] = []
-        for layout in ReferenceFixtures.Layout.allCases {
-            let photo = ReferenceFixtures.photo(layout, seed: 1)
+        let minColour = ReferenceBudgets().minColour
+        func measure(_ name: String, _ photo: CGImage, layout: ReferenceFixtures.Layout = .lake) -> (
+            scores: (ReferenceFixtures.Variant) -> [ResemblanceScore], row: (ReferenceFixtures.Variant, [ResemblanceScore]) -> Void,
+            band: (ReferenceFixtures.Variant, ClosedRange<Double>) -> Void) {
             let scorer = ReferenceResemblance.Scorer(reference: ReferenceFingerprint(image: photo), clock: .top)
-            func scores(_ v: ReferenceFixtures.Variant) -> [Double] {
+            func scores(_ v: ReferenceFixtures.Variant) -> [ResemblanceScore] {
                 checkSizes.map { s in
                     scorer.score(still: ReferenceFixtures.still(photo, v, width: s.px.0, height: s.px.1, layout: layout),
-                                 cssWidth: s.css.0, cssHeight: s.css.1).score
+                                 cssWidth: s.css.0, cssHeight: s.css.1)
                 }
             }
-            func row(_ v: ReferenceFixtures.Variant, _ xs: [Double]) {
-                table.append("  \(layout.rawValue.padding(toLength: 9, withPad: " ", startingAt: 0))\(v.description.padding(toLength: 24, withPad: " ", startingAt: 0))" +
-                             zip(checkSizes, xs).map { String(format: "%@ %.2f", $0.0.name, $0.1) }.joined(separator: "   "))
+            func row(_ v: ReferenceFixtures.Variant, _ xs: [ResemblanceScore]) {
+                table.append("  \(name.padding(toLength: 13, withPad: " ", startingAt: 0))\(v.description.padding(toLength: 30, withPad: " ", startingAt: 0))" +
+                             zip(checkSizes, xs).map {
+                                 String(format: "%@ %.2f", $0.0.name, $0.1.score) + ($0.1.colour.map { String(format: " (c %.2f)", $0) } ?? "") +
+                                     ($0.1.flat ? " flat" : "")
+                             }.joined(separator: "   "))
             }
             func band(_ v: ReferenceFixtures.Variant, _ range: ClosedRange<Double>) {
                 let xs = scores(v)
                 row(v, xs)
-                for (s, x) in zip(checkSizes, xs) where !range.contains(x) {
-                    failures.append("\(layout) \(v) at \(s.name): \(String(format: "%.2f", x)) not in \(range)")
+                for (s, x) in zip(checkSizes, xs) where !range.contains(x.score) {
+                    failures.append("\(name) \(v) at \(s.name): \(String(format: "%.2f", x.score)) not in \(range)")
                 }
             }
+            return (scores, row, band)
+        }
+        for layout in ReferenceFixtures.Layout.allCases {
+            let photo = ReferenceFixtures.photo(layout, seed: 1)
+            let (scores, row, band) = measure(layout.rawValue, photo, layout: layout)
             for v: ReferenceFixtures.Variant in [.cover(zoom: 1, dx: 0, dy: 0), .cover(zoom: 1.06, dx: 0.02, dy: -0.01),
                                                  .cover(zoom: 1.12, dx: -0.03, dy: 0.02), .darken(0.55), .particles] {
                 band(v, 0.75...1)
@@ -852,15 +1022,52 @@ enum ReferenceTests {
             band(.fog, 0.68...1)
             band(.topGradient, 0.72...1)
             band(.unrelated, 0...0.30)
-            for v: ReferenceFixtures.Variant in [.greyscale, .mirrored, .otherPicture(7)] { row(v, scores(v)) }
+            for v: ReferenceFixtures.Variant in [.mirrored, .otherPicture(7)] { row(v, scores(v)) }
             if layout == .city || layout == .portrait { band(.otherPicture(7), 0.35...0.70) }
+            // Colour: a greyscale rendering of the exact picture loses it (the colour warning), even
+            // darkening, fog, particles and a dark gradient keep it.
+            let grey = scores(.greyscale)
+            row(.greyscale, grey)
+            for (s, x) in zip(checkSizes, grey) where (x.colour ?? 0) >= minColour {
+                failures.append("\(layout) greyscale at \(s.name): colour \(x.colour ?? -1) ≥ \(minColour)")
+            }
+            for v: ReferenceFixtures.Variant in [.cover(zoom: 1.06, dx: 0.02, dy: -0.01), .darken(0.55), .fog, .particles, .topGradient] {
+                for (s, x) in zip(checkSizes, scores(v)) where (x.colour ?? 1) < minColour + 0.2 {
+                    failures.append("\(layout) \(v) at \(s.name): colour \(x.colour ?? -1) too close to \(minColour)")
+                }
+            }
             for v: ReferenceFixtures.Variant in [.stretched, .letterboxed] {
-                let xs = scores(v)
-                row(v, xs)
+                let xs = scores(v).map(\.score)
+                row(v, scores(v))
                 // What the aspect warning needs: 32:9 under 0.7 and ≥ 0.25 below 16:10.
                 if !(xs[1] < 0.7 && xs[0] - xs[1] >= 0.25) { failures.append("\(layout) \(v): 32:9 \(xs[1]) vs 16:10 \(xs[0])") }
             }
         }
+        // Cut-outs (transparent pictures): only the opaque parts are compared, so the picture shown
+        // exactly scores high over any backdrop — black, grey, blue, a dusk gradient, a light sky.
+        let backdrops: [ReferenceFixtures.Backdrop] = [.black, .grey(80.0 / 255), .colour(0.15, 0.3, 0.55), .gradient((0.12, 0.10, 0.25), (0.55, 0.35, 0.30)),
+                                                       .gradient((0.55, 0.70, 0.90), (0.85, 0.90, 0.95))]
+        for (name, brightness) in [("dark", 0.45), ("bright", 1.0)] {
+            for layout in [ReferenceFixtures.Layout.city, .flowers] {
+                let cut = ReferenceFixtures.cutout(ReferenceFixtures.photo(layout, seed: 2), brightness: brightness)
+                let (_, _, band) = measure("cut \(name) \(layout.rawValue.prefix(4))", cut)
+                for b in backdrops { band(.over(b), 0.75...1) }
+                band(.unrelated, 0...0.35)
+            }
+        }
+        // A soft, bright picture darkened by its own darkenTo (what TASK.md tells the agent), with and
+        // without fog: still the picture, not a flat frame.
+        let soft = ReferenceFixtures.softBright()
+        let softSummary = try prepare(write(png(soft), try tempDir("ref-soft").appendingPathComponent("soft.png"))).summary
+        let k = try SelfTests.unwrap(softSummary.brightness.darkenTo)
+        let softScorer = ReferenceResemblance.Scorer(reference: ReferenceFingerprint(image: soft), clock: .top)
+        table.append(String(format: "  soft bright: mean %.0f, darkenTo %.2f, contrast %.1f", softSummary.brightness.mean, k, softScorer.referenceContrast))
+        let (_, _, softBand) = measure("soft bright", soft)
+        softBand(.darkenedFog(k, fog: false), 0.75...1)
+        softBand(.darkenedFog(k, fog: true), 0.70...1)
+        // With so little detail an unrelated scene lands near failBelow (it still warns, < 0.70).
+        softBand(.unrelated, 0...0.5)
+        try expect(softScorer.referenceContrast >= ReferenceBudgets().minReferenceContrast, "the soft picture is measurable")
         print(table.joined(separator: "\n"))
         try expect(failures.isEmpty, failures.joined(separator: "; "))
         // A flat still scores 0; a still without the clock scores like one with it.
@@ -879,9 +1086,11 @@ enum ReferenceTests {
     // MARK: - Verdicts
 
     static func measurement(_ scores: [(CheckFrame, Double)], referenced: Bool = true, intact: Bool = true,
-                            measurable: Bool = true) -> ReferenceMeasurement {
+                            measurable: Bool = true, opaqueShare: Double = 1, colour: Double? = nil, flat: Bool = false) -> ReferenceMeasurement {
         ReferenceMeasurement(assetPath: "assets/reference.jpg", assetIntact: intact, referencedInScene: referenced, referenceMeasurable: measurable,
-                             frames: scores.map { ($0.0, ResemblanceScore(score: $0.1, zoom: 1, offset: [0, 0], stillContrast: 20)) })
+                             opaqueShare: opaqueShare,
+                             frames: scores.map { ($0.0, ResemblanceScore(score: $0.1, colour: colour, zoom: 1, offset: [0, 0],
+                                                                         stillContrast: flat ? 1.4 : 20, flat: flat)) })
     }
 
     static func verdicts() throws {
@@ -936,6 +1145,24 @@ enum ReferenceTests {
                    "\(changed.warnings)")
         let flat = evaluate(measurement(all(0.1), measurable: false))
         try expect(flat.passed && flat.warnings.contains { $0.contains("too little detail to compare") }, "\(flat.problems) \(flat.warnings)")
+
+        // Stills darkened or fogged until flat: the problem names that cause, not "keep overlays light".
+        let flattened = evaluate(measurement(all(0), flat: true))
+        try expectEqual(flattened.problems.count, 1)
+        try expect(flattened.problems[0].hasPrefix("The stills are too flat to show the user's picture") &&
+                   flattened.problems[0].contains("darkenTo"), flattened.problems[0])
+        // A transparent picture with almost nothing opaque: check by eye.
+        let sliver = evaluate(measurement(all(0.1), opaqueShare: 0.08))
+        try expect(sliver.passed && sliver.warnings.contains { $0.hasPrefix("Too little of the picture to animate is opaque") && $0.contains("8 %") },
+                   "\(sliver.problems) \(sliver.warnings)")
+        // The picture's colours gone (greyscale, a strong tint): a warning; kept: none.
+        let grey = evaluate(measurement(all(0.75), colour: 0))
+        try expect(grey.passed && grey.warnings.contains { $0.hasPrefix("The picture's colours are gone or changed (colour match 0.00") },
+                   "\(grey.warnings)")
+        let coloured = evaluate(measurement(all(0.75), colour: 0.9))
+        try expect(coloured.passed && !coloured.warnings.contains { $0.contains("colours are gone") }, "\(coloured.warnings)")
+        let colourless = evaluate(measurement(all(0.9), colour: nil))   // a grey picture: no colour to lose
+        try expect(colourless.warnings.isEmpty, "\(colourless.warnings)")
     }
 
     // MARK: - The check with a stand-in render server
@@ -1041,13 +1268,20 @@ enum ReferenceTests {
             let a = try prepare(write(png(ReferenceFixtures.photo(.lake, width: 600, height: 400)), dir.appendingPathComponent("lake.png")), role: .animate)
             let b = try prepare(write(png(ReferenceFixtures.photo(.city, width: 500, height: 400)), dir.appendingPathComponent("city.png")))
             let harness = try SelfTests.unwrap(model.preferredHarness)
-            let session = try SelfTests.unwrap(model.startSession(.create(prompt: "Bring this lake to life"), references: [a, b], harness: harness, model: nil))
-            try expectEqual(session.references, [a, b])
+            // Tray order: the reference first, the picture to animate second.
+            let session = try SelfTests.started(model, .create(prompt: "Bring this lake to life"), references: [b, a], harness: harness, model: nil)
+            try expectEqual(session.references.map(\.id), [b.id, a.id])
+            try expectEqual(session.references.map(\.role), [.reference, .animate])
+            try expectEqual(session.references.map(\.displayName), ["city.png", "lake.png"])   // what the tiles show
             try expectEqual(session.referenceCounts, ReferenceCounts(reference: 1, animate: 1))
-            try expectEqual(session.referenceFiles.map { $0.url.path }, [session.workspace.appendingPathComponent("references/ref-01.jpg").path,
-                                                                        session.workspace.appendingPathComponent("references/ref-02.jpg").path])
-            try expectEqual(session.referenceFiles.map(\.displayName), ["lake.png", "city.png"])
-            for f in session.referenceFiles { try expect(FileManager.default.fileExists(atPath: f.url.path), f.url.path) }
+            // Only the picture to animate keeps its full-size master in memory.
+            try expectEqual(session.references[1].master, a.master)
+            try expect(session.references[0].master == b.vision && b.master != b.vision, "the reference's master is released")
+            // The workspace numbers the picture to animate first.
+            for p in ["references/ref-01.jpg", "references/ref-02.jpg"] {
+                try expect(FileManager.default.fileExists(atPath: session.workspace.appendingPathComponent(p).path), p)
+            }
+            try expectEqual(try Data(contentsOf: session.workspace.appendingPathComponent("references/ref-01.jpg")), a.vision.data)
             try SelfTests.awaitMain(until: { !session.isRunning })
             guard case .succeeded = session.state.phase else { throw TestFailure(description: "phase \(session.state.phase)") }
             let tools = session.state.entries.flatMap { e -> [String] in if case .tools(let calls) = e.kind { return calls.map(\.detail) }; return [] }
@@ -1057,12 +1291,17 @@ enum ReferenceTests {
             let history = ProvenanceLog.load(package: package)
             try expectEqual(history.last?.referenceCount, 2); try expectEqual(history.last?.animatedCount, 1)
 
-            // Try again (with feedback): the same prepared images, ids and roles.
-            let again = try SelfTests.unwrap(model.retry(session, feedback: "slower please"))
-            try expectEqual(again.references.map(\.id), [a.id, b.id])
-            try expectEqual(again.references.map(\.role), [.animate, .reference])
+            // Try again (with feedback): the same prepared images, ids and roles; the picture still goes into the scene.
+            let again = try SelfTests.retried(model, session, feedback: "slower please")
+            try expectEqual(again.references.map(\.id), [b.id, a.id])
+            try expectEqual(again.references.map(\.role), [.reference, .animate])
             try expect(FileManager.default.fileExists(atPath: again.workspace.appendingPathComponent("references/ref-02.jpg").path))
-            again.cancel()
+            try SelfTests.awaitMain(until: { !again.isRunning })
+            let againPackage = try SelfTests.unwrap(again.state.package)
+            try expectEqual(try Data(contentsOf: againPackage.appendingPathComponent("assets/reference.jpg")), a.vision.data)
+            // Accepted: no Try Again any more, so the picture's master goes too.
+            try SelfTests.awaitMain { _ = await model.accept(again) }
+            try expect(again.references.allSatisfy { $0.master == $0.vision }, "masters released after accepting")
 
             // Modifying a built-in clones it and keeps the images.
             var started: AISessionModel?
@@ -1074,8 +1313,8 @@ enum ReferenceTests {
             modify.cancel()
 
             // Without images: as before.
-            let plain = try SelfTests.unwrap(model.startSession(.create(prompt: "A slow orbit of planets"), harness: harness, model: nil))
-            try expectEqual(plain.referenceCounts, nil); try expect(plain.referenceFiles.isEmpty)
+            let plain = try SelfTests.started(model, .create(prompt: "A slow orbit of planets"), harness: harness, model: nil)
+            try expectEqual(plain.referenceCounts, nil); try expect(plain.references.isEmpty)
             plain.cancel()
         }
     }
@@ -1168,6 +1407,33 @@ enum ReferenceTests {
             try expectEqual(tray.items.last?.role, .animate)
             try expectEqual(tray.items.first?.role, .reference)
             try expectEqual(tray.items.last?.originPath, nil)
+
+            // "Animate It" for an image that then fails: the current picture to animate keeps its role.
+            let badAnimate = try write(Data("x".utf8), dir.appendingPathComponent("bad-animate.png"))
+            tray.add([.file(badAnimate, role: .animate)], animate: true)
+            try SelfTests.awaitMain { await tray.settled() }
+            try expect(tray.items.last?.isFailed == true, "\(tray.items.map(\.state))")
+            try expectEqual(tray.references.map(\.role), [.reference, .reference, .reference, .animate])
+            try expectEqual(tray.items.first { $0.displayName == "Dropped image 1" }?.role, .animate)
+            // A failed tile can't be made the one to animate (the VoiceOver action included).
+            tray.setRole(.animate, for: try SelfTests.unwrap(tray.items.last).id)
+            try expectEqual(tray.references.map(\.role), [.reference, .reference, .reference, .animate])
+
+            // A folder with nothing to attach (empty, or hidden files only): a note, no tiles.
+            tray.clear()
+            let empty = dir.appendingPathComponent("empty"), hidden = dir.appendingPathComponent("hidden-only")
+            try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+            _ = try write(Data("x".utf8), hidden.appendingPathComponent(".DS_Store"))
+            _ = try write(dot, hidden.appendingPathComponent(".secret.png"))
+            var failureCalls = 0
+            tray.onFailures = { _ in failureCalls += 1 }
+            tray.addFiles([empty])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.notes, ["\u{201C}empty\u{201D} has no images in it (LivePaper looks 3 folders deep)."])
+            tray.addFiles([hidden, empty])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.notes.last, "No images were found in what you added (LivePaper looks 3 folders deep).")
+            try expect(tray.items.isEmpty && failureCalls == 0, "\(tray.items)")
         }
 
         // Preparing: visible while it runs, one image at a time.
@@ -1230,6 +1496,41 @@ enum ReferenceTests {
             tray.attach(try SelfTests.unwrap(tray.suggestions.first), animate: true)
             try SelfTests.awaitMain { await tray.settled() }
             try expectEqual(tray.items.map(\.role), [.reference, .animate])
+
+            // Typed in another case (~/desktop is the Desktop on this volume): still not looked up.
+            let looked = log.all.count   // the clicks above looked up ~/Desktop/secret.png, as they should
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "like ~/desktop/Other.png and ~/DOWNLOADS/refs/") }
+            try expectEqual(tray.suggestions.map(\.url.lastPathComponent), ["Other.png", "refs"])
+            try expect(log.all.count == looked, "protected paths aren't looked up while typing, in any case: \(log.all.dropFirst(looked))")
+
+            // A screenshot name with spaces is offered as the image, not as a folder "Screenshot".
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "animate ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png") }
+            try expectEqual(tray.suggestions.map(\.url.lastPathComponent), ["Screenshot 2026-11-15 at 10.41.23.png"])
+            try expectEqual(tray.suggestions.map(\.kind), [.image])
+
+            // An empty folder named in the prompt: attaching it says so, and it isn't offered again.
+            let empty = dir.appendingPathComponent("nothing-here")
+            try FileManager.default.createDirectory(at: empty, withIntermediateDirectories: true)
+            let emptyPrompt = "style from \(empty.path)/"
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: emptyPrompt) }
+            try expectEqual(tray.suggestions.map(\.kind), [.folder])
+            tray.attach(try SelfTests.unwrap(tray.suggestions.first))
+            try SelfTests.awaitMain { await tray.settled() }
+            try expect(tray.notes.contains("\u{201C}nothing-here\u{201D} has no images in it (LivePaper looks 3 folders deep)."), "\(tray.notes)")
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: emptyPrompt) }
+            try expect(tray.suggestions.isEmpty, "the empty folder isn't suggested again: \(tray.suggestions)")
+        }
+
+        // macOS refused to let LivePaper look (Desktop access declined): say what works instead,
+        // not "wasn't found".
+        try MainActor.assumeIsolated {
+            let tray = ReferenceTray(prepare: { try fake($0) }, resolve: { _ in .notPermitted }, home: home)
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "use ~/Desktop/refs/") }
+            tray.attach(try SelfTests.unwrap(tray.suggestions.first))
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.notes, ["LivePaper isn\u{2019}t allowed to open \u{201C}refs\u{201D} (on your Desktop). Drag it onto the card or use " +
+                                         "Add Images\u{2026}, or allow access in System Settings \u{203A} Privacy & Security \u{203A} Files and Folders."])
+            try expect(tray.items.isEmpty)
         }
     }
 
@@ -1266,6 +1567,19 @@ enum ReferenceTests {
         try expectEqual(result.inputs[1].displayName, ReferenceTray.droppedName)
         try expectEqual(result.notes, [ReferenceDropReader.webNote])
         try expect(ReferenceDropReader.acceptedTypes.contains(.fileURL) && ReferenceDropReader.acceptedTypes.contains(.image))
+        // A Finder selection with documents in it: the image and the folder come in, the rest is one note.
+        let notes = try write(Data("text".utf8), dir.appendingPathComponent("notes.txt"))
+        let folder = dir.appendingPathComponent("more")
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        read = nil
+        try SelfTests.awaitMain {
+            read = await ReferenceDropReader.inputs(from: [NSItemProvider(object: file as NSURL), NSItemProvider(object: notes as NSURL),
+                                                           NSItemProvider(object: folder as NSURL)])
+        }
+        let mixed = try SelfTests.unwrap(read)
+        try expectEqual(mixed.inputs.count, 2)
+        try expectEqual(mixed.inputs.first?.source, .file(file))
+        try expectEqual(mixed.notes, ["Left out 1 file that isn't an image."])
     }
 
     static func promptsWithReferences() throws {
@@ -1277,5 +1591,10 @@ enum ReferenceTests {
         try expectEqual(PromptComposer.effectivePrompt("", roles: [.reference]), "Create a scene inspired by the attached reference images.")
         try expectEqual(PromptComposer.effectivePrompt(" more fog ", roles: [.animate]), "more fog")
         try expectEqual(PromptComposer.effectivePrompt("", roles: []), "")
+        // Modify with images and no words: a change to the scene, not "create a scene".
+        try expectEqual(PromptComposer.effectivePrompt("", roles: [.reference], modify: true),
+                        "Restyle this scene after the attached reference images (palette, light, mood, style), keeping what it is.")
+        try expect(PromptComposer.effectivePrompt(" ", roles: [.animate], modify: true).hasPrefix("Make this scene show the attached picture"))
+        try expectEqual(PromptComposer.effectivePrompt("warmer", roles: [.reference], modify: true), "warmer")
     }
 }

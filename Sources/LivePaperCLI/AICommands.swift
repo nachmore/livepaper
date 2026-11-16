@@ -41,10 +41,10 @@ enum AICommands {
             guard args.positional.count <= 1, !prompt.isEmpty || hasImages else {
                 throw UsageError("ai create needs exactly one prompt argument (quote it), or images with --ref / --animate")
             }
-            return try await run(prompt: prompt, request: { .create(prompt: $0) }, args)
+            return try await run(prompt: prompt, modify: false, request: { .create(prompt: $0) }, args)
         case "modify":
             guard (1...2).contains(args.positional.count), args.positional.count == 2 || hasImages else {
-                throw UsageError("ai modify needs a scene id and one prompt argument (quote it)")
+                throw UsageError("ai modify needs a scene id and one prompt argument (quote it), or images with --ref / --animate")
             }
             let id = args.positional[0], prompt = args.positional.dropFirst().first?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !prompt.isEmpty || hasImages else { throw UsageError("the prompt is empty") }
@@ -58,7 +58,7 @@ enum AICommands {
             guard scene.manifest.kind == .web else {
                 throw LibraryError.invalid("\(id) is a video scene; AI sessions only modify web scenes.")
             }
-            return try await run(prompt: prompt, request: { .modify(sceneID: id, prompt: $0) }, args)
+            return try await run(prompt: prompt, modify: true, request: { .modify(sceneID: id, prompt: $0) }, args)
         case "harnesses":
             guard args.positional.isEmpty else { throw UsageError("ai harnesses takes no arguments") }
             return await harnesses(json: args.flag("json"))
@@ -172,7 +172,7 @@ enum AICommands {
                 switch PromptPaths.resolve(m) {
                 case .image: kind = .image
                 case .folder: kind = .folder
-                case .missing, .notAnImage: return nil
+                case .missing, .notAnImage, .notPermitted: return nil
                 }
             }
             let typed = m.text.replacingOccurrences(of: "\\ ", with: " ")
@@ -189,7 +189,8 @@ enum AICommands {
     // MARK: - Running a session
 
     /// - Parameter typed: the prompt as given (may be empty when images are attached).
-    static func run(prompt typed: String, request make: (String) -> AISessionRequest, _ args: Arguments) async throws -> Int32 {
+    /// - Parameter modify: the request changes a scene (the default request then says so).
+    static func run(prompt typed: String, modify: Bool, request make: (String) -> AISessionRequest, _ args: Arguments) async throws -> Int32 {
         let services = CLIServices.live
         let timeout = try args.int("timeout").map { minutes -> TimeInterval in
             guard (1...240).contains(minutes) else { throw UsageError("--timeout must be 1 … 240 minutes") }
@@ -209,7 +210,7 @@ enum AICommands {
             if !out.json { stderr("  \u{2026} preparing \(inputs.count == 1 ? "1 reference image" : "\(inputs.count) reference images")") }
             for input in inputs { references.append(try ReferenceImporter.prepare(input)) }
         }
-        let prompt = typed.isEmpty ? (ReferencePrompts.defaultPrompt(roles: references.map(\.role)) ?? typed) : typed
+        let prompt = typed.isEmpty ? (ReferencePrompts.defaultPrompt(roles: references.map(\.role), modify: modify) ?? typed) : typed
         let request = make(prompt)
 
         let session = try ai.start(request, references: references, harness: harness, model: model?.isEmpty == false ? model : nil)

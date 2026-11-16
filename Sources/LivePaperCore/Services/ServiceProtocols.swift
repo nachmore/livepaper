@@ -258,7 +258,9 @@ public protocol AIServicing: AnyObject, Sendable {
     func detectHarnesses() async -> [AIHarness]
     /// `model` nil = the model configured in the settings for that harness (else its default).
     /// `references`: prepared images (ReferenceImporter) the agent gets copies of, in order; at most
-    /// `ReferenceLimits.maxImages`, one of them to animate. Only writes bytes, so it stays fast.
+    /// `ReferenceLimits.maxImages`, one of them to animate (numbered ref-01). Blocking: it builds the
+    /// workspace, which decodes the picture to animate for its fingerprint and re-encodes it when it
+    /// doesn't fit the scene's asset budget (up to about a second) — call it off the main thread.
     func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?) throws -> AISessionHandle
     /// The stored settings, or defaults when there are none (never throws: a damaged file reads as defaults).
     func loadSettings() -> AISettings

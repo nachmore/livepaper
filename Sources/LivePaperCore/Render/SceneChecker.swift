@@ -164,7 +164,8 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             progress?("comparing \(plan.resemblanceFrames.count) stills with the picture to animate")
             let wanted = Set(plan.resemblanceFrames)
             let stills = results.stills.filter { wanted.contains($0.frame) && $0.response.ok }.map { (frame: $0.frame, path: $0.path) }
-            results.reference = ReferenceResemblance.measure(package: pkg, target: target, stills: stills, clock: manifest.clock.position)
+            results.reference = ReferenceResemblance.measure(package: pkg, target: target, stills: stills, clock: manifest.clock.position,
+                                                               budgets: budgets.reference)
         }
         var report = Self.evaluate(results, plan: plan, budgets: budgets, quick: options.quick)
         report.problems = problems + report.problems

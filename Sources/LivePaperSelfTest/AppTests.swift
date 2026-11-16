@@ -908,9 +908,9 @@ extension SelfTests {
                 try expectEqual(model.defaultModel(for: claude), "opus")
                 model.aiSettings.preferredHarness = claude.id
                 try expectEqual(model.preferredHarness?.id, claude.id)
-                let session = try unwrap(model.startSession(.create(prompt: "Ink drops blooming in water"), harness: claude, model: "  "))
+                let session = try started(model, .create(prompt: "Ink drops blooming in water"), harness: claude, model: "  ")
                 try expect(session.model == "opus", "an empty model field uses the default from Settings")
-                let other = try unwrap(model.startSession(.create(prompt: "Ink drops blooming in water"), harness: claude, model: "haiku"))
+                let other = try started(model, .create(prompt: "Ink drops blooming in water"), harness: claude, model: "haiku")
                 try expectEqual(other.model, "haiku")
                 for s in model.runningSessions { s.cancel() }
                 // A new model (next launch) reads them back.
@@ -1005,8 +1005,7 @@ extension SelfTests {
         TestCase(name: "app.model.ai-create-accept") {
             try withModel("ai-create") { model, _ in
                 let harness = try unwrap(model.preferredHarness)
-                let session = try unwrap(model.startSession(.create(prompt: "Paper lanterns drifting upward at night"),
-                                                            harness: harness, model: "opus"))
+                let session = try started(model, .create(prompt: "Paper lanterns drifting upward at night"), harness: harness, model: "opus")
                 try expectEqual(model.section, .session(session.id))
                 try awaitMain(until: { !session.isRunning })
                 guard case .succeeded = session.state.phase else { throw TestFailure(description: "phase \(session.state.phase)") }
@@ -1042,13 +1041,13 @@ extension SelfTests {
         TestCase(name: "app.model.ai-failure-retry-discard") {
             try withModel("ai-fail") { model, _ in
                 let harness = try unwrap(model.preferredHarness)
-                let session = try unwrap(model.startSession(.create(prompt: "This one should fail quickly"), harness: harness, model: nil))
+                let session = try started(model, .create(prompt: "This one should fail quickly"), harness: harness, model: nil)
                 model.section = .library // away from the session: a banner reports the outcome
                 try awaitMain(until: { !session.isRunning })
                 guard case .failed(let message) = session.state.phase else { throw TestFailure(description: "expected failure") }
                 try expect(message.contains("rate limit"), message)
                 try expect(model.banners.banners.contains { $0.style == .warning && $0.actions.map(\.title) == ["Open"] })
-                let retry = try unwrap(model.retry(session, feedback: "and use aurora colours"))
+                let retry = try retried(model, session, feedback: "and use aurora colours")
                 try expect(retry.prompt.contains("aurora colours"))
                 try expect(model.session(id: session.id) == nil, "retry replaces the old session")
                 model.discard(retry)
@@ -1061,7 +1060,7 @@ extension SelfTests {
                 let ai = try unwrap(fx.services.ai as? MockAIService)
                 ai.holdAfterSteps = 4
                 let harness = try unwrap(model.preferredHarness)
-                let session = try unwrap(model.startSession(.create(prompt: "A slow orbit of planets"), harness: harness, model: nil))
+                let session = try started(model, .create(prompt: "A slow orbit of planets"), harness: harness, model: nil)
                 try awaitMain(until: { session.state.toolCallCount >= 1 })
                 try expectEqual(model.runningSessions.count, 1)
                 session.cancel()
@@ -1098,8 +1097,8 @@ extension SelfTests {
                                                  render: mock.render, checker: mock.checker, compiler: mock.compiler)
                 try MainActor.assumeIsolated {
                     let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
-                    let running = try unwrap(model.startSession(.create(prompt: "An agent that ignores SIGTERM"), harness: harness, model: nil))
-                    let stopped = try unwrap(model.startSession(.create(prompt: "Another one, stopped just now"), harness: harness, model: nil))
+                    let running = try started(model, .create(prompt: "An agent that ignores SIGTERM"), harness: harness, model: nil)
+                    let stopped = try started(model, .create(prompt: "Another one, stopped just now"), harness: harness, model: nil)
                     for s in [running, stopped] { try awaitMain(until: { s.state.entries.contains { $0.kind == .text("started") } }) }
                     stopped.cancel()
                     try expectEqual(model.runningSessions.map(\.id), [running.id])
@@ -1235,6 +1234,21 @@ extension SelfTests {
     }
 
     /// A started AppModel over fresh mock services (zero delays) in a scratch directory.
+    /// `AppModel.startSession` from a synchronous test (it builds the workspace off the main thread).
+    @MainActor static func started(_ model: AppModel, _ request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness,
+                                   model name: String?) throws -> AISessionModel {
+        var session: AISessionModel?
+        try awaitMain { session = await model.startSession(request, references: references, harness: harness, model: name) }
+        return try unwrap(session)
+    }
+
+    /// `AppModel.retry` from a synchronous test.
+    @MainActor static func retried(_ model: AppModel, _ session: AISessionModel, feedback: String) throws -> AISessionModel {
+        var next: AISessionModel?
+        try awaitMain { next = await model.retry(session, feedback: feedback) }
+        return try unwrap(next)
+    }
+
     static func withModel(_ name: String, _ body: @MainActor (AppModel, ModelFixture) throws -> Void) throws {
         try withScratchPaths(name) { root in
             let services = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)

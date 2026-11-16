@@ -6,6 +6,9 @@
 //     ref-01.json       ReferenceSummary
 //   <ws>/scene/assets/reference.jpg   animate only: ≤ 3840 px, fits the asset limits (.png when transparent)
 //
+// The picture to animate is always ref-01 (`numbered`), so ref-NN, the order harnesses get the
+// images in (Codex attaches a prefix of them) and TASK.md's table all agree.
+//
 // Only bytes LivePaper prepared are written (no original names or paths); the pasted or dropped
 // data never touches a temporary file. `TASK.md` › "Reference images" says how to use each.
 import CryptoKit
@@ -59,6 +62,10 @@ public struct SessionReferences: Sendable, Equatable {
         public var height: Int
         public var sha256: String
         public var fingerprint: ReferenceFingerprint
+        /// The asset is a PNG with see-through parts (a cut-out): the scene chooses what is behind them.
+        public var transparent: Bool = false
+        /// The picture was transparent, but only a JPEG flattened over black fitted the asset limit.
+        public var flattened: Bool = false
     }
     public var images: [Image] = []
     public var animate: Animate?
@@ -67,10 +74,9 @@ public struct SessionReferences: Sendable, Equatable {
     public var isEmpty: Bool { images.isEmpty }
     /// nil without references (history.jsonl then has no `references` key).
     public var counts: ReferenceCounts? { isEmpty ? nil : ReferenceCounts(roles: images.map(\.role)) }
-    /// The image to animate first, then the rest in index order.
+    /// In index order (ref-01 first, which is the picture to animate when there is one).
     public var harnessImages: [HarnessReferenceImage] {
-        let ordered = images.filter { $0.role == .animate } + images.filter { $0.role != .animate }
-        return ordered.map { HarnessReferenceImage(path: ReferenceWorkspace.directoryName + "/" + $0.file, role: $0.role, byteCount: $0.byteCount) }
+        images.map { HarnessReferenceImage(path: ReferenceWorkspace.directoryName + "/" + $0.file, role: $0.role, byteCount: $0.byteCount) }
     }
     /// What the final check compares the stills with.
     public var checkTarget: ReferenceTarget? {
@@ -103,7 +109,12 @@ public enum ReferenceWorkspace {
 
     // MARK: - Writing
 
-    /// Writes `refs` (in order: ref-01 is the first) into the workspace, and for the image to animate
+    /// The order images are numbered in: the picture to animate first, the rest as given.
+    public static func numbered(_ refs: [PreparedReference]) -> [PreparedReference] {
+        refs.filter { $0.role == .animate } + refs.filter { $0.role != .animate }
+    }
+
+    /// Writes `refs` (in order: ref-01 is the first; see `numbered`) into the workspace, and for the image to animate
     /// its full-resolution copy into the candidate's assets. Throws `ReferenceError.noRoomForAsset`
     /// when the scene's own assets leave too little room for it.
     static func write(_ refs: [PreparedReference], into ws: AIWorkspace) throws -> SessionReferences {
@@ -158,7 +169,8 @@ public enum ReferenceWorkspace {
         try asset.data.write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
         return SessionReferences.Animate(assetPath: path, data: asset.data, width: asset.width, height: asset.height,
-                                         sha256: ReferenceImporter.sha256(asset.data), fingerprint: try ReferenceFingerprint(data: asset.data))
+                                         sha256: ReferenceImporter.sha256(asset.data), fingerprint: try ReferenceFingerprint(data: asset.data),
+                                         transparent: asset.format == .png, flattened: ref.master.format == .png && asset.format == .jpeg)
     }
 
     /// Bytes of the regular files the compiler would inline from `assets/` (hidden entries skipped).
@@ -194,7 +206,8 @@ public enum ReferenceWorkspace {
                 "(resized, metadata removed). \(n == 1 ? "It is the only copy" : "They are the only copies") you can open \u{2014} you can't " +
                 "read files outside this workspace \u{2014} and paths in the request that LivePaper attached now read `\(directoryName)/ref-NN.\u{2026}`.",
             "",
-            "Look at every image before you plan: they may already be attached to this conversation; otherwise open each with your " +
+            "Look at every image before you plan. Images attached to this conversation are these files in the table's order " +
+                "(the first attachment is ref-01, the second ref-02, \u{2026}), possibly only the first few; open the others with your " +
                 "image tool (Claude Code: Read; Kiro: read with mode \"Image\" and image_paths; Codex: view_image). Absolute folder: " +
                 "`\(workspace.references.path)`. `\(directoryName)/ref-NN.json` has size, aspect, brightness, dominant palette " +
                 "(hex + share) and a coarse colour grid (top row first).",
@@ -222,24 +235,36 @@ public enum ReferenceWorkspace {
         if let animate = refs.animate, let image = refs.images.first(where: { $0.role == .animate }) {
             let s = image.summary
             let asset = "scene/" + animate.assetPath, assetName = (animate.assetPath as NSString).lastPathComponent
-            var brightness = "5. Brightness: mean \(Int(s.brightness.mean.rounded()))/255, behind the clock " +
-                "\(Int(s.brightness.behindClock.rounded()))/255 (limits \(Int(budgets.maxMeanLuma)) / \(Int(budgets.maxClockLuma))). "
+            let perSize = s.brightness.sizes.map { "\($0.aspect) \(Int($0.behindClock.rounded()))" }.joined(separator: ", ")
+            var brightness = "5. Brightness: mean \(Int(s.brightness.mean.rounded()))/255; behind the clock up to " +
+                "\(Int(s.brightness.behindClock.rounded()))/255" + (perSize.isEmpty ? "" : " (\(perSize))") +
+                "; limits \(Int(budgets.maxMeanLuma)) / \(Int(budgets.maxClockLuma)) at every screen shape. "
             if let k = s.brightness.darkenTo {
                 brightness += "That is too bright for the check: darken evenly to about \(String(format: "%.2f", k)) (e.g. black at alpha " +
                     "\(String(format: "%.2f", 1 - k)) over the picture) and/or add a soft dark gradient behind the clock; never recolour."
             } else {
                 brightness += "Keep it that way: overlays shouldn't brighten the picture, least of all behind the clock."
             }
+            var transparency: [String] = []
+            if animate.transparent {
+                transparency = ["", "The picture has transparent areas (a cut-out). Draw whatever fits behind them first \u{2014} a dark " +
+                    "backdrop keeps the clock readable; the brightness numbers above count them as black \u{2014} then the picture over it. " +
+                    "The check compares only the picture's opaque parts, so any backdrop is fine."]
+            } else if animate.flattened {
+                transparency = ["", "The picture had transparent areas, but only a JPEG flattened over black fitted the asset limit: " +
+                    "the black is part of the picture now."]
+            }
             lines += [
                 "",
                 "### Animate this exact image: `\(directoryName)/\(image.file)`",
                 "",
-                "The user wants THIS picture brought to life, not a new picture inspired by it. Full-resolution copy: `\(asset)` " +
-                    "(\(animate.width)\u{00D7}\(animate.height)).",
+                "The user wants THIS picture brought to life, not a new picture inspired by it. Open `\(directoryName)/\(image.file)` " +
+                    "with your image tool before you plan, and plan the effects for the regions it really has (water, sky, foliage, " +
+                    "light). Full-resolution copy: `\(asset)` (\(animate.width)\u{00D7}\(animate.height)).",
                 "",
                 "1. Load it with `LivePaper.image('\(assetName)')` (decoded before setup) and draw it as the base of every frame, " +
                     "cover-fit: `s = Math.max(lp.w / img.width, lp.h / img.height)`, centred; it must fill 16:10, 32:9 and 5:4 with no " +
-                    "bars, stretching or mirroring (32:9 shows a horizontal band; 5:4 crops the sides).",
+                    "bars, stretching or mirroring (\(cropNote(aspect: s.aspectRatio))).",
                 "2. Keep it recognisably the same picture: composition, colours, details. Don't redraw, restyle, recolour or replace it.",
                 "3. Bring it to life subtly, with motion that belongs to what it shows: water shimmer/ripples (strips offset by smooth " +
                     "noise), drifting clouds/fog/mist (soft low-alpha layers), wind in foliage/grass (gentle sway of strips or cut-outs), " +
@@ -255,12 +280,23 @@ public enum ReferenceWorkspace {
                 "",
                 "LivePaper's check compares the stills with this picture (cover-fit, allowing a slow camera): a scene that doesn't show " +
                     "it fails; one that drifts far from it gets a warning. Example: `sdk/SCENE_API.md` \u{00A7}7 \"Animating a still picture\".",
-            ]
+            ] + transparency
         }
         if unattached > 0 {
             lines += ["", unattachedSentence]
         }
         return lines.joined(separator: "\n") + "\n"
+    }
+
+    /// How each of the check's screen shapes crops a picture of `aspect` (width / height) when
+    /// it is cover-fit: "16:10 crops its top and bottom, 32:9 shows a horizontal band of it, 5:4 crops its sides".
+    public static func cropNote(aspect a: Double) -> String {
+        func crop(_ screen: Double) -> String {
+            if abs(a / screen - 1) <= 0.02 { return "shows all of it" }
+            return a > screen ? "crops its sides" : "crops its top and bottom"
+        }
+        let wide = abs(a / (32.0 / 9) - 1) <= 0.02 || a > 32.0 / 9 ? crop(32.0 / 9) : "shows a horizontal band of it"
+        return "16:10 \(crop(1512.0 / 982)), 32:9 \(wide), 5:4 \(crop(1.25))"
     }
 
     static let unattachedSentence = "The request mentions files on the user's Mac that weren't attached; you can't open them. " +

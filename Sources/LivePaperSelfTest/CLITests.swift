@@ -519,9 +519,34 @@ extension SelfTests {
             try expectEqual(r.status, 1)
             try expect(r.out.contains(#""event":"note""#) && r.out.contains("left out 3 more images (the limit is 10 per session)"), r.out)
             try expect(r.out.contains(#""references":{"animate":0,"reference":10}"#), r.out)
-            // `--ref ~/…` is expanded even when the shell didn't (`--ref=~/x`).
-            r = try sb.run(["ai", "create", "x", "--ref=~/no-such-dir/x.png", "--command", agent.path], extraEnv: ["HOME": sb.root.path])
-            try expectEqual(r.status, 1); try expect(r.err.contains("x.png"), r.err)
+            // `--ref ~/…` is expanded even when the shell didn't (`--ref=~/x`): with the home redirected
+            // into the sandbox (CFFIXED_USER_HOME is what Foundation's home follows; HOME isn't),
+            // the picture under it is found and attached.
+            let home = ["HOME": sb.root.path, "CFFIXED_USER_HOME": sb.root.path]
+            r = try sb.run(["ai", "create", "x", "--ref=~/pics/heron.png", "--command", agent.path, "--json"], extraEnv: home)
+            try expectEqual(r.status, 1)
+            try expect(r.out.contains(#""references":{"animate":0,"reference":1}"#), "the tilde path was found: \(r.out) \(r.err)")
+            r = try sb.run(["ai", "create", "x", "--ref=~/no-such-dir/x.png", "--command", agent.path], extraEnv: home)
+            try expectEqual(r.status, 1); try expect(r.err.contains("\u{201C}x.png\u{201D} doesn't exist"), r.err)
+
+            // ai modify: images may replace the prompt (the default request then asks for a change),
+            // and the picture goes into the scene being modified; nothing at all is a usage error.
+            r = try sb.run(["new", "Mine", "--from", "starter", "--json"])
+            let mine = try SelfTests.unwrap(try CLITestSupport.jsonObject(r.out)["id"] as? String)
+            r = try sb.run(["ai", "modify", mine, "--command", agent.path])
+            try expectEqual(r.status, 2); try expect(r.err.contains("or images with --ref / --animate"), r.err)
+            try expectEqual(try sb.run(["ai", "modify", mine, "a", "b", "--ref", heron.path, "--command", agent.path]).status, 2)
+            r = try sb.run(["ai", "modify", mine, "--animate", heron.path, "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            let modifyStarted = try SelfTests.unwrap(r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }
+                .first { $0["event"] as? String == "started" })
+            try expectEqual(modifyStarted["references"] as? [String: Int], ["reference": 0, "animate": 1])
+            let mws = try SelfTests.unwrap(modifyStarted["workspace"] as? String)
+            let mtask = try String(contentsOfFile: mws + "/TASK.md", encoding: .utf8)
+            try expect(mtask.contains("Change the existing LivePaper scene `\(mine)`") &&
+                       mtask.contains("Make this scene show the attached picture and bring it to life") && !mtask.contains("Create a scene"), mtask)
+            try expect(FileManager.default.fileExists(atPath: mws + "/scene/assets/reference.jpg"))
+            try expectEqual(try String(contentsOfFile: mws + "/.livepaper/refs.txt", encoding: .utf8), "ref-01.jpg\nref-01.json\nreferences.json\n")
         },
         cliTest("cli.ai.reference-hint") { sb in
             let agent = sb.root.appendingPathComponent("tools/quiet-agent")
@@ -542,6 +567,78 @@ extension SelfTests {
             try expect(!r.out.contains("the prompt mentions"), r.out)
             r = try sb.run(["ai", "create", "animate \(image.path)", "--animate", image.path, "--command", agent.path])
             try expect(!r.out.contains("the prompt mentions"), r.out)
+            // Paths in privacy-protected places (Desktop, Documents, …, volumes) are judged by syntax
+            // alone — never looked up, so the terminal gets no privacy prompt — and hinted even though
+            // nothing is there. The home is redirected into the sandbox, so nothing real is touched.
+            let home = ["HOME": sb.root.path, "CFFIXED_USER_HOME": sb.root.path]
+            r = try sb.run(["ai", "create", "animate ~/Desktop/heron.png please, style from ~/Documents/refs/", "--command", agent.path], extraEnv: home)
+            try expect(r.out.contains("livepaper ai: the prompt mentions ~/Desktop/heron.png (an image). The agent can't open files outside its " +
+                                      "workspace; add --ref ~/Desktop/heron.png to attach a copy"), r.out)
+            try expect(r.out.contains("the prompt mentions ~/Documents/refs/ (a folder)"), r.out)
+            try expect(!FileManager.default.fileExists(atPath: sb.root.appendingPathComponent("Desktop").path))
+            r = try sb.run(["ai", "create", "animate /Volumes/NoSuchCard-\(UUID().uuidString.prefix(6))/x.png", "--command", agent.path])
+            try expect(r.out.contains("(an image). The agent can't open files outside its workspace"), r.out)
+            // A screenshot name with spaces: the whole name, quoted for the shell.
+            r = try sb.run(["ai", "create", "animate ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png", "--command", agent.path], extraEnv: home)
+            try expect(r.out.contains("the prompt mentions ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png (an image)") &&
+                       r.out.contains("add --ref '~/Desktop/Screenshot 2026-11-15 at 10.41.23.png'"), r.out)
+        },
+        cliTest("cli.check.reference") { sb in
+            // `livepaper check` inside a session that animates a picture compares the candidate's
+            // stills with it (ReferenceWorkspace.checkTarget): report.json has `reference`, the
+            // summary a `picture` line; outside the session, neither.
+            let agent = sb.root.appendingPathComponent("tools/pic-agent")
+            try FileManager.default.createDirectory(at: agent.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("""
+            #!/bin/sh
+            printf '%s\\n' "LivePaper.scene({ draw(lp) { const img = LivePaper.image('reference.jpg'); lp.ctx.drawImage(img, 0, 0, lp.w, lp.h); } });" > scene/scene.js
+
+            """.utf8).write(to: agent)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+            let photo = ReferenceFixtures.photo(.lake, seed: 6, width: 1200, height: 800)
+            let lake = sb.root.appendingPathComponent("pics/lake.png")
+            try FileManager.default.createDirectory(at: lake.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try ReferenceFixtures.encode(photo, type: .png).write(to: lake)
+            // The session itself fails at its own check (no render server yet); its workspace stays.
+            var r = try sb.run(["ai", "create", "--animate", lake.path, "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            let ws = try SelfTests.unwrap(r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }
+                .first { $0["event"] as? String == "started" }?["workspace"] as? String)
+            let scene = ws + "/scene"
+            // A stand-in render server whose stills show the picture cover-fit, with fog.
+            _ = try RuntimeTests.serve(sb.support.appendingPathComponent("render.sock"), count: 80) { line in
+                guard let req = try? JSONDecoder().decode(RenderRequest.self, from: line) else { return Data("{}".utf8) }
+                var resp: RenderResponse
+                switch req.op {
+                case .still:
+                    let w = Int(((req.width ?? 1512) / 4).rounded()), h = Int(((req.height ?? 982) / 4).rounded())
+                    if let out = req.out {
+                        try? ReferenceFixtures.encode(ReferenceFixtures.still(photo, .fog, width: w, height: h), type: .png).write(to: URL(fileURLWithPath: out))
+                    }
+                    resp = RenderResponse(ok: true, ready: true, out: req.out, meanLuma: 60, clockLuma: 30)
+                case .bench: resp = RenderResponse(ok: true, ready: true, benchMs: 1.1)
+                case .motion:
+                    resp = RuntimeTests.aliveMotion(CheckFrame(Int(req.width ?? 1280), Int(req.height ?? 720), dpr: req.dpr ?? 0.5, t: 0))
+                    resp.out = req.out
+                default: resp = RenderResponse(ok: true, ready: true)
+                }
+                return (try? JSONEncoder().encode(resp)) ?? Data()
+            }
+            let session = [AISessionPolicy.sessionVariable: "s-ref", AISessionPolicy.workspaceVariable: ws]
+            r = try sb.run(["check", scene, "--quick", "--json"], extraEnv: session)
+            try expectEqual(r.status, 0)
+            let report = try SceneManifest.decoder().decode(CheckReport.self, from: Data(r.out.utf8))
+            let ref = try SelfTests.unwrap(report.reference)
+            try expectEqual(ref.asset, "assets/reference.jpg")
+            try expect(ref.referencedInScene && ref.assetIntact && (ref.median ?? 0) >= 0.7, "\(ref)")
+            try expectEqual(ref.similarity.count, 3)
+            r = try sb.run(["check", scene, "--quick"], extraEnv: session)
+            try expect(r.out.contains("  picture      like the reference: "), r.out)
+            // Outside the session (or on another package) there is nothing to compare with.
+            r = try sb.run(["check", scene, "--quick", "--json"])
+            try expectEqual(try SceneManifest.decoder().decode(CheckReport.self, from: Data(r.out.utf8)).reference, nil)
+            r = try sb.run(["check", scene, "--quick"])
+            try expect(!r.out.contains("  picture  "), r.out)
         },
         cliTest("cli.arguments.repeatable") { sb in
             // A repeated option keeps its last value (--model), repeatable ones keep all (--ref, above).
