@@ -10,6 +10,10 @@
 //   screenSaver        {engine, engineExists, running}
 //   password           {requirement: immediate|delayed|off|unknown, source, delaySeconds?, warning?}
 //   systemLockTakeover com.apple.loginwindow immediateLockLaunchesScreenSaver (absent = not set)
+//   preSleep           {enabled, appliesOn[], status, now, powerSource?, displaySleepSeconds{battery|ac|ups},
+//                       screenSaverIdleSeconds?, screenSaverIdleSource?, leadSeconds, preventedBy[]}
+//                      "show your scene when the screens turn off first" (LPPreSleepPolicy); `now` is the
+//                      decision with the session taken as unlocked
 //   notifications      distributed notifications the agent observes
 //   problems[]         things that are broken (--self-check exits 1 when non-empty)
 //   warnings[]         things that work but not as the user probably expects
@@ -64,6 +68,26 @@ struct HelperReport: Codable, Equatable, Sendable {
         var delaySeconds: Int?
         var warning: String?
     }
+    struct PreSleep: Codable, Equatable, Sendable {
+        /// state.json `lock.showSceneBeforeDisplaySleep`.
+        var enabled: Bool
+        /// The power sources on which the screens turn off before the screen saver starts.
+        var appliesOn: [LPPowerSource]
+        /// Settings › Lock's status line (LPPreSleepStatus).
+        var status: String
+        /// What the agent would do right now if the session is unlocked: "watching: …",
+        /// "blocked: …" or "inactive: …" (LPPreSleepPolicy.decide).
+        var now: String
+        var powerSource: LPPowerSource?
+        /// Per power source; 0 = never. Missing = unknown.
+        var displaySleepSeconds: [LPPowerSource: Int]
+        var screenSaverIdleSeconds: Int?
+        var screenSaverIdleSource: LPScreenSaverIdle.Source?
+        /// How long before the displays would dim the screen saver starts (LPPreSleepSchedule.lead).
+        var leadSeconds: Double
+        /// Assertions keeping the displays on right now.
+        var preventedBy: [String]
+    }
 
     static let currentSchema = 1
 
@@ -75,6 +99,7 @@ struct HelperReport: Codable, Equatable, Sendable {
     var screenSaver: ScreenSaver
     var password: Password
     var systemLockTakeover: Bool?
+    var preSleep: PreSleep
     var notifications: [String]
     var problems: [String]
     var warnings: [String]
@@ -93,6 +118,9 @@ struct HelperReport: Codable, Equatable, Sendable {
         var systemLockTakeover: Bool?
         var carbonConstantsMatch: Bool
         var agentPID: Int32?
+        var screenTimers: LPScreenTimers = LPScreenTimers()
+        /// nil: couldn't be read.
+        var assertions: LPPowerAssertions? = nil
     }
 
     /// The notifications the agent observes (all distributed).
@@ -153,9 +181,31 @@ struct HelperReport: Codable, Equatable, Sendable {
         password = Password(requirement: inputs.password.requirement, source: inputs.password.source,
                             delaySeconds: inputs.password.delaySeconds, warning: inputs.password.warning)
         systemLockTakeover = inputs.systemLockTakeover
+        preSleep = Self.preSleep(inputs)
         notifications = Self.observedNotifications
         self.problems = problems
         self.warnings = warnings
+    }
+
+    static func preSleep(_ inputs: Inputs) -> PreSleep {
+        let timers = inputs.screenTimers
+        let situation = LPPreSleepSituation(enabled: inputs.config.showSceneBeforeDisplaySleep,
+                                            passwordImmediately: inputs.password.immediately, timers: timers,
+                                            screenSaverRunning: inputs.screenSaverRunning,
+                                            assertions: inputs.assertions ?? LPPowerAssertions())
+        let now: String
+        switch LPPreSleepPolicy.decide(situation) {
+        case .watch(let displaySleep, let idle):
+            now = "watching: screens off after \(displaySleep) s, screen saver after \(idle == 0 ? "never" : "\(idle) s"); " +
+                  "starts the screen saver \(Int(LPPreSleepSchedule.lead)) s before the screens dim"
+        case .blocked(let why): now = "blocked: \(why)"
+        case .inactive(let why): now = "inactive: \(why)"
+        }
+        return PreSleep(enabled: situation.enabled, appliesOn: LPPreSleepStatus.applicableSources(timers),
+                        status: LPPreSleepStatus.text(passwordImmediately: situation.passwordImmediately, timers: timers),
+                        now: now, powerSource: timers.currentSource, displaySleepSeconds: timers.displaySleep,
+                        screenSaverIdleSeconds: timers.screenSaverIdle?.seconds, screenSaverIdleSource: timers.screenSaverIdle?.source,
+                        leadSeconds: LPPreSleepSchedule.lead, preventedBy: inputs.assertions?.preventingDisplaySleep ?? [])
     }
 
     /// Pretty, key-sorted JSON (stable for diffing and for `livepaper doctor`).
@@ -177,6 +227,7 @@ struct HelperReport: Codable, Equatable, Sendable {
         lines.append("  saver engine: \(screenSaver.engineExists ? "present" : "MISSING")\(screenSaver.running ? ", running" : "")")
         lines.append("  password:     \(password.requirement.rawValue)\(password.delaySeconds.map { " (\($0) s)" } ?? "") [\(password.source.rawValue)]")
         lines.append("  lock takeover (immediateLockLaunchesScreenSaver): \(systemLockTakeover.map { $0 ? "on" : "off" } ?? "not set")")
+        lines.append("  before screens off: \(preSleep.enabled ? "on" : "off") — \(preSleep.status) [\(preSleep.now)]")
         for problem in problems { lines.append("problem: \(problem)") }
         for warning in warnings { lines.append("warning: \(warning)") }
         lines.append(problems.isEmpty ? "ok" : "\(problems.count) problem(s)")

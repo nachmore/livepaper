@@ -116,6 +116,14 @@ enum CLIEnvironment {
         return Set(list.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
     }
 
+    /// LIVEPAPER_SELFTEST_SCREEN_TIMERS=<LPScreenTimers JSON> (with LIVEPAPER_NO_SYSTEM_COMMANDS=1 only):
+    /// the display-sleep timers and screen-saver idle time the stand-in system reports, so the
+    /// self-tests see `doctor`'s "before screens off" row. nil: unknown, like any stand-in.
+    static var selfTestScreenTimers: LPScreenTimers? {
+        guard noSystemCommands, let json = ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_SCREEN_TIMERS"] else { return nil }
+        return try? JSONDecoder().decode(LPScreenTimers.self, from: Data(json.utf8))
+    }
+
     // MARK: - Terminal
 
     static var stdinIsTerminal: Bool { isatty(STDIN_FILENO) == 1 }
@@ -205,9 +213,10 @@ enum CLIServices {
             let agent: WallpaperSystem = CLIEnvironment.scratchWallpaperAgent
                 ? ScratchWallpaperSystem(storeURL: live.paths.wallpaperStore, connectedDisplayIDs: connected)
                 : UnavailableWallpaperSystem(reason: "system commands are only recorded", connectedDisplayIDs: connected)
+            let timers = CLIEnvironment.selfTestScreenTimers ?? LPScreenTimers()
             return InstallService(paths: live.paths, publisher: Self.live.publish, runner: sandboxRunner,
                                   loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun,
-                                  wallpaperSystem: agent, wallpaperOptions: quick)
+                                  wallpaperSystem: agent, wallpaperOptions: quick, screenTimers: { timers })
         }
         guard dryRun else { return live }
         return InstallService(paths: live.paths, publisher: nil, dryRun: true)

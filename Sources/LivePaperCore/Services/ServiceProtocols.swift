@@ -441,6 +441,9 @@ public struct InstallStatus: Sendable, Equatable {
     public var lockKeysShowScene: Bool
     /// LivePaper changed that preference and keeps its previous value; uninstall puts it back.
     public var lockKeysChangedByLivePaper: Bool
+    /// When each power source turns the displays off and when the screen saver starts: whether
+    /// "Show your scene when the screens turn off first" has anything to do (LPPreSleepStatus).
+    public var screenTimers: LPScreenTimers
 
     /// - Parameter saverSelection: overrides `saverSelected` (true: every display, false: none).
     public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverNewerInstalled: Bool = false, saverSelected: Bool = false,
@@ -448,7 +451,7 @@ public struct InstallStatus: Sendable, Equatable {
                 helperRunning: Bool = false, helperLoginItem: LoginItemStatus = .notRegistered, helperProblem: HelperProblem? = nil,
                 passwordImmediately: Bool = false,
                 managedByMDM: Bool = false, passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false,
-                lockKeysChangedByLivePaper: Bool = false) {
+                lockKeysChangedByLivePaper: Bool = false, screenTimers: LPScreenTimers = LPScreenTimers()) {
         self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverNewerInstalled = saverNewerInstalled
         self.saverSelection = saverSelection ?? (saverSelected ? .everyDisplay : .none)
         self.selectionReapplyNeeded = selectionReapplyNeeded
@@ -456,6 +459,7 @@ public struct InstallStatus: Sendable, Equatable {
         self.passwordImmediately = passwordImmediately
         self.managedByMDM = managedByMDM; self.passwordManagedByMDM = passwordManagedByMDM; self.lockKeysShowScene = lockKeysShowScene
         self.lockKeysChangedByLivePaper = lockKeysChangedByLivePaper
+        self.screenTimers = screenTimers
     }
 
     /// The installed saver is an older build than this LivePaper's: what the launch-time update

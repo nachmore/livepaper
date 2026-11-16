@@ -541,7 +541,7 @@ extension SelfTests {
             let data = try report.json()
             let object = try expectNotNil(try JSONSerialization.jsonObject(with: data) as? [String: Any])
             try expectEqual(Set(object.keys), ["schema", "helper", "state", "hotkey", "app", "screenSaver", "password",
-                                               "systemLockTakeover", "notifications", "problems", "warnings"])
+                                               "systemLockTakeover", "preSleep", "notifications", "problems", "warnings"])
             try expectEqual(object["schema"] as? Int, 1)
             let hotkey = try expectNotNil(object["hotkey"] as? [String: Any])
             try expectEqual(hotkey["enabled"] as? Bool, false)

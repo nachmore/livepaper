@@ -1,7 +1,7 @@
-// HelperAgent — the long-running LaunchAgent: lock shortcut, lock flow, "open the app" relay.
+// HelperAgent — the long-running LaunchAgent: lock shortcut, lock flow, "open the app" relay, and
+// the screen-saver start before the displays turn off (PreSleepWatcher).
 // See main.swift for what it does and, importantly, what it must not do.
 import AppKit
-import CoreGraphics
 import LivePaperCore
 import os
 
@@ -21,8 +21,12 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
     /// Observes app terminations only while recording, to recover if the app quits mid-recording.
     private var terminationObserver: NSObjectProtocol?
     private var stopped = false
-    /// Off-main work: the sysadminctl password probe.
+    /// Off-main work: the sysadminctl password probe (and the display-sleep facts).
     private let probes = DispatchQueue(label: "com.nachmore.livepaper.helper.probes", qos: .utility)
+    /// "Show your scene when the screens turn off first"; idle (nothing observed) while off.
+    private lazy var preSleep = PreSleepWatcher(probes: probes) { [unowned self] password in
+        lock(.beforeDisplaySleep, password: password)
+    }
 
     /// A launch that hasn't completed within this long is assumed lost (checked when the next
     /// request arrives — no timer).
@@ -99,6 +103,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         guard !stopped else { return }
         stopped = true
         hotkeys.uninstall()
+        preSleep.stop()
         DistributedNotificationCenter.default().removeObserver(self)
         watchAppTermination(false)
         instance?.release()
@@ -169,7 +174,8 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
             // Logged once per change, not on every stateChanged.
             for problem in new.problems { log.error("state.json: \(problem, privacy: .public)") }
             log.info("""
-                state (\(reason, privacy: .public)): shortcut \(new.hotkey?.displayString ?? "off", privacy: .public) \
+                state (\(reason, privacy: .public)): shortcut \(new.hotkey?.displayString ?? "off", privacy: .public), \
+                before screens off \(new.showSceneBeforeDisplaySleep ? "on" : "off", privacy: .public) \
                 [\(new.source.rawValue, privacy: .public)]
                 """)
             if let hotkey = new.hotkey, let problem = HelperHotkeyMapping.problem(with: hotkey) {
@@ -178,6 +184,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         }
         config = new
         applyHotkey()
+        if !stopped { preSleep.setEnabled(new.showSceneBeforeDisplaySleep, reason: reason) }
     }
 
     private func recordingChanged(active: Bool?) {
@@ -259,7 +266,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         let situation = HelperLockSituation(
             engineExists: FileManager.default.fileExists(atPath: HelperProcesses.screenSaverEngineApp.path),
             screenSaverRunning: HelperProcesses.isScreenSaverEngineRunning,
-            sessionLocked: Self.sessionLocked,
+            sessionLocked: HelperSession.isLocked,
             launchInFlight: launchStartedAt.map { now.timeIntervalSince($0) < Self.launchTimeout } ?? false,
             password: password.requirement)
         switch HelperLockPolicy.decide(situation) {
@@ -272,7 +279,7 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
                 lock (\(trigger.rawValue, privacy: .public)) refused: \(refusal.rawValue, privacy: .public) \
                 [\(password.source.rawValue, privacy: .public)]; starting the screen saver wouldn't lock the Mac
                 """)
-            reportRefusal(refusal)
+            if trigger.reportsRefusal { reportRefusal(refusal) }
         case .startScreenSaver:
             log.notice("lock (\(trigger.rawValue, privacy: .public)): starting the screen saver")
             launchStartedAt = now
@@ -298,12 +305,6 @@ final class HelperAgent: NSObject, NSApplicationDelegate {
         if NSRunningApplication.runningApplications(withBundleIdentifier: LPPaths.bundleID).isEmpty {
             openApp(arguments: refusal.launchArguments)
         }
-    }
-
-    /// `CGSSessionScreenIsLocked` is present (true) in the session dictionary only while locked.
-    private static var sessionLocked: Bool {
-        guard let session = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
-        return (session["CGSSessionScreenIsLocked"] as? NSNumber)?.boolValue ?? false
     }
 
     /// Logs a warning at launch when the LivePaper lock would refuse (password not required immediately).

@@ -198,6 +198,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     private let wallpaperClock: WallpaperClock
     private let wallpaperOptions: WallpaperApplyOptions
     private let probe: HelperProcessProbing
+    private let readScreenTimers: @Sendable () -> LPScreenTimers
     private let helperStartTimeout: TimeInterval
     private let helperRegisterTimeout: TimeInterval
     private let lock = NSRecursiveLock()
@@ -215,6 +216,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     ///   - helperStartTimeout: how long starting the helper waits for it to run (0: look once).
     ///   - helperRegisterTimeout: how long registering the helper again waits for launchd to have and
     ///     run its job (smd submits it asynchronously), and for a late unregister to finish (0: look once).
+    ///   - screenTimers: reads the display-sleep timers and the screen saver's idle time for the status.
+    ///     nil: the live system (LPPowerProbe: `pmset -g custom`, `preferences`, IOKit) when `runner`
+    ///     really runs commands, and "unknown" when commands are only recorded.
     public init(paths: InstallPaths = .current(), publisher: PublishServicing?, runner: CommandRunning = SystemCommandRunner(),
                 loginItem: LoginItemRegistering = SMAppServiceAgent(), preferences: PreferencesAccessing = SystemPreferences(),
                 dryRun: Bool = false,
@@ -222,7 +226,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                 wallpaperSystem: WallpaperSystem? = nil, wallpaperClock: WallpaperClock = SystemWallpaperClock(),
                 wallpaperOptions: WallpaperApplyOptions = WallpaperApplyOptions(),
                 probe: HelperProcessProbing = SystemHelperProbe(), helperStartTimeout: TimeInterval = 3,
-                helperRegisterTimeout: TimeInterval = 10) {
+                helperRegisterTimeout: TimeInterval = 10, screenTimers: (@Sendable () -> LPScreenTimers)? = nil) {
         self.paths = paths; self.publisher = publisher; self.runner = runner; self.loginItem = loginItem
         self.preferences = preferences; self.dryRun = dryRun; self.uid = uid
         self.osMajorVersion = osMajorVersion
@@ -233,6 +237,14 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         self.wallpaperClock = wallpaperClock
         self.wallpaperOptions = wallpaperOptions
         self.probe = probe
+        if let screenTimers {
+            self.readScreenTimers = screenTimers
+        } else if runner is SystemCommandRunner {
+            let powerProbe = LPPowerProbe(runner: runner, preferences: preferences, managedPreferences: paths.managedPreferences)
+            self.readScreenTimers = { powerProbe.screenTimers() }
+        } else {
+            self.readScreenTimers = { LPScreenTimers() }
+        }
         self.helperStartTimeout = helperStartTimeout
         self.helperRegisterTimeout = helperRegisterTimeout
     }
@@ -248,8 +260,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     // MARK: - Status
 
-    /// Blocking (runs `sysadminctl` and `launchctl print`, both read-only, ≤ 10 s each, and checks the
-    /// running helper's code signature): call it off the main thread.
+    /// Blocking (runs `sysadminctl`, `launchctl print` and `pmset -g custom`, all read-only, ≤ 10 s
+    /// each, and checks the running helper's code signature): call it off the main thread.
     public func status() -> InstallStatus {
         let installedVersion = FileOps.bundleInfo(paths.installedSaver, "CFBundleVersion")
         let templateVersion = FileOps.bundleInfo(paths.saverTemplate, "CFBundleVersion")
@@ -278,7 +290,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                     preferences.forcedValue(domain: SystemProbes.screenSaverDomain, key: $0)
                 }),
             lockKeysShowScene: lockKeysShowScene,
-            lockKeysChangedByLivePaper: loadDefaultsChanges().contains(where: Self.isLockKeysChange))
+            lockKeysChangedByLivePaper: loadDefaultsChanges().contains(where: Self.isLockKeysChange),
+            screenTimers: readScreenTimers())
     }
 
     // MARK: - Saver

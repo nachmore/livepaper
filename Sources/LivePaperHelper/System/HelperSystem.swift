@@ -1,6 +1,6 @@
 // HelperSystem — the read-only system facts the helper needs, gathered without connecting to the
-// window server (CFPreferences, plain files, libproc, Launch Services lookups and one sysadminctl
-// call), so --print-config and --self-check can use all of it.
+// window server (CFPreferences, plain files, libproc, Launch Services lookups, IOKit power queries
+// and one sysadminctl and one pmset call), so --print-config and --self-check can use all of it.
 import CoreServices
 import Foundation
 import LivePaperCore
@@ -50,6 +50,13 @@ enum HelperSystem {
         return HelperPasswordPolicy.resolve(managed: managed, sysadminctlOutput: output, user: user)
     }
 
+    /// The display-sleep timers per power source, the power source in use and the screen saver's
+    /// idle time (LPPowerProbe). Blocking: runs `pmset -g custom` (read-only, ~20 ms) — call off the
+    /// main thread in the agent.
+    static func screenTimers() -> LPScreenTimers {
+        LPPowerProbe(managedPreferences: HelperPasswordPolicy.managedPreferenceFiles()).screenTimers()
+    }
+
     /// Everything --print-config reports, read from the live system.
     static func reportInputs(previous: HelperLockConfig? = nil) -> HelperReport.Inputs {
         let executable = executableURL
@@ -67,6 +74,8 @@ enum HelperSystem {
             password: passwordPolicy(),
             systemLockTakeover: systemLockTakeover,
             carbonConstantsMatch: CarbonHotkeyCenter.carbonConstantsMatch,
-            agentPID: HelperProcesses.runningAgentPID())
+            agentPID: HelperProcesses.runningAgentPID(),
+            screenTimers: screenTimers(),
+            assertions: LPPowerProbe.assertions())
     }
 }
