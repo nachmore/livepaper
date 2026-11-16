@@ -108,6 +108,14 @@ enum CLIEnvironment {
         noSystemCommands && ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_WALLPAPER_AGENT"] == "1"
     }
 
+    /// LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS=<uuid>,<uuid> (with LIVEPAPER_NO_SYSTEM_COMMANDS=1 only):
+    /// the displays the stand-in system reports as connected, so the self-tests see how `doctor`
+    /// counts them. nil: unknown, like any stand-in.
+    static var selfTestConnectedDisplays: Set<String>? {
+        guard noSystemCommands, let list = ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS"] else { return nil }
+        return Set(list.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+
     // MARK: - Terminal
 
     static var stdinIsTerminal: Bool { isatty(STDIN_FILENO) == 1 }
@@ -193,7 +201,10 @@ enum CLIServices {
             var quick = WallpaperApplyOptions()
             quick.quietInterval = 0.3
             quick.pollInterval = 0.05
-            let agent = CLIEnvironment.scratchWallpaperAgent ? ScratchWallpaperSystem(storeURL: live.paths.wallpaperStore) : nil
+            let connected = CLIEnvironment.selfTestConnectedDisplays
+            let agent: WallpaperSystem = CLIEnvironment.scratchWallpaperAgent
+                ? ScratchWallpaperSystem(storeURL: live.paths.wallpaperStore, connectedDisplayIDs: connected)
+                : UnavailableWallpaperSystem(reason: "system commands are only recorded", connectedDisplayIDs: connected)
             return InstallService(paths: live.paths, publisher: Self.live.publish, runner: sandboxRunner,
                                   loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun,
                                   wallpaperSystem: agent, wallpaperOptions: quick)

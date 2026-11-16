@@ -32,6 +32,9 @@ public enum WallpaperStoreError: Error, LocalizedError, Sendable, Equatable {
     /// pointing at LivePaper: there is no recorded original, no usable pre-LivePaper copy and no
     /// built-in screen saver to put there instead.
     case noPreviousChoice(String)
+    /// The caller's reason to stop, found again while holding the store lock (e.g. LivePaper was
+    /// uninstalled meanwhile): nothing written.
+    case stopped(String)
 
     // After the store was written.
 
@@ -60,7 +63,7 @@ public enum WallpaperStoreError: Error, LocalizedError, Sendable, Equatable {
         case .sessionLocked, .sessionUnknown, .conflictingProcess, .storeBusy, .agentRestartFailed, .notConfirmed, .rolledBack:
             return true
         case .unavailable, .moduleForcedByMDM, .wallpaperChangesDisabledByMDM, .unsupportedStoreVersion, .storeMissing,
-             .undecodable, .unsupportedShape, .verificationFailed, .saverMissing, .noPreviousChoice, .rollbackFailed:
+             .undecodable, .unsupportedShape, .verificationFailed, .saverMissing, .noPreviousChoice, .stopped, .rollbackFailed:
             return false
         }
     }
@@ -81,6 +84,7 @@ public enum WallpaperStoreError: Error, LocalizedError, Sendable, Equatable {
         case .storeBusy: return "macOS kept updating the wallpaper settings; try again in a moment"
         case .saverMissing(let path): return "the LivePaper screen saver isn't installed (\(path))"
         case .noPreviousChoice(let path): return "LivePaper has no earlier screen saver to put back for \(path)"
+        case .stopped(let why): return "LivePaper stopped before changing the wallpaper settings (\(why))"
         case .agentRestartFailed(let why): return "couldn't restart WallpaperAgent (\(why))"
         case .notConfirmed(let why): return "macOS didn't keep the change (\(why))"
         case .rolledBack(let why): return "macOS changed other wallpaper settings, so LivePaper put the previous settings back (\(why))"

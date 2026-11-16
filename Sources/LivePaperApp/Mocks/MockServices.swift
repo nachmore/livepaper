@@ -368,7 +368,7 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
         guard current.saverInstalled, current.selectionReapplyNeeded else { return .notNeeded("no display fell back to macOS\u{2019}s default") }
         if let reapplyRefusal { return .refused(reapplyRefusal) }
         let missing: Int
-        if case .partly(let m, _) = current.saverSelection { missing = m } else { missing = 1 }
+        if case .partly(let count) = current.saverSelection { missing = count.connectedMissing ?? count.missing } else { missing = 1 }
         current.saverSelection = .everyDisplay
         current.selectionReapplyNeeded = false
         return .reapplied(displays: missing)
@@ -377,7 +377,7 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     /// Snapshot/test hook: `missing` of `displays` fell back to macOS's default screen saver (say
     /// something reset SystemDefault and a display was connected since).
     func simulateDisplaysOnDefault(missing: Int, of displays: Int) {
-        mutate { $0.saverSelection = .partly(missing: missing, displays: displays); $0.selectionReapplyNeeded = true }
+        mutate { $0.saverSelection = .partly(.init(displays: displays, missing: missing)); $0.selectionReapplyNeeded = true }
     }
 
     func registerHelper() throws {

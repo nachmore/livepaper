@@ -110,8 +110,11 @@ enum SetupChecklist {
                                : s.saverNewerInstalled ? "A newer build from another copy of LivePaper is installed. Installing replaces it with this copy\u{2019}s."
                                : "Installed, but an update is available.",
                            state: s.saverInstalled && s.saverUpToDate ? .done : .needed),
+                // A store LivePaper can't read (a newer macOS) doesn't block setup: the user checks
+                // System Settings, where the guided step also points.
                 SetupCheck(id: .saverSelected, title: s.saverPartlySelected ? "Selected on every display" : "Selected as your screen saver",
-                           detail: selectionDetail(s.saverSelection), state: s.saverSelected ? .done : .needed),
+                           detail: selectionDetail(s.saverSelection),
+                           state: s.saverSelected ? .done : s.saverSelectionUnknown ? .optional : .needed),
             ]
         case .lock:
             // "Managed" only when the profile itself forces the password off or a delay; a profile
@@ -152,15 +155,28 @@ enum SetupChecklist {
         }
     }
 
-    /// The "Selected" row's text for each selection state.
+    /// The "Selected" row's text for each selection state. Counts name the connected displays when
+    /// they are known, otherwise the displays the wallpaper settings have records for.
     static func selectionDetail(_ selection: SaverSelection) -> String {
         switch selection {
         case .everyDisplay:
             return "LivePaper plays when your Mac idles or locks."
-        case .partly(let missing, let displays):
-            let which = missing == 1 ? "1 of your \(displays) displays still shows" : "\(missing) of your \(displays) displays still show"
+        case .partly(let count):
+            let which: String
+            if let connected = count.connected, let missing = count.connectedMissing, missing > 0 {
+                which = "\(missing) of your \(connected) connected display\(connected == 1 ? "" : "s") still show\(missing == 1 ? "s" : "")"
+            } else if count.connected != nil {
+                let elsewhere = count.missing - (count.connectedMissing ?? 0)
+                which = elsewhere == 1 ? "1 display that isn\u{2019}t connected now would still show"
+                                       : "\(elsewhere) displays that aren\u{2019}t connected now would still show"
+            } else {
+                which = "\(count.missing) of the \(count.displays) displays in your wallpaper settings still show\(count.missing == 1 ? "s" : "")"
+            }
             return "\(which) another screen saver (macOS\u{2019}s default or one picked in System Settings). " +
                    "\(SetupState.everyDisplayActionTitle) fixes that; your current choice is backed up."
+        case .unknown:
+            return "LivePaper can\u{2019}t tell which displays use it: this macOS stores its wallpaper settings in a way " +
+                   "LivePaper doesn\u{2019}t know. Check System Settings \u{203A} Wallpaper \u{203A} Screen Saver."
         case .none:
             return "Makes LivePaper the screen saver (your current choice is backed up)."
         }
@@ -179,7 +195,14 @@ enum SetupChecklist {
     /// Short line for the Settings › Screen saver status row.
     static func saverSummary(_ s: InstallStatus) -> String {
         if !s.saverInstalled { return "Not installed" }
-        if case .partly(let missing, let displays) = s.saverSelection { return "Selected on \(displays - missing) of \(displays) displays" }
+        if case .partly(let count) = s.saverSelection {
+            if let connected = count.connected, let missing = count.connectedMissing, missing > 0 {
+                return "Not on \(missing) of \(connected) connected display\(connected == 1 ? "" : "s")"
+            }
+            if count.connected != nil { return "Not on every display" }
+            return "Not on \(count.missing) of \(count.displays) displays"
+        }
+        if s.saverSelectionUnknown { return "Installed \u{2014} can\u{2019}t tell which displays use it" }
         if !s.saverSelected { return "Installed, not selected" }
         if s.saverNewerInstalled { return "Selected \u{2014} a newer build is installed" }
         if !s.saverUpToDate { return "Selected \u{2014} update available" }

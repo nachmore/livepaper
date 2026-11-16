@@ -380,11 +380,32 @@ public enum HelperRecoveryOutcome: Sendable, Equatable {
 public enum SaverSelection: Sendable, Equatable {
     /// No display does.
     case none
-    /// Some displays do; `missing` of the `displays` the wallpaper store has records for show
-    /// another screen saver (macOS's default, or one picked in System Settings).
-    case partly(missing: Int, displays: Int)
+    /// Some display records resolve to LivePaper, not all: how many displays show another screen
+    /// saver (macOS's default, or one picked in System Settings) in some or every Space.
+    case partly(DisplayCount)
     /// Every display the wallpaper store has a record for does (with none yet: its SystemDefault).
     case everyDisplay
+    /// The wallpaper store is in a format LivePaper doesn't know (a newer macOS) and names LivePaper
+    /// in a screen-saver slot: which displays show it can't be told.
+    case unknown
+
+    /// The displays `.partly` is about. A display counts as missing when some record of it (in some
+    /// Space) resolves to something else; the others show LivePaper in every Space, so
+    /// `displays - missing` never counts a display twice.
+    public struct DisplayCount: Sendable, Equatable {
+        /// Displays the wallpaper store has records for, connected or not.
+        public var displays: Int
+        public var missing: Int
+        /// The same two counts for the displays connected now (CoreGraphics' display UUIDs are the
+        /// store's display keys, docs/RESEARCH.md §5.8). nil when that isn't known: no display list
+        /// (no window server, a stand-in system) or none of the connected displays has a record.
+        public var connected: Int?
+        public var connectedMissing: Int?
+
+        public init(displays: Int, missing: Int, connected: Int? = nil, connectedMissing: Int? = nil) {
+            self.displays = displays; self.missing = missing; self.connected = connected; self.connectedMissing = connectedMissing
+        }
+    }
 }
 
 public struct InstallStatus: Sendable, Equatable {
@@ -396,9 +417,10 @@ public struct InstallStatus: Sendable, Equatable {
     public var saverNewerInstalled: Bool
     /// Which displays show LivePaper as their screen saver.
     public var saverSelection: SaverSelection
-    /// LivePaper owns the selection and some display falls back to macOS's default screen saver only
-    /// because its Idle slot holds the placeholder: the app re-applies the selection by itself
-    /// (InstallServicing.reapplySelectionIfNeeded).
+    /// LivePaper owns the selection, is still chosen somewhere, and some display record shows macOS's
+    /// default screen saver — or inherits LivePaper from a record WallpaperAgent rewrites itself
+    /// (SystemDefault, a Space's Default) — only because its own Idle slot holds the placeholder: the
+    /// app re-applies the selection by itself (InstallServicing.reapplySelectionIfNeeded).
     public var selectionReapplyNeeded: Bool
     public var helperRunning: Bool
     /// The helper's SMAppService login item (`.notFound` when it runs from the LaunchAgent fallback,
@@ -450,6 +472,10 @@ public struct InstallStatus: Sendable, Equatable {
     /// LivePaper is the screen saver of some displays but not of all (`.partly`): "Use LivePaper on
     /// Every Display", `livepaper select`.
     public var saverPartlySelected: Bool { if case .partly = saverSelection { return true }; return false }
+
+    /// The wallpaper store names LivePaper but is in a format LivePaper can't resolve (`.unknown`):
+    /// neither "selected" nor "not selected" can be claimed.
+    public var saverSelectionUnknown: Bool { saverSelection == .unknown }
 }
 
 /// What the app's quiet re-apply of the selection did (InstallServicing.reapplySelectionIfNeeded).

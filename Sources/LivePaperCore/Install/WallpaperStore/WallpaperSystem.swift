@@ -1,6 +1,7 @@
 // WallpaperSystem — everything the store applier needs from the running Mac: the read-only
 // preflight facts and the one live action, restarting WallpaperAgent. Tests inject a fake (and a
 // fake clock); only LiveWallpaperSystem touches the real system.
+import ColorSync
 import CoreFoundation
 import CoreGraphics
 import Darwin
@@ -31,6 +32,14 @@ public protocol WallpaperSystem: Sendable {
     /// Makes WallpaperAgent re-read the store: it reads Index.plist only at launch. launchd starts a
     /// new agent at once; expect about a second of blank desktop.
     func restartWallpaperAgent() throws
+    /// The UUIDs of the displays connected now — the keys of the store's display records
+    /// (docs/RESEARCH.md §5.8). Read-only; nil when not known.
+    var connectedDisplayIDs: Set<String>? { get }
+}
+
+extension WallpaperSystem {
+    /// Stand-ins don't know which displays are connected.
+    public var connectedDisplayIDs: Set<String>? { nil }
 }
 
 /// Time for the applier's waits (a fake clock in tests makes them instant).
@@ -48,7 +57,9 @@ public struct SystemWallpaperClock: WallpaperClock {
 /// For installers whose system commands are only recorded or planned: refuses everything.
 public struct UnavailableWallpaperSystem: WallpaperSystem {
     public let reason: String
-    public init(reason: String) { self.reason = reason }
+    /// Stand-in display UUIDs (the CLI's self-tests); nil: unknown.
+    public let connectedDisplayIDs: Set<String>?
+    public init(reason: String, connectedDisplayIDs: Set<String>? = nil) { self.reason = reason; self.connectedDisplayIDs = connectedDisplayIDs }
     public func unavailability(forStoreAt url: URL) -> String? { reason }
     public var sessionState: WallpaperSessionState { .unknown }
     public func conflictingProcesses() -> [String] { [] }
@@ -65,7 +76,9 @@ public struct UnavailableWallpaperSystem: WallpaperSystem {
 /// for it there, and nothing outside the store file is touched.
 public struct ScratchWallpaperSystem: WallpaperSystem {
     public let storeURL: URL
-    public init(storeURL: URL) { self.storeURL = storeURL }
+    /// Stand-in display UUIDs; nil: unknown.
+    public let connectedDisplayIDs: Set<String>?
+    public init(storeURL: URL, connectedDisplayIDs: Set<String>? = nil) { self.storeURL = storeURL; self.connectedDisplayIDs = connectedDisplayIDs }
 
     public func unavailability(forStoreAt url: URL) -> String? {
         let agent = LiveWallpaperSystem.agentStoreURL
@@ -160,6 +173,23 @@ public struct LiveWallpaperSystem: WallpaperSystem {
 
     public var storeMigrationVersion: Int? {
         (CFPreferencesCopyAppValue("StoreIndexMigrationVersion" as CFString, "com.apple.wallpaper" as CFString) as? NSNumber)?.intValue
+    }
+
+    public var connectedDisplayIDs: Set<String>? { Self.onlineDisplayUUIDs() }
+
+    /// `CGDisplayCreateUUIDFromDisplayID` of every online display (connected, awake or asleep,
+    /// mirrored or not): the strings WallpaperAgent keys its display records by. Read-only; nil
+    /// without a window server (a remote shell) or when no display is listed.
+    static func onlineDisplayUUIDs() -> Set<String>? {
+        var count: UInt32 = 0
+        guard CGGetOnlineDisplayList(0, nil, &count) == .success, count > 0 else { return nil }
+        var ids = [CGDirectDisplayID](repeating: 0, count: Int(count))
+        guard CGGetOnlineDisplayList(count, &ids, &count) == .success else { return nil }
+        let uuids = ids.prefix(Int(count)).compactMap { id -> String? in
+            guard let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue() else { return nil }
+            return CFUUIDCreateString(nil, uuid) as String?
+        }
+        return uuids.isEmpty ? nil : Set(uuids)
     }
 
     public func restartWallpaperAgent() throws {

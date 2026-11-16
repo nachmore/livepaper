@@ -2206,7 +2206,15 @@ extension SelfTests {
                 try expect(!selectedNow)
                 try expectEqual(try Data(contentsOf: sb.store), before)
                 try expect(!exists(sb.installPaths().wallpaperStoreBackup))
+                // Picked by hand in System Settings: the display placeholders still need filling (they'd
+                // be copied into SystemDefault at the agent's next launch), which these commands refuse.
                 try writeStore(sb.store, selected: true, livePaper: sb.saver.path)
+                let byHand = try Data(contentsOf: sb.store)
+                let refused = try service.selectSaver()
+                try expect(!refused)
+                try expectEqual(try Data(contentsOf: sb.store), byHand)
+                // Every display record holding it itself: already selected, nothing to write.
+                try WallpaperStoreSchema.encode(StoreFixture.allDisplaysExplicit(saver: sb.saver.path)).write(to: sb.store)
                 let detected = try service.selectSaver()
                 try expect(detected)
                 try expect(system.mutatingCommands.isEmpty)
@@ -3141,7 +3149,8 @@ extension SelfTests {
                 try expect(steps.allSatisfy { $0.outcome == .done }, "\(steps)")
                 try expect(!system.helperLoaded && !exists(paths.fallbackAgentPlist) && !exists(sb.saver))
                 try expect(!WallpaperStore(url: sb.store).isSelected(), "store restored from the backup")
-                try expectEqual(try Data(contentsOf: sb.store), storeBefore)
+                // As before LivePaper; the display placeholders that inherited Example hold it (§5.7).
+                try expectRestored(try WallpaperStoreDocument(data: Data(contentsOf: sb.store)), from: try WallpaperStoreDocument(data: storeBefore))
                 try expectEqual(prefs.values["com.example.test|answer|false"] as? Int, 41)
                 try expect(prefs.values["com.example.test|fresh|false"] == nil, "a key that didn't exist is removed again")
                 try expect(prefs.values["com.apple.loginwindow|immediateLockLaunchesScreenSaver|false"] == nil, "lock keys restored")

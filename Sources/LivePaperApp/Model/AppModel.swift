@@ -859,7 +859,7 @@ final class AppModel {
                          actions: [.init(title: SetupState.everyDisplayActionTitle) { [weak self] in
                              Task { await self?.makeLivePaperScreenSaver() }
                          }])
-        } else if !installStatus.saverSelected {
+        } else if !installStatus.saverSelected && !installStatus.saverSelectionUnknown {
             banners.post(.warning, "LivePaper isn't your screen saver yet",
                          message: "Locking will show the regular lock screen.",
                          actions: [.init(title: "Set Up") { [weak self] in Task { await self?.makeLivePaperScreenSaver() } }])

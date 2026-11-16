@@ -189,10 +189,19 @@ Choice       { Provider: String, Files: [File], Configuration: Data }
      `SystemDefault.Idle` and the `Default` of the two Spaces in use held LivePaper too, with the
      `LastSet`/`LastUse` of a display slot in use. The `Default` of the two Spaces not in use kept
      the placeholder; every display record resolved to LivePaper.
+   * The timestamps, compared in read-only copies of both stores: every placeholder had the same
+     `LastSet` (the old `SystemDefault`'s; display records start as copies of it, §5.4). After the
+     fill, `SystemDefault.Idle` was LivePaper with that display slot's `LastSet`, not a new one —
+     nothing wrote `SystemDefault` but the agent, so it copied a whole display slot there. `LastUse`
+     is bumped on every record along the resolution chain of a display shown (its Space record, the
+     Space's `Default`, its display record, `SystemDefault`): it shows which displays and Spaces were
+     in use, but not which record was read.
    * Inferred: the agent derives `SystemDefault` and the `Default` of each Space in use from the
      slots of the displays it shows, copying whole slots, placeholder included. So a selection made
-     by editing the file must give the displays themselves the choice. (System Settings, which tells
-     the running agent over XPC, leaves display placeholders alone, §5.4.)
+     by editing the file must give the displays themselves the choice — and so must an uninstall
+     that puts an explicit choice back into `SystemDefault` (§5.7). (System Settings, which tells
+     the running agent over XPC, leaves display placeholders alone, §5.4; whether its choice then
+     survives the agent's next launch hasn't been observed.)
 6. **No supported route exists.**
    * Its XPC service accepts any connection, but anything beyond display assertions needs the
      private `com.apple.private.wallpaper` entitlement. That includes the message System Settings
@@ -217,10 +226,14 @@ timer.
 * Any record is `linked`.
 * The saver isn't installed.
 
-**Nothing is written when every display already resolves to the installed LivePaper.saver** —
-System Settings' own selection (placeholders inheriting `SystemDefault`), or one whose `SystemDefault`
-the agent kept: LivePaper only records that it owns the selection, so the quiet re-apply below covers
-a later reset. A choice of LivePaper.saver at another location is rewritten.
+**Nothing is written when every display record already shows the installed LivePaper.saver from a
+display's own record** (its own Idle slot, or — a Space's record of it — the display's record):
+every display record chose it, or the agent kept its placeholder in `SystemDefault` after LivePaper
+filled the displays. LivePaper only records that it owns the selection. System Settings' own
+selection doesn't count: its display placeholders inherit `SystemDefault` (or a Space's `Default`),
+which the agent derives from the displays at its next launch (§5.5), so "Make LivePaper my screen
+saver" and `livepaper select` fill them. A choice of LivePaper.saver at another location is
+rewritten.
 
 **Otherwise it runs this sequence:**
 1. Hold a lock file, so no other LivePaper process edits the store at the same time, and run the
@@ -244,7 +257,9 @@ a later reset. A choice of LivePaper.saver at another location is rewritten.
    * the exact bytes about to be replaced (every time, select and restore alike);
    * the raw file, the first time only;
    * a manifest that records, for each Idle slot it replaces, the user's original choice — a
-     placeholder too, so uninstall puts exactly that placeholder back.
+     placeholder too, so uninstall puts exactly that placeholder back. A placeholder never replaces
+     an original recorded earlier: one found later was left by a reset (another tool's uninstaller,
+     the quiet re-apply's case), not chosen; a newer explicit choice does replace it.
 8. Put it in place with a single atomic rename (only if the file hasn't changed since it was read),
    then **immediately** run `killall WallpaperAgent`.
 9. Wait for the restarted agent's own rewrite, re-read the store and confirm the result. A planned
@@ -252,12 +267,14 @@ a later reset. A choice of LivePaper.saver at another location is rewritten.
    timestamps its own way (System Settings itself copies the Desktop's option values into saver
    slots):
    * If the agent wrote its own choice into a planned `SystemDefault` or Space `Default` (§5.5) but
-     kept the display slots, and every display record resolves to LivePaper, the selection is
-     confirmed as it is: what every display shows is what was asked for. Retrying would only restart
-     the agent to the same result.
+     kept the display slots, and every display record shows what the plan asked for, the change is
+     confirmed as it is (select and restore alike): what every display shows is what was asked for.
+     Retrying would only restart the agent to the same result. A selection notes what the agent
+     wrote there in the manifest, so uninstall still treats that record as LivePaper's.
    * If an Idle choice was lost (the old agent wrote between the rename and the kill), plan again
-     and retry, at most twice, 2 s apart. If the new plan is empty, the agent's own store already
-     is right: confirmed without another restart.
+     and retry, at most twice, 2 s apart. If the new plan is empty, it is confirmed without another
+     restart only when every display shows what the last write asked for; otherwise the agent kept
+     something else (a restored `SystemDefault` it put a placeholder into): an error, not "done".
    * If the Desktop slots changed or the store is unreadable, roll back: put the original bytes
      back through the same protected steps (wait until unlocked, rename, restart, confirm, retry at
      most twice). Only a confirmed rollback is reported as "put the previous settings back";
@@ -266,12 +283,18 @@ a later reset. A choice of LivePaper.saver at another location is rewritten.
 **The quiet re-apply** (the app, at launch and after display changes): a display that appears later
 gets a record copied from `SystemDefault` (§5.4). If that is the placeholder — the agent kept its own
 there, or something reset it — the new display shows macOS's default. So while LivePaper owns the
-selection (its manifest exists: it made the selection, or found itself selected and recorded that),
-the app runs the same sequence with a narrower plan: only the placeholder Idle slots of display
-records that fall back to macOS's default through placeholders alone, plus `SystemDefault`'s
-placeholder with them; each original goes into the manifest. A slot with an explicit choice, and any
-placeholder that inherits one (a screen saver the user picked), is never touched; with nothing to
-fill there is no plan and no agent restart. It runs at most once per burst of
+selection (its manifest exists: it made the selection, or found itself selected and recorded that)
+**and is still chosen in some Idle slot**, the app runs the same sequence with a narrower plan: only
+the placeholder Idle slots of display records that show macOS's default through placeholders alone,
+or inherit LivePaper from `SystemDefault` or a Space's `Default` (which the agent derives from the
+displays, §5.5), plus `SystemDefault`'s placeholder with them; each original goes into the manifest
+unless one is recorded already. A slot with an explicit choice, and any placeholder that inherits
+one (a screen saver the user picked), is never touched; a store that names LivePaper nowhere (the
+user switched away, or something reset every slot — the manifest outlives both) is left to the
+user's button or `livepaper select`; with nothing to fill there is no plan and no agent restart. The
+uninstall marker, the manifest and the saver are checked again while holding the store lock, right
+before planning and right before writing, so an uninstall started meanwhile in another process is
+never re-selected over. It runs at most once per burst of
 `NSApplication.didChangeScreenParametersNotification` (3 s after the last), never while the Mac is
 locked (it waits for the unlock) or other install work runs (it waits for that), never after an
 uninstall.
@@ -285,8 +308,11 @@ lock screen would stay frozen.
   what the agent does then is Unknown. So the saver is removed only after the store has been
   re-read and no Idle slot names it (a copy of LivePaper.saver at another location that exists
   doesn't count).
-* Every Idle slot that **still** names LivePaper.saver is changed, whether or not LivePaper made
-  the selection itself (it may have been picked by hand in System Settings):
+* Every Idle slot that is **still LivePaper's** is changed, whether or not LivePaper made the
+  selection itself (it may have been picked by hand in System Settings): it names LivePaper.saver,
+  or it is a `SystemDefault` / Space `Default` the agent wrote its own choice into when LivePaper
+  selected (the manifest notes it) and still holds that choice. The manifest is read while holding
+  the store lock.
   * If the manifest has an original for that slot, the original goes back exactly — the
     placeholder of a display record LivePaper filled included. LivePaper.saver
     at another location that still exists (say /Library/Screen Savers) is recorded as an original
@@ -299,13 +325,25 @@ lock screen would stay frozen.
     choice the raw pre-LivePaper copy has there, unless that names LivePaper too; otherwise macOS's
     own Message saver (`/System/Library/Screen Savers/FloatingMessage.saver`, the same legacy
     `.saver` payload as §5.3), and uninstall says so.
+* **The displays get what they would inherit.** A display record that the restore leaves holding the
+  placeholder, and that would then inherit an explicit choice from `SystemDefault` or a Space's
+  `Default` the restore writes (say the saver the user had picked before LivePaper), gets that choice
+  itself — a copy of the whole slot, as the agent copies `SystemDefault` into a new display's record.
+  By §5.5 the agent would otherwise copy a display's placeholder into `SystemDefault` at once and the
+  previous saver would be lost. So the restore is exact, byte for byte, when no display inherits an
+  explicit choice (the 2026-11-16 store, a Mac whose saver was never chosen); otherwise every display
+  shows exactly what it showed before, from its own record. A choice whose module is missing isn't
+  copied.
+* The restore is confirmed by what the displays show: every display record must show what the plan
+  asked for. If it doesn't, the step fails, names the saver from before LivePaper (so the user can
+  pick it in System Settings), and the saver, the manifest and every backup stay.
 * Slots the user changed since are left alone.
 * The whole old file is **never** put back: that would undo later Desktop changes and drop
   displays and Spaces added since.
 * If the restore can't run — for a reason that may pass, such as System Settings being open, or
-  one that won't, such as a new store format — the step fails and says what to do, and the saver
-  and every backup are kept. Once the user has picked another saver in System Settings, running
-  uninstall again finishes.
+  one that won't, such as a new store format — or isn't confirmed, the step fails and says what to
+  do, and the saver and every backup are kept. Once the user has picked another saver in System
+  Settings (nothing names LivePaper any more), running uninstall again finishes.
 
 ### 5.8 Detection
 * Reading the store, as in §5.2, is the only reliable signal. An Idle slot chooses LivePaper when its
@@ -313,11 +351,20 @@ lock screen would stay frozen.
 * **Selected** means every display record resolves to LivePaper (Space and display, then Space, then
   display, then `SystemDefault`; with no display record yet, `SystemDefault` decides). A slot that
   names LivePaper is not enough: on 2026-11-16 two did while every display in use showed the aerial.
+* **The store's display keys are CoreGraphics display UUIDs** (Verified, 2026-11-16, read-only):
+  `CGDisplayCreateUUIDFromDisplayID` of each display `CGGetOnlineDisplayList` listed on the test Mac
+  was a key of its store's `Displays` (both connected displays, two of the four in use earlier that
+  day). The records of displays not connected stay in the store.
 * LivePaper reports (`InstallStatus.saverSelection`, `livepaper doctor`, the app):
   * **every display;**
-  * **partly:** some displays resolve to LivePaper, and how many of the displays in the store don't —
-    a problem whose fix is `livepaper select` or the app's "Use LivePaper on Every Display";
-  * **none.**
+  * **partly:** some display records resolve to LivePaper, not all — a problem whose fix is
+    `livepaper select` or the app's "Use LivePaper on Every Display". It counts the displays some
+    record of which (in some Space) shows something else, of the connected displays first ("2 of
+    your 2 connected displays"; on 2026-11-16 the two records on LivePaper belonged to displays not
+    connected), else of the display records in the store; a display is never counted twice;
+  * **none;**
+  * **unknown:** the store isn't in a format LivePaper knows but names LivePaper in a screen-saver
+    slot (the structural scan) — a warning to check System Settings, never "every display".
   * Uninstall still looks for **any** slot naming LivePaper (that is what it has to undo), and
     "everywhere" (`SystemDefault` and the Space Defaults too) is what a selection writes.
 * Signals rejected, because they are unreliable or need private entitlements:
@@ -334,9 +381,12 @@ lock screen would stay frozen.
 * What "Show on all Spaces" writes to `AllSpacesAndDisplays`.
 * What the agent does with an Idle choice whose module is missing.
 * Whether a `SystemDefault` holding another explicit saver, written into the file while the displays
-  in use hold the placeholder, survives a restart (§5.5 saw only LivePaper's written back). It matters
-  when uninstall puts back a pre-LivePaper `SystemDefault` that wasn't the placeholder: if the agent
-  replaced it, the restore step says so and running uninstall again finishes.
+  in use hold the placeholder, survives a restart (§5.5 saw only LivePaper's written back). Uninstall
+  doesn't depend on it: the displays that would inherit it get it themselves (§5.7).
+* Whether System Settings' own selection, which leaves display placeholders inheriting
+  `SystemDefault`, survives the agent's next launch. LivePaper fills those placeholders when it
+  selects, and its quiet re-apply does while it owns the selection; a selection made only in
+  System Settings (the guided step) isn't LivePaper's to change by itself.
 * Which display's slot the agent copies into `SystemDefault` when several are in use (seen: the one
   showing the first Space), and whether the `Default` of a Space not in use is ever read.
 

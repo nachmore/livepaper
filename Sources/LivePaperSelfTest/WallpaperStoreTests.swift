@@ -199,6 +199,8 @@ final class FakeWallpaperSystem: WallpaperSystem, @unchecked Sendable {
     var forced = false
     var disabled = false
     var version: Int? = WallpaperApplyOptions.supportedStoreVersion
+    /// The display UUIDs "connected now" (nil: unknown, as for every stand-in).
+    var connectedDisplayIDs: Set<String>?
     var restartError: Error?
     var onRestart: ((_ restart: Int) throws -> Void)?
     private(set) var restarts = 0
@@ -266,6 +268,26 @@ func idleSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValu
 
 func desktopSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValue] {
     Dictionary(uniqueKeysWithValues: doc.records.compactMap { r in r.desktop.map { (r.path, $0) } })
+}
+
+/// `restored` is `original` as uninstall puts it back: every display record shows the same choice;
+/// every Idle slot is the original, except a display record's placeholder that inherited an explicit
+/// choice from SystemDefault or a Space's Default — that record holds the choice itself (WallpaperAgent
+/// derives those defaults from the displays it shows, docs/RESEARCH.md §5.7). Returns those records.
+@discardableResult
+func expectRestored(_ restored: WallpaperStoreDocument, from original: WallpaperStoreDocument, file: String = #fileID, line: Int = #line) throws -> [WallpaperRecordPath] {
+    try check(restored.showsTheSameOnEveryDisplay(as: original), "what the displays show isn't back", file: file, line: line)
+    try check(desktopSlots(restored) == desktopSlots(original), "a Desktop slot changed", file: file, line: line)
+    var pinned: [WallpaperRecordPath] = []
+    for record in original.records {
+        guard let before = record.idle, let after = restored.idleSlot(at: record.path), after != before else { continue }
+        let inherited = original.resolvedSlot(of: record.path)
+        try check(record.path.displayID != nil && WallpaperSlot.isInherit(before) && inherited?.at.displayID == nil
+                  && inherited.map { WallpaperSlot.sameChoices($0.slot, after) } == true,
+                  "\(record.path) isn't back", file: file, line: line)
+        pinned.append(record.path)
+    }
+    return pinned
 }
 
 // MARK: - Model
@@ -565,10 +587,12 @@ extension SelfTests {
             try expectEqual(manifest.entry(for: .systemDefault)?.configuration, StoreFixture.moduleConfiguration(StoreFixture.otherSaverPath))
             try expectEqual(try manifest.entry(for: .systemDefault)?.originalSlot(), original.idleSlot(at: .systemDefault))
             let selected = try original.applying(plan)
-            // Select then restore = the original store, exactly.
+            // Select then restore = the original store: every explicit slot exactly; the display
+            // placeholders that inherited Example from SystemDefault or the first Space's Default hold it
+            // themselves (all 10 here).
             let restore = try selected.planRestore(manifest, module: module, at: t1, moduleExists: { _ in true })
             try expectEqual(restore.paths, StoreFixture.selectPaths)
-            try expectEqual(try selected.applying(restore), original)
+            try expectEqual(try expectRestored(try selected.applying(restore), from: original), StoreFixture.placeholderDisplayPaths.sorted())
             try WallpaperStoreVerifier.verify(edited: selected.applying(restore).data(), original: selected, plan: restore)
             // The manifest survives JSON (whole-second dates).
             try StoreSandbox.with("manifest") { sb in
@@ -609,7 +633,10 @@ extension SelfTests {
             try expectEqual(unrecorded.paths, StoreFixture.selectPaths)
             try expectEqual(unrecorded.builtinSaverPaths, [.systemDefault])
             try expectEqual(unrecorded.changes.first?.after, try builtin.slot(at: t1))
-            try expect(unrecorded.changes.dropFirst().allSatisfy { $0.after == WallpaperChoicePayload.inheritSlot(at: t1) })
+            // The display records show the built-in saver themselves; the first Space's Default inherits.
+            try expect(unrecorded.changes.dropFirst().allSatisfy {
+                $0.after == ($0.path.displayID != nil ? try? builtin.slot(at: t1) : WallpaperChoicePayload.inheritSlot(at: t1))
+            })
             try check(try selected.applying(unrecorded).selection(of: module).livePaper.isEmpty)
             try WallpaperStoreVerifier.verify(edited: selected.applying(unrecorded).data(), original: selected, plan: unrecorded)
             try expectStoreError(.noPreviousChoice("SystemDefault")) {   // a built-in saver that isn't there doesn't count
@@ -694,11 +721,11 @@ extension SelfTests {
                 // Again: nothing to do, the agent isn't restarted.
                 try expectEqual(try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup).outcome, .unchanged)
                 try expectEqual(system.restarts, 1)
-                // Restore: the agent's file is byte-identical to before LivePaper.
+                // Restore: as before LivePaper (the display placeholders that inherited Example hold it).
                 let restored = try applier(sb, system, clock).restore(sb.module, manifestURL: sb.manifest)
                 try expectEqual(restored.outcome, .applied)
                 try expectEqual(restored.changed, StoreFixture.selectPaths)
-                try expectEqual(try sb.bytes(), original)
+                try expectRestored(try sb.document(), from: try WallpaperStoreDocument(data: original))
                 try expect(!sb.exists(sb.manifest), "manifest removed after a restore")
                 try expectEqual(try applier(sb, system, clock).restore(sb.module, manifestURL: sb.manifest).outcome, .unchanged)
                 try expectEqual(system.restarts, 2)
@@ -1191,7 +1218,11 @@ extension SelfTests {
                 let after = try sb.document()
                 try expect(after.selection(of: sb.module).livePaper.isEmpty, "\(after.selection(of: sb.module))")
                 try expect(WallpaperSaverModule(url: sb.builtinSaver).isCurrentChoice(in: after.idleSlot(at: .systemDefault)!))
-                try expect(StoreFixture.selectPaths.dropFirst().allSatisfy { after.idleSlot(at: $0).map(WallpaperSlot.isInherit) == true })
+                // The display records hold it themselves (§5.7); the first Space's Default inherits.
+                try expect(StoreFixture.selectPaths.dropFirst().allSatisfy { path in
+                    after.idleSlot(at: path).map { path.displayID != nil ? WallpaperSaverModule(url: sb.builtinSaver).isCurrentChoice(in: $0)
+                                                                         : WallpaperSlot.isInherit($0) } == true
+                })
                 try expect(!sb.exists(sb.saver) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
             }
         },
@@ -1202,13 +1233,6 @@ extension SelfTests {
             try StoreSandbox.with("install-by-hand") { sb in
                 try StoreFixture.data(saver: sb.saver.path).write(to: sb.store)
                 let fx = InstallFixture(sb)
-                // "Make LivePaper my screen saver" finds it already selected: no restart, but the
-                // backups now say LivePaper owns those slots.
-                let select = fx.service()
-                try check(try select.selectSaver())
-                try expectEqual(select.transcript.last, InstallStep(title: selectTitle, outcome: .skipped("already selected")))
-                try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots, [])
-                try expectEqual(fx.system.restarts, 0)
                 let plan = fx.service(dryRun: true).performUninstall(removeLibrary: false)
                 try expectEqual(plan.first { $0.title == restoreTitle }?.outcome, .planned)
 
@@ -1219,6 +1243,19 @@ extension SelfTests {
                 try expect(after.selection(of: sb.module).livePaper.isEmpty)
                 try expect(WallpaperSaverModule(url: sb.builtinSaver).isCurrentChoice(in: after.idleSlot(at: .systemDefault)!))
                 try expect(!sb.exists(sb.saver) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
+                try expectEqual(fx.system.restarts, 1)
+            }
+            // "Make LivePaper my screen saver" on such a store doesn't stop at "already selected": System
+            // Settings left the display placeholders inheriting, which WallpaperAgent copies into
+            // SystemDefault at its next launch (§5.5) — they are filled, and only they are recorded.
+            try StoreSandbox.with("install-by-hand-select") { sb in
+                try StoreFixture.data(saver: sb.saver.path).write(to: sb.store)
+                let fx = InstallFixture(sb)
+                let select = fx.service()
+                try check(try select.selectSaver())
+                try expectEqual(select.transcript.last, InstallStep(title: selectTitle, outcome: .done))
+                let recorded = try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots ?? []
+                try expectEqual(recorded.map(\.record), StoreFixture.placeholderDisplayPaths.sorted())
                 try expectEqual(fx.system.restarts, 1)
             }
             // With the store from before LivePaper's first change, SystemDefault gets that choice back.
@@ -1241,7 +1278,9 @@ extension SelfTests {
                 try FileManager.default.removeItem(at: sb.builtinSaver)
                 let fx = InstallFixture(sb)
                 let original = try sb.bytes()
-                try check(try fx.service().selectSaver())   // leaves the manifest stub
+                // The stub LivePaper leaves when it finds itself selected.
+                try FileManager.default.createDirectory(at: fx.paths.backups, withIntermediateDirectories: true)
+                try WallpaperSelectionManifest(module: sb.module.moduleURLString, createdAt: Date()).write(to: fx.paths.wallpaperSelectionBackup)
                 for removeLibrary in [false, true] {
                     let steps = fx.service().performUninstall(removeLibrary: removeLibrary)
                     guard case .failed(let why)? = steps.first(where: { $0.title == restoreTitle })?.outcome else { throw TestFailure(description: "\(steps)") }
@@ -1304,12 +1343,12 @@ extension SelfTests {
                                 .skipped("kept while it is still the selected screen saver; run uninstall again"))
                 try expect(sb.exists(sb.saver) && sb.exists(fx.paths.wallpaperSelectionBackup), "saver and backups kept for the retry")
 
-                // Retry once it's closed: everything goes, and the store is exactly as before LivePaper.
+                // Retry once it's closed: everything goes, and the store is as before LivePaper.
                 fx.system.conflicts = []
                 steps = fx.service().performUninstall(removeLibrary: false)
                 try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .done)
                 try expect(!sb.exists(sb.saver) && !sb.exists(fx.paths.backups), "\(steps)")
-                try expectEqual(try sb.bytes(), original)
+                try expectRestored(try sb.document(), from: try WallpaperStoreDocument(data: original))
                 try expectEqual(fx.system.restarts, 2)
                 steps = fx.service().performUninstall(removeLibrary: false)
                 try expectEqual(steps.first { $0.title == restoreTitle }?.outcome, .skipped("LivePaper isn't the selected screen saver"))
@@ -1415,9 +1454,13 @@ extension SelfTests {
                 try expect(unchanged.allSatisfy { idleSlots(during)[$0.key] == $0.value }, "an unplanned Idle slot changed")
                 _ = try applier(sb, system, clock).restore(sb.module, manifestURL: sb.manifest)
                 let after = try sb.document()
-                try expect(idleSlots(after) == idleSlots(document), "Idle slots aren't back to their originals")
-                try expect(after.root == document.root, "the store isn't otherwise identical")
-                try check(try sb.bytes() == bytes, "the agent's re-encoded store differs from the original bytes")
+                // Every Idle slot is back — but for display placeholders that inherited an explicit choice
+                // from SystemDefault or a Space's Default, which hold it themselves (§5.7).
+                let pinned = try expectRestored(after, from: document)
+                if pinned.isEmpty {
+                    try expect(after.root == document.root, "the store isn't otherwise identical")
+                    try check(try sb.bytes() == bytes, "the agent's re-encoded store differs from the original bytes")
+                }
             }
             try expect(FileManager.default.contents(atPath: LiveWallpaperSystem.agentStoreURL.path) != nil)
         }

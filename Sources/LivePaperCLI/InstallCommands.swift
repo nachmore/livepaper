@@ -183,20 +183,35 @@ enum InstallCommands {
     }
 
     /// The "selected" row. Selected means every display resolves to LivePaper; the fix for some or
-    /// none is `livepaper select` (the app's button does the same).
+    /// none is `livepaper select` (the app's button does the same). Counts name the connected
+    /// displays when they are known, otherwise the display records of the wallpaper store.
     ///
     /// - Parameter reappliedByApp: the displays only fell back to macOS's default (the app re-applies
     ///   the selection by itself when it starts).
     static func selectionCheck(_ selection: SaverSelection, reappliedByApp: Bool = false) -> (status: Check.Status, detail: String) {
         let byItself = reappliedByApp ? " LivePaper also does this by itself when it starts." : ""
+        let fix = " Run `livepaper select` (or LivePaper › Settings › Screen Saver › \u{201C}Use LivePaper on Every Display\u{201D})." + byItself
+        func displays(_ n: Int) -> String { n == 1 ? "1 display" : "\(n) displays" }
         switch selection {
         case .everyDisplay:
             return (.ok, "LivePaper is the selected screen saver on every display")
-        case .partly(let missing, let displays):
-            let shown = displays - missing
-            return (.problem, "LivePaper is the screen saver on only \(shown) of the \(displays) displays in your wallpaper settings: " +
-                    "\(missing) show\(missing == 1 ? "s" : "") macOS\u{2019}s default or another screen saver when your Mac idles or " +
-                    "locks. Run `livepaper select` (or LivePaper › Settings › Screen Saver › \u{201C}Use LivePaper on Every Display\u{201D})." + byItself)
+        case .partly(let count):
+            let shows = "macOS\u{2019}s default or another screen saver when your Mac idles or locks"
+            if let connected = count.connected, let missing = count.connectedMissing {
+                let elsewhere = count.missing - missing
+                if missing > 0 {
+                    let also = elsewhere > 0 ? " (so would \(displays(elsewhere)) not connected now)" : ""
+                    return (.problem, "LivePaper isn\u{2019}t the screen saver on \(missing) of your \(connected) connected " +
+                            "display\(connected == 1 ? "" : "s"): \(missing == 1 ? "it shows" : "they show") \(shows)\(also)." + fix)
+                }
+                return (.problem, "LivePaper is the screen saver on your connected display\(connected == 1 ? "" : "s"), but not for " +
+                        "\(displays(elsewhere)) not connected now: \(elsewhere == 1 ? "it would show" : "they would show") \(shows)." + fix)
+            }
+            return (.problem, "LivePaper isn\u{2019}t the screen saver for \(count.missing) of the \(count.displays) displays in your " +
+                    "wallpaper settings (connected or not): \(count.missing == 1 ? "it shows" : "they show") \(shows)." + fix)
+        case .unknown:
+            return (.warning, "LivePaper can\u{2019}t tell which displays use it: this macOS stores its wallpaper settings in a format " +
+                    "LivePaper doesn\u{2019}t know (they do name LivePaper). Check System Settings › Wallpaper › Screen Saver.")
         case .none:
             return (.problem, "LivePaper isn't the selected screen saver, so the lock screen won't show your scenes. Run " +
                     "`livepaper select` (or open LivePaper and follow the setup), or choose it in System Settings › Wallpaper › Screen Saver." + byItself)

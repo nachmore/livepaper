@@ -383,17 +383,24 @@ extension SelfTests {
             try sb.installFakeSaver()
             let reverted = try store.data(store.reverted(livePaper: sb.saver.path))
             try reverted.write(to: sb.wallpaperStore)
-            func selectedRow() throws -> (status: String?, detail: String) {
-                let out = try sb.run(["doctor", "--no-ai", "--json"]).out
+            func selectedRow(_ env: [String: String] = [:]) throws -> (status: String?, detail: String) {
+                let out = try sb.run(["doctor", "--no-ai", "--json"], extraEnv: env).out
                 let checks = (try CLITestSupport.jsonObject(out)["checks"] as? [[String: Any]]) ?? []
                 let row = checks.first { $0["section"] as? String == "Screen saver" && $0["name"] as? String == "selected" }
                 return (row?["status"] as? String, row?["detail"] as? String ?? "")
             }
-            // doctor: a problem, with the fix.
+            // doctor: a problem, with the fix — counting the display records (no display list here)…
             var row = try selectedRow()
             try expectEqual(row.status, "problem")
-            try expect(row.detail.contains("only 2 of the 6 displays") && row.detail.contains("4 show") && row.detail.contains("`livepaper select`"), row.detail)
+            try expect(row.detail.contains("for 4 of the 6 displays in your wallpaper settings") && row.detail.contains("`livepaper select`"), row.detail)
             try expect(!row.detail.contains("by itself"), "LivePaper didn't make this selection: \(row.detail)")
+            // …or the connected ones first, when they are known (two of the four in use, here).
+            let connected = ["LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS": "\(store.c),\(store.d)"]
+            row = try selectedRow(connected)
+            try expect(row.status == "problem" && row.detail.contains("on 2 of your 2 connected displays: they show macOS\u{2019}s default")
+                       && row.detail.contains("so would 2 displays not connected now") && row.detail.contains("`livepaper select`"), row.detail)
+            row = try selectedRow(["LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS": store.a])
+            try expect(row.status == "problem" && row.detail.contains("on your connected display, but not for 4 displays not connected now"), row.detail)
             // No WallpaperAgent to restart in the sandbox: refused, with the reason, nothing changed.
             r = try sb.run(["select"])
             try expectEqual(r.status, 3)
@@ -425,6 +432,13 @@ extension SelfTests {
             try expect(after.selection(of: module).livePaper.isEmpty)
             try expectEqual(desktopSlots(after), desktopSlots(before))
             try expect(!FileManager.default.fileExists(atPath: sb.saver.path))
+            // A store in a format LivePaper doesn't know that names LivePaper: a warning, not "selected".
+            try sb.installFakeSaver()
+            let config = StoreFixture.moduleConfiguration(sb.saver.path)
+            try PlistValue.dictionary(["Displays": .dictionary(["X": .dictionary(["Idle": .dictionary(["Choice": .data(config)])])])])
+                .binaryData().write(to: sb.wallpaperStore)
+            row = try selectedRow()
+            try expect(row.status == "warning" && row.detail.contains("can\u{2019}t tell which displays use it"), "\(row)")
         },
         cliTest("cli.uninstall") { sb in
             _ = try sb.run(["new", "aurora-lake"])

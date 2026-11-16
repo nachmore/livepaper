@@ -14,8 +14,9 @@
 //
 // Reading is always safe (no permission prompt; WallpaperAgent is never involved). Writing happens
 // only through WallpaperStoreApplier: on an explicit user action (select, uninstall), and for the
-// app's quiet re-apply, which only fills placeholders of displays that fell back to macOS's
-// default while LivePaper owns the selection (InstallService.reapplySelectionIfNeeded).
+// app's quiet re-apply, which only fills placeholders of display records that show macOS's default
+// (or inherit LivePaper from a record the agent rewrites) while LivePaper owns the selection and is
+// still chosen somewhere (InstallService.reapplySelectionIfNeeded).
 import Foundation
 
 public struct WallpaperStore: Sendable {
@@ -53,13 +54,14 @@ public struct WallpaperStore: Sendable {
     }
 
     /// Which displays show LivePaper (InstallStatus.saverSelection): every display record resolves to
-    /// it, some do, or none. A store in an unknown format can't be resolved; whatever its Idle
-    /// subtrees mention (`isSelected()`) counts for every display.
-    public func selectionState() -> SaverSelection {
-        guard let selection = selection() else { return isSelected() ? .everyDisplay : .none }
+    /// it, some do (with how many displays don't — of the connected ones too, when `connectedDisplays`
+    /// names some), or none. A store in an unknown format can't be resolved: `.unknown` when its Idle
+    /// subtrees mention LivePaper (`isSelected()`), else `.none` — never "every display".
+    public func selectionState(connectedDisplays: Set<String>? = nil) -> SaverSelection {
+        guard let selection = selection() else { return isSelected() ? .unknown : .none }
         if selection.isSelectedOnEveryDisplay { return .everyDisplay }
         guard selection.isPartlySelected else { return .none }
-        return .partly(missing: selection.displaysWithoutLivePaper.count, displays: selection.displayIDs.count)
+        return .partly(selection.displayCount(connected: connectedDisplays))
     }
 
     /// True when every record, defaults included, resolves to LivePaper (WallpaperSelection.isSelectedEverywhere).
