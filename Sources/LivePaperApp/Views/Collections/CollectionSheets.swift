@@ -1,6 +1,6 @@
 // CollectionSheets — New Collection, Rename and Delete, presented through `AppModel.collectionAction`
-// (the sidebar, "Add to Collection ▸ New Collection…", a drop on "New Collection…", the collection
-// screen's menu).
+// (the Library's New Collection button and row, File › New Collection…, "Add to Collection ▸ New
+// Collection…", a drop on New Collection, a collection section's menu).
 import LivePaperCore
 import SwiftUI
 

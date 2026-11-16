@@ -188,7 +188,9 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
             guard let size = (try? output.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > 0 else {
                 throw LibraryError.invalid("compiling \(scene.id) produced no output.")
             }
-            return LPPlaylistEntry(id: scene.id, name: m.name, kind: .web, file: file, clock: m.clock.position, span: m.spans)
+            // Not scene.json's claim alone: a scene that breaks the span rules would drift apart (PublishedSpan).
+            return LPPlaylistEntry(id: scene.id, name: m.name, kind: .web, file: file, clock: m.clock.position,
+                                   span: PublishedSpan.spans(scene))
         case .video:
             // scene.json is untrusted input: the video must be a plain file inside the package.
             guard let video = m.video, LibraryService.isPlainFileName(video.file) else {

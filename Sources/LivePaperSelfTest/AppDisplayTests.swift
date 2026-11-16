@@ -99,6 +99,9 @@ extension SelfTests {
             let r = PlaylistDraft.spanSupport(ids: ["web-span", "web", "video", "video-no", "gone", "web-no"], manifests: m)
             try expectEqual(r.spanning, ["web-span", "video"])
             try expectEqual(r.notSpanning, ["web", "video-no", "web-no"])
+            // The Screen Saver screen counts what publishing decides (LibraryEntry.spans, PublishedSpan).
+            let published = PlaylistDraft.spanSupport(ids: ["web-span", "breaks-rules", "gone"], spans: ["web-span": true, "breaks-rules": false])
+            try expectEqual(published.spanning, ["web-span"]); try expectEqual(published.notSpanning, ["breaks-rules"])
             try expectEqual(PlaylistDraft.spanSupportSummary(spanning: 3, total: 5), "3 of 5 scenes can span. The others aren\u{2019}t made for it yet, so each display shows the whole scene.")
             try expectEqual(PlaylistDraft.spanSupportSummary(spanning: 2, total: 2), "All 2 scenes can span.")
             try expectEqual(PlaylistDraft.spanSupportSummary(spanning: 1, total: 1), "This scene can span.")

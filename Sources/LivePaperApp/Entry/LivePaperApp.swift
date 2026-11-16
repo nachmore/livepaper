@@ -202,13 +202,10 @@ struct LivePaperCommands: Commands {
     /// Published by the focused library card, the scene detail view or the Screen Saver screen.
     @FocusedValue(\.fullScreenPreview) private var fullScreenPreview
 
-    /// The scene whose detail view is on screen (opened from the library or a collection).
+    /// The scene whose detail view is on screen (opened from the Library).
     private var currentScene: LibraryEntry? {
-        switch model.section {
-        case .library?: return model.libraryPath.last.flatMap { model.entry(id: $0) }
-        case .collection?: return model.collectionPath.last.flatMap { model.entry(id: $0) }
-        default: return nil
-        }
+        guard model.section == .library else { return nil }
+        return model.libraryPath.last.flatMap { model.entry(id: $0) }
     }
 
     var body: some Commands {

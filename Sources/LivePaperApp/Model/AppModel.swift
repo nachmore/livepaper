@@ -109,15 +109,13 @@ func offMain<T: Sendable>(_ work: @escaping @Sendable () throws -> T) async thro
 @MainActor
 @Observable
 final class AppModel {
-    /// Sidebar destinations.
+    /// Sidebar destinations. (Collections are sections of the Library.)
     enum Section: Hashable {
         case library, create, playlist
         case session(String)
-        /// A collection's scenes (its id).
-        case collection(String)
     }
 
-    /// A collection action that needs a sheet (sidebar, menus, the collection screen, drops).
+    /// A collection action that needs a sheet (the Library's section headers and toolbar, menus, drops).
     enum CollectionAction: Identifiable, Equatable {
         /// A new collection, with these scenes in it (none: an empty one, shown once created).
         case new(sceneIDs: [String])
@@ -168,18 +166,23 @@ final class AppModel {
     // Navigation
     var section: Section? = .library {
         didSet {
-            // Another screen: a scene opened in a collection and the grid's selection don't come along.
+            // Another screen: the Library's selection doesn't come along.
             guard section != oldValue else { return }
-            if !collectionPath.isEmpty { collectionPath = [] }
             if !selection.isEmpty { selection.clear() }
         }
     }
     /// Scene ids pushed onto the library's navigation stack.
     var libraryPath: [String] = []
-    /// Scene ids pushed onto a collection screen's navigation stack.
-    var collectionPath: [String] = []
-    /// Cards chosen in the library or collection grid (⌘-click, ⇧-click).
+    /// Cards chosen in the Library (⌘-click, ⇧-click).
     var selection = LibrarySelection()
+    /// The Library's collapsed sections (`LibrarySectionID.key`), remembered across launches
+    /// (LibraryCollapsedSections; set only through setCollapsed).
+    private(set) var collapsedSections: Set<String> = []
+    /// A section the Library should scroll to (and focus) next — set by revealCollection, cleared by the view.
+    var libraryReveal: LibrarySectionID?
+    /// The scene cards being dragged in the Library (set when a drag starts; drops and the drop
+    /// targets' "Add to …" / "Reorder" labels read it). Not cleared when a drag is cancelled.
+    @ObservationIgnored var libraryDrag: LibraryDrag?
     var collectionAction: CollectionAction?
     var showOnboarding = false
     var sceneAction: SceneAction?
@@ -296,6 +299,7 @@ final class AppModel {
         // A small JSON file: read synchronously so the settings UI never shows defaults first.
         self.aiSettings = services.ai.loadSettings()
         self.showOnboarding = !environment.defaults.bool(forKey: AppEnvironment.onboardingCompletedKey)
+        self.collapsedSections = LibraryCollapsedSections.load(environment.defaults)
     }
 
     /// Initial load. Safe to call again (e.g. from "Reload").
@@ -331,6 +335,20 @@ final class AppModel {
     // MARK: - Library
 
     var visibleEntries: [LibraryEntry] { query.apply(entries) }
+    /// The Library's sections: each collection, Your Scenes, Included with LivePaper (LibrarySections).
+    var librarySections: [LibrarySection] {
+        LibrarySections.make(entries: entries, collections: collections, query: query, collapsed: collapsedSections)
+    }
+
+    func isCollapsed(_ section: LibrarySectionID) -> Bool { collapsedSections.contains(section.key) }
+
+    /// Collapses or expands a Library section and remembers it. Cards it hides leave the selection.
+    func setCollapsed(_ section: LibrarySectionID, _ collapsed: Bool) {
+        guard isCollapsed(section) != collapsed else { return }
+        if collapsed { collapsedSections.insert(section.key) } else { collapsedSections.remove(section.key) }
+        LibraryCollapsedSections.save(collapsedSections, to: environment.defaults)
+        if !selection.isEmpty { selection.retain(LibrarySections.sceneOrder(librarySections)) }
+    }
     var userEntries: [LibraryEntry] { entries.filter { !$0.item.isBuiltin } }
     var availableSceneIDs: [String] { entries.map(\.id) }
     var sceneNames: [String: String] { Dictionary(entries.map { ($0.id, $0.manifest.name) }, uniquingKeysWith: { a, _ in a }) }
@@ -387,7 +405,6 @@ final class AppModel {
         // Drop navigation to scenes that no longer exist, and their selection.
         let ids = Set(entries.map(\.id))
         if libraryPath.contains(where: { !ids.contains($0) }) { libraryPath.removeAll { !ids.contains($0) } }
-        if collectionPath.contains(where: { !ids.contains($0) }) { collectionPath.removeAll { !ids.contains($0) } }
         if selection.ids.contains(where: { !ids.contains($0) }) { selection.retain(Array(ids)) }
     }
 
@@ -518,7 +535,6 @@ final class AppModel {
         do {
             try await offMain { try library.delete(id: id) }
             libraryPath.removeAll { $0 == id }
-            collectionPath.removeAll { $0 == id }
             // It leaves every collection (a failure here only leaves an id that is skipped everywhere).
             let leftCollections = (try? await offMain { try collectionService.removeSceneEverywhere(id) }) ?? []
             await loadCollections()
@@ -919,7 +935,8 @@ final class AppModel {
     /// status has been read (the Lock pane reads it when it appears).
     var preSleepStatus: String? {
         guard installStatusLoaded else { return nil }
-        return LPPreSleepStatus.text(passwordImmediately: installStatus.passwordImmediately, timers: installStatus.screenTimers)
+        // A setting that couldn't be read says so ("can't tell"), as the helper does.
+        return LPPreSleepStatus.text(passwordImmediately: installStatus.passwordImmediatelyIfKnown, timers: installStatus.screenTimers)
     }
 
     /// state.json carries the lock-keys state for the helper; the system preference is the truth
@@ -945,7 +962,7 @@ final class AppModel {
     /// read knows: the menu disables Lock Now and explains. nil until the status has been read.
     var lockRefusal: LPLockRefusal? {
         guard installStatusLoaded, !installStatus.passwordImmediately else { return nil }
-        return .passwordNotImmediate
+        return installStatus.passwordUnknown ? .passwordUnknown : .passwordNotImmediate
     }
 
     /// Tells the user why LivePaper didn't lock (from Lock Now, or the helper's LPNotification.lockRefused).
@@ -970,7 +987,7 @@ final class AppModel {
         // Fresh, not the last status shown: the user may just have changed it in System Settings.
         await refreshInstallStatus()
         guard installStatus.passwordImmediately else {
-            showLockRefusal(.passwordNotImmediate)
+            showLockRefusal(installStatus.passwordUnknown ? .passwordUnknown : .passwordNotImmediate)
             return .refused
         }
         if installStatus.saverPartlySelected {

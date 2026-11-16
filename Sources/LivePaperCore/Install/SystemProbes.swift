@@ -64,11 +64,17 @@ enum SystemProbes {
         return nil
     }
 
-    /// "Require password … Immediately": what sysadminctl reports, else what a profile enforces.
-    static func passwordImmediately(sysadminctlOutput: String?, managed: [String: Any]) -> Bool {
+    /// "Require password … Immediately": what sysadminctl reports, else what a profile enforces
+    /// (`askForPassword = false` is off, an `askForPasswordDelay` is the delay; `askForPassword = true`
+    /// alone says nothing about the delay — as the helper reads it, HelperPasswordPolicy). nil when
+    /// neither says anything: LivePaper can't tell.
+    static func passwordImmediately(sysadminctlOutput: String?, managed: [String: Any]) -> Bool? {
         if let output = sysadminctlOutput, let parsed = screenLockImmediate(sysadminctlOutput: output) { return parsed }
-        guard (managed["askForPassword"] as? NSNumber)?.boolValue == true else { return false }
-        return (managed["askForPasswordDelay"] as? NSNumber)?.doubleValue == 0
+        if let ask = managed["askForPassword"] as? NSNumber, !ask.boolValue { return false }
+        if let delay = managed["askForPasswordDelay"] as? NSNumber, CFGetTypeID(delay) != CFBooleanGetTypeID() {
+            return delay.doubleValue <= 0
+        }
+        return nil
     }
 
     /// Parses `launchctl print gui/<uid>/<label>`: loaded and currently running.

@@ -1,5 +1,6 @@
 // AppModel+Collections — collections of scenes in the app (ARCHITECTURE §11): reading them, the
-// sidebar's and the menus' edits, export and import, and the screen saver following one.
+// edits of the Library's collection sections and the menus, export and import, and the screen saver
+// following one.
 //
 // The screen saver plays the copies compiled when the playlist was published, so a change to the
 // collection the playlist follows is published again here (quietly; only when a saver is
@@ -34,8 +35,11 @@ extension AppModel {
 
     private func applyCollections(_ fresh: [SceneCollection]) {
         if fresh != collections { collections = fresh }
-        // The collection on screen was deleted (here, or by the CLI): back to the library.
-        if case .collection(let id)? = section, !fresh.contains(where: { $0.id == id }) { section = .library }
+        // Chosen in a collection's section that is gone (deleted here or by the CLI): Move to and
+        // Remove no longer apply.
+        if let key = selection.section, let id = LibrarySectionID(key: key)?.collectionID, !fresh.contains(where: { $0.id == id }) {
+            selection.clear()
+        }
     }
 
     func collection(id: String) -> SceneCollection? { collections.first { $0.id == id } }
@@ -59,15 +63,20 @@ extension AppModel {
 
     func isFollowed(_ collectionID: String) -> Bool { playlist.collectionID == collectionID && collection(id: collectionID) != nil }
 
-    func showCollection(_ id: String) {
-        section = .collection(id)
-        collectionPath = []
+    /// Shows a collection's section in the Library: expanded, scrolled to and focused (LibraryView
+    /// reads `libraryReveal`). A search or filter that would hide it is cleared.
+    func revealCollection(_ id: String) {
+        section = .library
+        libraryPath = []
+        if LibrarySections.hides(id, entries: entries, collections: collections, query: query) { query = LibraryQuery() }
+        setCollapsed(.collection(id), false)
+        libraryReveal = .collection(id)
     }
 
     // MARK: - Editing
 
-    /// - Parameter show: open it once it is created (the sidebar's "New Collection…"); creating one
-    ///   for some scenes stays where the user is and offers "Show".
+    /// - Parameter show: reveal its section once it is created (an empty one, "New Collection…");
+    ///   creating one for some scenes stays where the user is and offers "Show".
     @discardableResult
     func createCollection(name: String, sceneIDs: [String] = [], show: Bool? = nil) async -> SceneCollection? {
         let service = services.collections
@@ -75,11 +84,11 @@ extension AppModel {
             let created = try await offMain { try service.create(name: name, sceneIDs: sceneIDs) }
             await didEditCollections()
             if show ?? sceneIDs.isEmpty {
-                showCollection(created.id)
+                revealCollection(created.id)
             } else {
                 banners.post(.success, "Created \(CollectionText.quoted(created.name))",
                              message: CollectionText.sceneCount(created.sceneIDs.count) + ".",
-                             actions: [.init(title: "Show") { [weak self] in self?.showCollection(created.id) }])
+                             actions: [.init(title: "Show") { [weak self] in self?.revealCollection(created.id) }])
             }
             return created
         } catch {
@@ -108,6 +117,8 @@ extension AppModel {
             let gone = try await offMain { try service.delete(id: id) }
             let count = gone.existingSceneIDs(available: Set(availableSceneIDs)).count
             await didEditCollections()
+            // A collection made later starts expanded.
+            setCollapsed(.collection(id), false)
             if playlist.collectionID == id {
                 var s = playlist.following([gone])
                 s.collectionID = nil
@@ -121,9 +132,10 @@ extension AppModel {
     }
 
     /// Adds scenes at the end (or `placement`). `playlistNote`: the user asked to add to the playlist,
-    /// which is this collection.
+    /// which is this collection. `copiedFrom`: they were dragged from another collection's section,
+    /// where they stay (the banner says how to move them instead).
     func addToCollection(_ sceneIDs: [String], _ collectionID: String, at placement: CollectionPlacement = .end,
-                         playlistNote: Bool = false) async {
+                         playlistNote: Bool = false, copiedFrom: String? = nil) async {
         guard !sceneIDs.isEmpty else { return }
         let service = services.collections
         let name = collection(id: collectionID)?.name ?? ""
@@ -136,10 +148,16 @@ extension AppModel {
             }
             await collectionDidChange(edit.collection)
             let followed = isFollowed(collectionID)
+            var notes: [String] = []
+            if let source = copiedFrom.flatMap({ collection(id: $0) }), source.id != collectionID {
+                notes.append(CollectionText.copiedNote(edit.changed, from: source.name))
+            }
+            if playlistNote || followed {
+                notes.append("The screen saver plays this collection, so it plays \(edit.changed.count == 1 ? "it" : "them") too.")
+            }
             banners.post(.success, CollectionText.added(edit.changed, to: edit.collection.name, names: sceneNames),
-                         message: playlistNote || followed ? "The screen saver plays this collection, so it plays \(edit.changed.count == 1 ? "it" : "them") too." : nil,
-                         actions: section == .collection(collectionID) ? []
-                             : [.init(title: "Show") { [weak self] in self?.showCollection(collectionID) }])
+                         message: notes.isEmpty ? nil : notes.joined(separator: " "),
+                         actions: [.init(title: "Show") { [weak self] in self?.revealCollection(collectionID) }])
         } catch {
             banners.error("Couldn\u{2019}t add to \(CollectionText.quoted(name))", error)
         }
@@ -151,8 +169,10 @@ extension AppModel {
         let name = collection(id: collectionID)?.name ?? ""
         do {
             let edit = try await offMain { try service.remove(sceneIDs, from: collectionID) }
-            // On the collection's own screen the removed cards are gone, and so is their selection.
-            if section == .collection(collectionID) { selection.retain(edit.collection.sceneIDs) }
+            // Cards chosen in this collection's section that left it: the selection is over.
+            if selection.section == LibrarySectionID.collection(collectionID).key, edit.changed.contains(where: selection.contains) {
+                selection.clear()
+            }
             await didEditCollections()
             guard !edit.changed.isEmpty else { return }
             await collectionDidChange(edit.collection)
@@ -174,6 +194,23 @@ extension AppModel {
         }
     }
 
+    /// What dropping the dragged scene cards on a collection's section does (CollectionDropPlan: a
+    /// drag adds; scenes dragged within their own collection are reordered).
+    func dropPlan(_ sceneIDs: [String], from source: String?, onto collectionID: String, card: String?,
+                  onHeader: Bool = false) -> CollectionDropPlan {
+        guard let c = collection(id: collectionID) else { return .none }
+        return CollectionDropPlan.plan(sceneIDs: sceneIDs, source: source, onto: c, card: card, onHeader: onHeader)
+    }
+
+    func performDrop(_ plan: CollectionDropPlan, onto collectionID: String) async {
+        libraryDrag = nil
+        switch plan {
+        case .none: break
+        case .add(let ids, let placement, let from): await addToCollection(ids, collectionID, at: placement, copiedFrom: from)
+        case .reorder(let ids, let placement): await moveScenes(ids, in: collectionID, to: placement)
+        }
+    }
+
     /// "Move to ▸": into another collection and out of this one.
     func moveToCollection(_ sceneIDs: [String], from source: String, to target: String) async {
         guard source != target, !sceneIDs.isEmpty else { return }
@@ -186,7 +223,7 @@ extension AppModel {
             if !added.changed.isEmpty { await collectionDidChange(added.collection) }
             if !removed.changed.isEmpty { await collectionDidChange(removed.collection) }
             banners.post(.success, CollectionText.moved(sceneIDs, to: added.collection.name, names: sceneNames),
-                         actions: [.init(title: "Show") { [weak self] in self?.showCollection(target) }])
+                         actions: [.init(title: "Show") { [weak self] in self?.revealCollection(target) }])
         } catch {
             banners.error("Couldn\u{2019}t move the scenes", error)
         }
@@ -246,7 +283,7 @@ extension AppModel {
     }
 
     /// Opening a .lpcollection (double-click in Finder, File › Import Collection…, a drop on the
-    /// sidebar). Scenes the library already has aren't imported again; a collection it already has
+    /// Library or the sidebar). Scenes the library already has aren't imported again; a collection it already has
     /// isn't changed unless the user asks ("Add N Scenes" merges, "Import as a Copy" makes another).
     func importCollection(at url: URL, mode: CollectionImportMode = .automatic) async {
         let service = services.collections
@@ -274,8 +311,8 @@ extension AppModel {
                 Task { await self?.importCollection(at: url, mode: .merge) }
             })
             actions.append(.init(title: "Import as a Copy") { [weak self] in Task { await self?.importCollection(at: url, mode: .copy) } })
-        } else if section != .collection(id) {
-            actions.append(.init(title: "Show") { [weak self] in self?.showCollection(id) })
+        } else {
+            actions.append(.init(title: "Show") { [weak self] in self?.revealCollection(id) })
         }
         let style: BannerCenter.Style
         switch banner.style {

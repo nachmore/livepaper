@@ -242,9 +242,11 @@ enum SnapshotHarness {
         clearBanners(model)
         shoot("playlist-displays-single-light", displaysSize, dark: false, PlaylistView())
 
-        // Collections (the mock library's sample collections): the sidebar section with three cards
-        // chosen in the library (the selection bar), a collection the screen saver follows, an empty
-        // one, the New Collection and Delete sheets, and the Screen Saver screen's Play picker on a
+        // Collections as Library sections (the mock library's sample collections): the screen saver
+        // follows Night Skies (▶ in its header), Calm Water collapsed, Warm Evenings empty (its drop
+        // hint), the New Collection row, then Your Scenes and Included; two cards chosen in Night
+        // Skies (the selection bar with Move to and Remove); a search that hides the sections without
+        // matches; the New Collection and Delete sheets; the Screen Saver screen's Play picker on a
         // collection.
         MockSampleData.displays = MockSampleData.defaultDisplays
         model.refreshDisplays()
@@ -252,19 +254,25 @@ enum SnapshotHarness {
         plain.mode = .shuffle; plain.sceneIDs = []; plain.collectionID = nil
         plain.displays = .standard; plain.displayNames = [:]
         wait { await model.savePlaylist(plain, announce: false) }
-        clearBanners(model)
-        model.section = .library
-        let picked = ["neon-rain", "paper-lanterns", "ink-bloom"]
-        for id in picked { _ = model.selection.click(id, .toggle, order: model.visibleEntries.map(\.id)) }
-        shoot("collections-select-light", main, dark: false, MainWindowView())
-        model.selection.clear()
         wait { await model.useCollectionAsScreenSaver(MockSampleData.nightSkiesID) }
         clearBanners(model)
-        model.showCollection(MockSampleData.nightSkiesID)
-        shoot("collection-dark", main, dark: true, MainWindowView())
-        model.showCollection(MockSampleData.warmToneID)
-        shoot("collection-empty-light", CGSize(width: 1000, height: 640), dark: false, MainWindowView())
-        shoot("sheet-new-collection-light", CGSize(width: 480, height: 180), dark: false, CollectionActionSheet(action: .new(sceneIDs: picked)))
+        model.section = .library
+        model.libraryPath = []
+        model.setCollapsed(.collection(MockSampleData.calmWaterID), true)
+        let tall = CGSize(width: 1180, height: 1460)
+        shoot("library-collections-light", tall, dark: false, MainWindowView())
+        shoot("library-collections-dark", tall, dark: true, MainWindowView())
+        let night = LibrarySectionID.collection(MockSampleData.nightSkiesID)
+        let nightOrder = model.librarySections.first { $0.id == night }?.sceneIDs ?? []
+        for id in ["neon-rain", "paper-lanterns"] { _ = model.selection.click(id, .toggle, order: nightOrder, section: night.key) }
+        shoot("library-collections-select-light", main, dark: false, MainWindowView())
+        model.selection.clear()
+        model.query.text = "night"
+        shoot("library-collections-search-dark", main, dark: true, MainWindowView())
+        model.query.text = ""
+        model.setCollapsed(.collection(MockSampleData.calmWaterID), false)
+        shoot("sheet-new-collection-light", CGSize(width: 480, height: 180), dark: false,
+              CollectionActionSheet(action: .new(sceneIDs: ["neon-rain", "paper-lanterns", "ink-bloom"])))
         shoot("sheet-delete-collection-dark", CGSize(width: 480, height: 200), dark: true,
               CollectionActionSheet(action: .delete(MockSampleData.nightSkiesID)))
         model.section = .playlist

@@ -467,7 +467,23 @@ extension SelfTests {
             try expectEqual(row.status, "info")
             try expect(row.detail.hasPrefix("off. "), row.detail)
             try expect(row.detail.contains("Applies on battery: screens off after 5 min, screen saver after 15 min") ||
-                       row.detail.contains("password isn\u{2019}t required immediately"), row.detail)
+                       row.detail.contains("password isn\u{2019}t required immediately") ||
+                       row.detail.contains("can\u{2019}t tell whether your password"), row.detail)
+            // The password setting, decided by the stand-in's sysadminctl (this Mac's profiles ignored).
+            func with(screenLock: String) -> [String: String] { env.merging(["LIVEPAPER_SELFTEST_SCREEN_LOCK": screenLock]) { _, b in b } }
+            lock = try rows(with(screenLock: "2026-11-14 18:32:04.037 sysadminctl[1:2] screenLock delay is immediate"))
+            try expectEqual(lock["password"]?.status, "ok")
+            try expectEqual(lock["before screens off"]?.detail,
+                            "off. Applies on battery: screens off after 5 min, screen saver after 15 min. Turn on \u{201C}Show your scene " +
+                            "when the screens turn off first\u{201D} in LivePaper › Settings › Lock so the lock when the screens turn off shows your scene too.")
+            lock = try rows(with(screenLock: "2026-11-14 18:32:04.037 sysadminctl[1:2] screenLock delay is 300 seconds"))
+            try expect(lock["password"]?.detail.contains("isn't Immediately") == true, lock["password"]?.detail ?? "")
+            try expectEqual(lock["before screens off"]?.detail, "off. Off: your password isn\u{2019}t required immediately after the screen saver starts.")
+            // Unreadable: "can't tell", as Settings › Lock and the helper say.
+            lock = try rows(with(screenLock: "garbage"))
+            try expectEqual(lock["password"]?.status, "problem")
+            try expect(lock["password"]?.detail.hasPrefix("LivePaper can\u{2019}t tell whether") == true, lock["password"]?.detail ?? "")
+            try expectEqual(lock["before screens off"]?.detail, "off. Off: LivePaper can\u{2019}t tell whether your password is required immediately.")
             // Turned on in state.json (what the app writes).
             var state = LPSharedState()
             state.lock.showSceneBeforeDisplaySleep = true

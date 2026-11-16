@@ -124,6 +124,15 @@ enum CLIEnvironment {
         return try? JSONDecoder().decode(LPScreenTimers.self, from: Data(json.utf8))
     }
 
+    /// LIVEPAPER_SELFTEST_SCREEN_LOCK=<output> (with LIVEPAPER_NO_SYSTEM_COMMANDS=1 only): what the
+    /// stand-in system's `sysadminctl -screenLock status` prints, and this Mac's configuration
+    /// profiles are ignored, so the self-tests decide the password setting ("" or anything
+    /// unrecognised: unreadable). nil: sysadminctl prints nothing and the profiles are read.
+    static var selfTestScreenLock: String? {
+        guard noSystemCommands else { return nil }
+        return ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_SCREEN_LOCK"]
+    }
+
     // MARK: - Terminal
 
     static var stdinIsTerminal: Bool { isatty(STDIN_FILENO) == 1 }
@@ -214,7 +223,9 @@ enum CLIServices {
                 ? ScratchWallpaperSystem(storeURL: live.paths.wallpaperStore, connectedDisplayIDs: connected)
                 : UnavailableWallpaperSystem(reason: "system commands are only recorded", connectedDisplayIDs: connected)
             let timers = CLIEnvironment.selfTestScreenTimers ?? LPScreenTimers()
-            return InstallService(paths: live.paths, publisher: Self.live.publish, runner: sandboxRunner,
+            var paths = live.paths
+            if CLIEnvironment.selfTestScreenLock != nil { paths.managedPreferences = [] }
+            return InstallService(paths: paths, publisher: Self.live.publish, runner: sandboxRunner,
                                   loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun,
                                   wallpaperSystem: agent, wallpaperOptions: quick, screenTimers: { timers })
         }
@@ -230,7 +241,10 @@ enum CLIServices {
     /// Records system commands; answers like a Mac where LivePaper's helper was never loaded
     /// (`launchctl print` fails) and everything else succeeds silently.
     private static let sandboxRunner = RecordingCommandRunner { executable, arguments in
-        executable == "/bin/launchctl" && arguments.first == "print"
+        if executable == "/usr/sbin/sysadminctl", let output = CLIEnvironment.selfTestScreenLock {
+            return CommandResult(status: 0, stderr: output)
+        }
+        return executable == "/bin/launchctl" && arguments.first == "print"
             ? CommandResult(status: 113, stderr: "Could not find service in domain") : nil
     }
 }
