@@ -22,6 +22,8 @@ struct AppEnvironment {
     var startScreenSaver: @MainActor () async throws -> Void
     /// Where compiled preview HTML is cached.
     var previewCacheDirectory: URL
+    /// "0.1.0.195": CFBundleShortVersionString, then the build number (CFBundleVersion, the commit
+    /// count), so Settings › About tells builds of the same version apart.
     var appVersion: String
     /// The running .app bundle, or nil when not running from one (`swift run`, tests).
     var appBundlePath: String?

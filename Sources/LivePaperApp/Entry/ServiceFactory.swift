@@ -68,7 +68,8 @@ enum ServiceFactory {
     @MainActor
     static func environment(mock: Bool, defaults: PreferenceStore, cache: URL, diskWatchRoot: URL? = nil) -> AppEnvironment {
         let bundle = Bundle.main
-        let version = bundle.infoDictionary?["CFBundleShortVersionString"] as? String ?? "0.1.0-dev"
+        let version = AppVersion.display(short: bundle.infoDictionary?["CFBundleShortVersionString"] as? String,
+                                          build: bundle.infoDictionary?["CFBundleVersion"] as? String)
         let appPath = (!mock && bundle.bundleURL.pathExtension == "app") ? bundle.bundleURL.path : nil
         // LPPaths already points at the scratch root in mock mode (redirectPaths runs first).
         let stateURL = LPPaths.stateFile

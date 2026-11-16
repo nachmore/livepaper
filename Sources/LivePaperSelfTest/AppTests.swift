@@ -686,6 +686,14 @@ extension SelfTests {
             try expectEqual(toggled.filter(\.isActive).map(\.id), ["L"])
             try expectEqual(Set(toggled.map(\.id)).count, toggled.count)   // stable, unique ids for ForEach
         },
+        TestCase(name: "app.about.version-with-build") {
+            try expectEqual(AppVersion.display(short: "0.1.0", build: "195"), "0.1.0.195")
+            try expectEqual(AppVersion.display(short: "0.1.0-beta.2", build: "201"), "0.1.0-beta.2.201")
+            try expectEqual(AppVersion.display(short: "0.1.0", build: nil), "0.1.0")
+            try expectEqual(AppVersion.display(short: "0.1.0", build: "abc"), "0.1.0")
+            try expectEqual(AppVersion.display(short: "0.1.0.195", build: "195"), "0.1.0.195")   // not twice
+            try expectEqual(AppVersion.display(short: nil, build: nil), "dev")
+        },
         TestCase(name: "app.fullscreen.ai-candidate") {
             var settings = PlaylistSettings()
             settings.showClock = false

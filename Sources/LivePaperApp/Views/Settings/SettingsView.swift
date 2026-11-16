@@ -308,6 +308,7 @@ private struct AboutSettingsTab: View {
                     VStack(alignment: .leading, spacing: 3) {
                         Text("LivePaper").font(.title2.weight(.semibold))
                         Text("Version \(model.environment.appVersion)").foregroundStyle(.secondary)
+                            .textSelection(.enabled)   // for bug reports
                         Text(AppInfo.copyright).font(.callout).foregroundStyle(.secondary)
                     }
                 }
