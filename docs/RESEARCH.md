@@ -372,8 +372,11 @@ What fixes it, and what LivePaper does (ARCHITECTURE §7):
   record, a stopped job registered by an older build). A helper that runs this copy's current code is
   left alone; an outdated one that the recorded requirement covers (the registration's Team ID, or the
   same ad-hoc cdhash — Finder's Replace leaves the old helper running from the Trash) is restarted
-  (`kickstart -k`); a stopped job launchd should accept is started. A start that launchd then refuses
-  is registered again; launchctl text LivePaper can't read never leads to an unregister.
+  (`kickstart -k`); a stopped job launchd should accept is started. Whether launchd then starts the
+  helper of the app at the original path or follows the old one into the Trash wasn't tested (that
+  needs the login item on the test Mac); a restart after which the old copy's helper runs again is
+  registered again. A start that launchd then refuses is registered again; launchctl text LivePaper
+  can't read never leads to an unregister.
 * **Only from the copy the login item belongs to:** registering moves the item to the registering app.
   The automatic repair runs only in the copy that registered it — or, without a record (or when that
   copy is gone or in the Trash), in a copy in /Applications or ~/Applications — never in a download,
