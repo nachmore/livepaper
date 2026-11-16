@@ -78,6 +78,132 @@ public protocol LibraryServicing: AnyObject, Sendable {
     func exportPackage(id: String, to url: URL) throws
 }
 
+// MARK: - Collections
+
+/// What a collection edit did (CollectionServicing.add / remove / move).
+public struct CollectionEdit: Sendable, Equatable {
+    /// The collection after the edit.
+    public var collection: SceneCollection
+    /// The scenes the edit added, removed or moved (empty: nothing changed).
+    public var changed: [String]
+    public init(collection: SceneCollection, changed: [String]) { self.collection = collection; self.changed = changed }
+}
+
+/// What exporting a collection wrote (CollectionServicing.export).
+public struct CollectionExport: Sendable, Equatable {
+    public var url: URL
+    public var collection: SceneCollection
+    /// User scenes copied into the file, in the collection's order.
+    public var includedScenes: [String]
+    /// Built-in scenes, referenced by id (every LivePaper has them).
+    public var builtinScenes: [String]
+    /// Scenes of the collection that aren't in the library (any more): left out.
+    public var missingScenes: [String]
+    public init(url: URL, collection: SceneCollection, includedScenes: [String], builtinScenes: [String], missingScenes: [String]) {
+        self.url = url; self.collection = collection; self.includedScenes = includedScenes
+        self.builtinScenes = builtinScenes; self.missingScenes = missingScenes
+    }
+}
+
+/// How to import a collection file whose collection the library already has (the same id).
+public enum CollectionImportMode: Sendable, Equatable {
+    /// A new collection is created; one the library already has is left as it is and the result
+    /// says which of the file's scenes it doesn't have (`CollectionImport.lacking`).
+    case automatic
+    /// Adds the file's scenes the existing collection doesn't have, at its end. Nothing is removed.
+    case merge
+    /// Always a new collection (a new id; the name gets a number when it is taken).
+    case copy
+}
+
+/// What importing a collection file did (CollectionServicing.importCollection).
+public struct CollectionImport: Sendable, Equatable {
+    public enum Outcome: Sendable, Equatable {
+        /// A new collection.
+        case created
+        /// The library's collection with the file's id gained the scenes it lacked (`added`).
+        case merged
+        /// The library already has the collection; nothing was changed or imported (`lacking`).
+        case alreadyPresent
+    }
+    /// A scene of the file that couldn't be added, and why (one sentence).
+    public struct Missing: Sendable, Equatable {
+        public var name: String
+        public var reason: String
+        public init(name: String, reason: String) { self.name = name; self.reason = reason }
+    }
+    public var outcome: Outcome
+    public var collection: SceneCollection
+    /// Scenes the collection gained (every scene when it was created), in order.
+    public var added: [String]
+    /// `.alreadyPresent`: names of the file's scenes the collection doesn't have (merging adds them).
+    public var lacking: [String]
+    /// Scenes that were new to the library and have been imported.
+    public var importedScenes: [SceneItem]
+    /// Scenes the library already had (the same contents, or the built-in scene), by library id.
+    public var existingScenes: [String]
+    public var missing: [Missing]
+    public init(outcome: Outcome, collection: SceneCollection, added: [String] = [], lacking: [String] = [],
+                importedScenes: [SceneItem] = [], existingScenes: [String] = [], missing: [Missing] = []) {
+        self.outcome = outcome; self.collection = collection; self.added = added; self.lacking = lacking
+        self.importedScenes = importedScenes; self.existingScenes = existingScenes; self.missing = missing
+    }
+}
+
+public enum CollectionError: Error, LocalizedError, Sendable, Equatable {
+    case notFound(String)
+    case nameTaken(String)
+    /// Several collections have this name (the ids say which is which).
+    case ambiguous(String, [String])
+    case unknownScenes([String])
+    case invalid(String)
+
+    public var errorDescription: String? {
+        switch self {
+        case .notFound(let s): return "There is no collection \u{201C}\(s)\u{201D}."
+        case .nameTaken(let s): return "A collection named \u{201C}\(s)\u{201D} already exists."
+        case .ambiguous(let s, let ids):
+            return "\(ids.count) collections are named \u{201C}\(s)\u{201D}; use one of their ids: \(ids.joined(separator: ", "))."
+        case .unknownScenes(let ids):
+            return "Not in the library: \(ids.joined(separator: ", "))."
+        case .invalid(let s): return s
+        }
+    }
+}
+
+public protocol CollectionServicing: AnyObject, Sendable {
+    /// Every collection, by name. Never throws (an unreadable file reads as none; CollectionStore).
+    func collections() -> [SceneCollection]
+    func collection(id: String) -> SceneCollection?
+    /// A collection by id, by name (letter case and accents don't count), or by the start of its
+    /// id (at least 4 characters, when only one id starts so). nil when none matches; a name
+    /// several collections share throws `CollectionError.ambiguous`.
+    func find(_ nameOrID: String) throws -> SceneCollection?
+    /// Scenes must be in the library. The name must be free.
+    @discardableResult func create(name: String, sceneIDs: [String]) throws -> SceneCollection
+    @discardableResult func rename(id: String, to name: String) throws -> SceneCollection
+    /// Deletes the collection, never its scenes. Returns it as it was.
+    @discardableResult func delete(id: String) throws -> SceneCollection
+    /// Adds library scenes the collection doesn't have yet (others are skipped) at `placement`.
+    @discardableResult func add(_ sceneIDs: [String], to id: String, at placement: CollectionPlacement) throws -> CollectionEdit
+    @discardableResult func remove(_ sceneIDs: [String], from id: String) throws -> CollectionEdit
+    /// Moves scenes of the collection (CollectionOrder.moving).
+    @discardableResult func move(_ sceneIDs: [String], in id: String, to placement: CollectionPlacement) throws -> CollectionEdit
+    /// A scene was deleted: it leaves every collection. Returns the collections it was in, as they are now.
+    @discardableResult func removeSceneEverywhere(_ sceneID: String) throws -> [SceneCollection]
+    /// Writes `<name>.lpcollection` (a zip: collection.json + every user scene as an .lpscene;
+    /// built-in scenes by id). Replaces an existing file at `url`.
+    @discardableResult func export(id: String, to url: URL) throws -> CollectionExport
+    /// Reads a .lpcollection file (or an unpacked one). Scenes the library already has — the same
+    /// contents (LibraryServicing.existingScene), or the built-in scene — are used, not imported again.
+    func importCollection(at url: URL, mode: CollectionImportMode) throws -> CollectionImport
+}
+
+public extension CollectionServicing {
+    @discardableResult func add(_ sceneIDs: [String], to id: String) throws -> CollectionEdit { try add(sceneIDs, to: id, at: .end) }
+    func importCollection(at url: URL) throws -> CollectionImport { try importCollection(at: url, mode: .automatic) }
+}
+
 // MARK: - Publishing (what the screen saver shows)
 
 public struct PlaylistSettings: Codable, Sendable, Equatable {
@@ -85,22 +211,26 @@ public struct PlaylistSettings: Codable, Sendable, Equatable {
     public var cycleMinutes: Int
     public var showClock: Bool
     public var performance: LPPerformanceProfile
-    /// Scenes in the playlist, in order. Empty = all scenes.
+    /// Scenes in the playlist, in order. Empty = all scenes. While the playlist follows a
+    /// collection, the scenes it had when the settings were last saved (`following(_:)`).
     public var sceneIDs: [String]
     /// Multiple displays: mode, per-display scenes, what other displays show on battery.
     public var displays: LPDisplaySettings
     /// Display id → the name it had when last seen, for displays with an assignment (so the app can
     /// name a disconnected display). App UI only; never published.
     public var displayNames: [String: String]
+    /// The collection the playlist follows ("Use as Screen Saver" on a collection): its scenes, in
+    /// its order, whatever they are when a publish runs (a live link). nil: `sceneIDs` as such.
+    public var collectionID: String?
 
     public init(mode: LPPlaylistMode = .shuffle, cycleMinutes: Int = 5, showClock: Bool = true,
                 performance: LPPerformanceProfile = .automatic, sceneIDs: [String] = [],
-                displays: LPDisplaySettings = .standard, displayNames: [String: String] = [:]) {
+                displays: LPDisplaySettings = .standard, displayNames: [String: String] = [:], collectionID: String? = nil) {
         self.mode = mode; self.cycleMinutes = cycleMinutes; self.showClock = showClock; self.performance = performance; self.sceneIDs = sceneIDs
-        self.displays = displays; self.displayNames = displayNames
+        self.displays = displays; self.displayNames = displayNames; self.collectionID = collectionID
     }
 
-    enum CodingKeys: String, CodingKey { case mode, cycleMinutes, showClock, performance, sceneIDs, displays, displayNames }
+    enum CodingKeys: String, CodingKey { case mode, cycleMinutes, showClock, performance, sceneIDs, displays, displayNames, collectionID }
 
     /// Tolerant: every field falls back to its default on its own, so a file from an older LivePaper
     /// (no `displays`), a newer one (a mode this build doesn't know) or a partly damaged one keeps
@@ -115,6 +245,8 @@ public struct PlaylistSettings: Codable, Sendable, Equatable {
         sceneIDs = (try? c.decodeIfPresent([String].self, forKey: .sceneIDs)).flatMap { $0 } ?? d.sceneIDs
         displays = (try? c.decodeIfPresent(LPDisplaySettings.self, forKey: .displays)).flatMap { $0 } ?? d.displays
         displayNames = (try? c.decodeIfPresent([String: String].self, forKey: .displayNames)).flatMap { $0 } ?? d.displayNames
+        let collection = (try? c.decodeIfPresent(String.self, forKey: .collectionID)).flatMap { $0 }?.trimmingCharacters(in: .whitespaces)
+        collectionID = collection.flatMap { SceneCollection.isValidID($0) ? $0 : nil }
     }
 }
 

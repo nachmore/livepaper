@@ -3180,7 +3180,8 @@ extension SelfTests {
                 let storeBefore = try Data(contentsOf: sb.store)
                 try check(try make(false).selectSaver(), "selected (with a fake WallpaperAgent)")
                 try expect(WallpaperStore(url: sb.store).isSelected())
-                for name in ["Library/a.lpscene/scene.json", "Workspaces/s/TASK.md", "Logs/x.log", "state.json", "playlist-settings.json"] {
+                for name in ["Library/a.lpscene/scene.json", "Workspaces/s/TASK.md", "Logs/x.log", "state.json", "playlist-settings.json",
+                             "collections.json"] {
                     try sb.write("{}", to: sb.support.appendingPathComponent(name))
                 }
                 let snapshot = { () -> [String] in
@@ -3208,7 +3209,8 @@ extension SelfTests {
                 try expectEqual(prefs.values["com.example.test|answer|false"] as? Int, 41)
                 try expect(prefs.values["com.example.test|fresh|false"] == nil, "a key that didn't exist is removed again")
                 try expect(prefs.values["com.apple.loginwindow|immediateLockLaunchesScreenSaver|false"] == nil, "lock keys restored")
-                try expectEqual(children(sb.support), ["Library", "playlist-settings.json", "state.json"])
+                // The scenes, their collections and the preferences stay.
+                try expectEqual(children(sb.support), ["Library", "collections.json", "playlist-settings.json", "state.json"])
                 try expect(exists(paths.uninstallMarker), "marked as uninstalled (outside the support directory)")
 
                 let again = make(false).performUninstall(removeLibrary: false)

@@ -84,6 +84,22 @@ enum MockSampleData {
         ]
     }
 
+    /// Sample collections (fixed ids; built-in and user scenes mixed, one empty).
+    static let nightSkiesID = "5c0e1a7e-0000-4000-8000-00000000c001"
+    static let calmWaterID = "5c0e1a7e-0000-4000-8000-00000000c002"
+    static let warmToneID = "5c0e1a7e-0000-4000-8000-00000000c003"
+
+    static func collections(now: Date = referenceDate) -> [SceneCollection] {
+        func days(_ d: Double) -> Date { now.addingTimeInterval(-d * 86_400) }
+        return [
+            SceneCollection(id: nightSkiesID, name: "Night Skies", sceneIDs: ["aurora-lake", "neon-rain", "paper-lanterns", "orbiting-garden"],
+                            created: days(8), updated: days(1)),
+            SceneCollection(id: calmWaterID, name: "Calm Water", sceneIDs: ["coastline-at-dusk", "morning-fog", "tidal-glass"],
+                            created: days(5), updated: days(2)),
+            SceneCollection(id: warmToneID, name: "Warm Evenings", sceneIDs: [], created: days(0.5), updated: days(0.5)),
+        ]
+    }
+
     /// The displays mock mode and the snapshots pretend are connected (AppEnvironment.connectedDisplays):
     /// by default a laptop with the menu bar and a larger display to its right, vertically centred.
     /// The ids are made up (never a real display's).
