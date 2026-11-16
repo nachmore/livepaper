@@ -9,10 +9,10 @@ enum LibraryCommands {
                        summary: "scaffold a new web scene in the library (or clone one with --from)", run: new),
             CLICommand(name: "list", synopsis: "[--json]",
                        summary: "list the library's scenes (yours first, then the built-in ones)", run: list),
-            CLICommand(name: "import", synopsis: "<video.mov|.mp4|.m4v | scene.lpscene | scene.zip> [--name <name>] [--battery] [--json]",
-                       summary: "add a video (as a video scene) or a scene package to the library", run: importItem),
+            CLICommand(name: "import", synopsis: "<video.mov|.mp4|.m4v | scene.lpscene | scene.zip | collection.lpcollection> [--name <name>] [--battery] [--json]",
+                       summary: "add a video (as a video scene), a scene package or a collection file to the library", run: importItem),
             CLICommand(name: "publish",
-                       synopsis: "[--scenes <id,id,…>|all] [--mode shuffle|sequence|single] [--cycle <minutes>] " +
+                       synopsis: "[--scenes <id,id,…>|all | --collection <collection>|none] [--mode shuffle|sequence|single] [--cycle <minutes>] " +
                                  "[--performance automatic|best|balanced|battery] [--clock|--no-clock] " +
                                  "[--displays same|different|choose|span] [--display <display-uuid>=<scene-id>|playlist]… " +
                                  "[--battery-displays live|still|off] [--json]",
@@ -98,7 +98,7 @@ enum LibraryCommands {
         guard args.positional.isEmpty else { throw UsageError("list takes no arguments") }
         let services = CLIServices.live
         let scenes = try services.library.scenes()
-        let selection = services.publish.loadSettings().sceneIDs
+        let selection = services.publish.loadSettings().following(services.collections.collections()).sceneIDs
         let inPlaylist = { (id: String) in selection.isEmpty || selection.contains(id) }
         if args.flag("json") {
             printJSONObject(scenes.map { SceneSummary($0, inPlaylist: inPlaylist($0.id)) })
@@ -129,6 +129,10 @@ enum LibraryCommands {
         let path = try args.single("file to import")
         let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL
         guard FileManager.default.fileExists(atPath: url.path) else { throw UsageError("\(path) doesn't exist") }
+        if url.pathExtension.lowercased() == CollectionArchive.fileExtension {
+            if args.flag("battery") || args.string("name") != nil { throw UsageError("--name and --battery don't apply to collections") }
+            return try CollectionCommands.importFile([path] + (args.flag("json") ? ["--json"] : []))
+        }
         let library = CLIServices.live.library
         let item: SceneItem
         if videoExtensions.contains(url.pathExtension.lowercased()) {
@@ -172,6 +176,9 @@ enum LibraryCommands {
         var scenes: [String]
         var skipped: [String: String]
         var saver: String
+        /// The collection the playlist follows (its id and name), if any.
+        var collection: String?
+        var collectionName: String?
         /// Multiple displays as published (assignments only in "choose" mode, and only to published scenes).
         var displays: Displays
         /// Scenes published only for displays assigned to them.
@@ -186,7 +193,7 @@ enum LibraryCommands {
 
     static func publish(_ argv: [String]) async throws -> Int32 {
         let args = try Arguments(argv, flags: ["clock", "no-clock", "json"],
-                                 options: ["scenes", "mode", "cycle", "performance", "displays", "display", "battery-displays"])
+                                 options: ["scenes", "collection", "mode", "cycle", "performance", "displays", "display", "battery-displays"])
         guard args.positional.isEmpty else { throw UsageError("publish takes no positional arguments") }
         let services = CLIServices.live
         var settings = services.publish.loadSettings()
@@ -208,8 +215,22 @@ enum LibraryCommands {
         if args.flag("clock") && args.flag("no-clock") { throw UsageError("use either --clock or --no-clock") }
         if args.flag("clock") { settings.showClock = true }
         if args.flag("no-clock") { settings.showClock = false }
+        if args.string("scenes") != nil && args.string("collection") != nil { throw UsageError("use either --scenes or --collection") }
         if let list = args.string("scenes") {
             settings.sceneIDs = try sceneSelection(list, library: services.library)
+            settings.collectionID = nil
+        }
+        if let name = args.string("collection") {
+            if name.lowercased() == "none" {
+                // Stop following: the scenes it has now stay, as a list.
+                settings = settings.following(services.collections.collections())
+                settings.collectionID = nil
+            } else {
+                let c = try CollectionCommands.resolve(name)
+                settings.collectionID = c.id
+                settings.sceneIDs = c.sceneIDs
+                if settings.mode == .single && c.sceneIDs.count > 1 { settings.mode = .sequence }
+            }
         }
         if let mode = args.string("displays") {
             guard let m = LPDisplayMode(rawValue: mode) else { throw UsageError(displaysUsage) }
@@ -238,11 +259,13 @@ enum LibraryCommands {
         } else {
             playlist = try services.publish.publish(); skipped = [:]
         }
+        let followed = settings.collectionID.flatMap { services.collections.collection(id: $0) }
         if args.flag("json") {
             let d = playlist.displays
             printJSONObject(PublishSummary(generation: playlist.generation, mode: playlist.mode.rawValue, cycleMinutes: playlist.cycleMinutes,
                                            showClock: playlist.showClock, performance: playlist.performance.rawValue,
                                            scenes: playlist.scenes.map(\.id), skipped: skipped, saver: LPPaths.installedSaver.path,
+                                           collection: followed?.id, collectionName: followed?.name,
                                            displays: .init(mode: d.mode.rawValue, onBattery: d.onBattery.rawValue, assignments: d.assignments),
                                            displayScenes: playlist.displayScenes.map(\.id),
                                            spanScenes: (playlist.scenes + playlist.displayScenes).filter { $0.span == true }.map(\.id)))
@@ -250,6 +273,10 @@ enum LibraryCommands {
             let n = playlist.scenes.count
             print("published \(n) scene\(n == 1 ? "" : "s") into \(displayPath(LPPaths.installedSaver)) (generation \(playlist.generation))")
             print("  \(describe(playlist))")
+            if let followed {
+                print("  plays the collection \u{201C}\(followed.name)\u{201D} (changes to it update the screen saver)" +
+                      (followed.sceneIDs.isEmpty ? "; it's empty, so every scene plays" : ""))
+            }
             print("  scenes: " + playlist.scenes.map(\.id).joined(separator: ", "))
             for (display, scene) in playlist.displays.assignments.sorted(by: { $0.key < $1.key }) {
                 print("  display \(display): \(scene)")

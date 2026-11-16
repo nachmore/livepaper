@@ -16,7 +16,7 @@ import Foundation
 import LivePaperCore
 
 extension SelfTests {
-    static var cli: [TestCase] { cliPackaging + cliCommands }
+    static var cli: [TestCase] { cliPackaging + cliCommands + cliCollections }
 
     // MARK: - Packaging inputs
 
@@ -599,7 +599,8 @@ extension SelfTests {
             let session = [AISessionPolicy.sessionVariable: "s1", AISessionPolicy.workspaceVariable: ws.path]
             let marker = sb.root.appendingPathComponent("pwned")
             for args in [["uninstall", "--yes"], ["publish"], ["import", outside.path], ["new", "X"], ["list"], ["doctor"], ["select"],
-                         ["ai", "create", "x", "--command", "/usr/bin/touch \(marker.path)", "--yes"], ["server", "stop"]] {
+                         ["ai", "create", "x", "--command", "/usr/bin/touch \(marker.path)", "--yes"], ["server", "stop"],
+                         ["collection", "new", "X", "aurora-lake"], ["collection", "import", outside.path], ["collection", "list"]] {
                 let r = try sb.run(args, extraEnv: session)
                 try expectEqual(r.status, 2)
                 try expect(r.err.contains("not available in an AI session"), "\(args): \(r.err)")
@@ -1082,6 +1083,175 @@ extension SelfTests {
         guard let row else { throw TestFailure(description: "\(file):\(line) no such doctor row") }
         return row
     }
+
+    // MARK: - Collections
+
+    /// `livepaper collection …` (ARCHITECTURE §9): editing, export/import between two libraries, the
+    /// screen saver following a collection.
+    static var cliCollections: [TestCase] { [
+        cliTest("cli.collection.edit") { sb in
+            _ = try sb.run(["new", "Glow"]); _ = try sb.run(["new", "Ember"]); _ = try sb.run(["new", "Dusk"])
+            var r = try sb.run(["collection", "list"])
+            try expectEqual(r.status, 0)
+            try expect(r.out.contains("No collections yet"), r.out)
+            r = try sb.run(["collection", "new", "Night Skies", "glow", "starter", "--json"])
+            try expectEqual(r.status, 0)
+            let created = try CLITestSupport.jsonObject(r.out)
+            let c = try unwrap(created["collection"] as? [String: Any])
+            let id = try unwrap(c["id"] as? String)
+            try expectEqual(c["scenes"] as? [String], ["glow", "starter"])
+            try expectEqual(c["count"] as? Int, 2)
+            // Named by name in any letter case, or by id.
+            r = try sb.run(["collection", "add", "night skies", "ember", "glow", "dusk", "--at", "1"])
+            try expectEqual(r.status, 0)
+            try expect(r.out.contains("added 2 scenes to \u{201C}Night Skies\u{201D}") && r.out.contains("already in it: glow"), r.out)
+            r = try sb.run(["collection", "show", id, "--json"])
+            var shown = try CLITestSupport.jsonObject(r.out)
+            try expectEqual((shown["collection"] as? [String: Any])?["scenes"] as? [String], ["ember", "dusk", "glow", "starter"])
+            try expectEqual((shown["items"] as? [[String: Any]])?.compactMap { $0["builtin"] as? Bool }, [false, false, false, true])
+            r = try sb.run(["collection", "move", "Night Skies", "starter", "--to", "first"])
+            try expectEqual(r.status, 0)
+            r = try sb.run(["collection", "move", "Night Skies", "ember", "--after", "glow"])
+            try expectEqual(r.status, 0)
+            r = try sb.run(["collection", "move", "Night Skies", "dusk", "--to", "2", "--json"])
+            try expectEqual(((try CLITestSupport.jsonObject(r.out))["collection"] as? [String: Any])?["scenes"] as? [String],
+                            ["starter", "dusk", "glow", "ember"])
+            r = try sb.run(["collection", "remove", "Night Skies", "glow", "nope"])
+            try expect(r.out.contains("removed 1 scene") && r.out.contains("not in it: nope"), r.out)
+            r = try sb.run(["collection", "show", "Night Skies"])
+            try expect(r.out.contains("3 scenes") && r.out.contains("1  starter") && r.out.contains("built-in"), r.out)
+            r = try sb.run(["collection", "rename", "Night Skies", "Night Sky"])
+            try expect(r.out.contains("renamed"), r.out)
+            _ = try sb.run(["collection", "new", "Calm"])
+            r = try sb.run(["collection", "list", "--json"])
+            let all = try CLITestSupport.jsonArray(r.out)
+            try expectEqual(all.compactMap { $0["name"] as? String }, ["Calm", "Night Sky"])
+            try expectEqual(all.compactMap { $0["count"] as? Int }, [0, 3])
+            // Mistakes.
+            try expectEqual(try sb.run(["collection"]).status, 2)
+            try expectEqual(try sb.run(["collection", "frobnicate"]).status, 2)
+            try expectEqual(try sb.run(["collection", "show", "Nowhere"]).status, 2)
+            try expectEqual(try sb.run(["collection", "add", "Calm", "no-such-scene"]).status, 2)
+            try expectEqual(try sb.run(["collection", "add", "Calm", "glow", "--at", "0"]).status, 2)
+            try expectEqual(try sb.run(["collection", "move", "Night Sky", "dusk", "--to", "1", "--before", "ember"]).status, 2)
+            try expectEqual(try sb.run(["collection", "move", "Night Sky", "glow", "--to", "1"]).status, 2)   // not in it
+            r = try sb.run(["collection", "new", "calm"])
+            try expectEqual(r.status, 1)
+            try expect(r.err.contains("already exists"), r.err)
+            try expectEqual(try sb.run(["collection", "rename", "Calm", "NIGHT SKY"]).status, 1)
+            // Deleting a collection leaves its scenes.
+            r = try sb.run(["collection", "delete", "Night Sky"])
+            try expect(r.out.contains("stay in the library"), r.out)
+            try expect(FileManager.default.fileExists(atPath: sb.library.appendingPathComponent("dusk.lpscene").path))
+            shown = try CLITestSupport.jsonArray(try sb.run(["collection", "list", "--json"]).out).first ?? [:]
+            try expectEqual(shown["name"] as? String, "Calm")
+            let help = try sb.run(["help", "collection"]).out
+            try expect(help.contains("livepaper collection move"), help)
+        },
+        cliTest("cli.collection.export-import") { sb in
+            _ = try sb.run(["new", "Glow"]); _ = try sb.run(["new", "Ember"])
+            // Different code, so they aren't the same scene.
+            for (id, note) in [("glow", "glow A"), ("ember", "ember A")] {
+                let js = sb.library.appendingPathComponent("\(id).lpscene/scene.js")
+                try Data((try String(contentsOf: js, encoding: .utf8) + "\n// \(note)\n").utf8).write(to: js)
+            }
+            _ = try sb.run(["collection", "new", "Night Skies", "ember", "starter", "glow"])
+            var r = try sb.run(["collection", "export", "Night Skies", "--json"])
+            try expectEqual(r.status, 0)
+            let exported = try CLITestSupport.jsonObject(r.out)
+            let file = sb.work.appendingPathComponent("Night Skies.lpcollection")
+            try expectEqual((exported["path"] as? String).map { URL(fileURLWithPath: $0).resolvingSymlinksInPath().path },
+                            file.resolvingSymlinksInPath().path)
+            try expectEqual(exported["scenes"] as? [String], ["ember", "glow"])
+            try expectEqual(exported["builtin"] as? [String], ["starter"])
+            try expectEqual(try sb.run(["collection", "export", "Night Skies"]).status, 2)   // exists: needs --force
+            try expectEqual(try sb.run(["collection", "export", "Night Skies", "--force"]).status, 0)
+            let folder = sb.root.appendingPathComponent("exports")
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            try expectEqual(try sb.run(["collection", "export", "night skies", "--out", folder.path]).status, 0)
+            try expect(FileManager.default.fileExists(atPath: folder.appendingPathComponent("Night Skies.lpcollection").path))
+
+            // Another library on the same Mac: its own Glow (another scene with the same id) and its
+            // own "Night Skies".
+            let other = ["LIVEPAPER_HOME": sb.root.appendingPathComponent("other-home").path]
+            _ = try sb.run(["new", "Glow"], extraEnv: other)
+            _ = try sb.run(["collection", "new", "Night Skies", "glow"], extraEnv: other)
+            r = try sb.run(["collection", "import", file.path, "--json"], extraEnv: other)
+            try expectEqual(r.status, 0)
+            var imported = try CLITestSupport.jsonObject(r.out)
+            try expectEqual(imported["outcome"] as? String, "created")
+            try expectEqual((imported["collection"] as? [String: Any])?["name"] as? String, "Night Skies 2")
+            try expectEqual((imported["collection"] as? [String: Any])?["scenes"] as? [String], ["ember", "starter", "glow-2"])
+            try expectEqual(imported["importedScenes"] as? [String], ["ember", "glow-2"])
+            // Again (also through `livepaper import`): nothing new.
+            r = try sb.run(["import", file.path], extraEnv: other)
+            try expectEqual(r.status, 0)
+            try expect(r.out.contains("is already in your library"), r.out)
+            let list = try CLITestSupport.jsonArray(try sb.run(["list", "--json"], extraEnv: other).out)
+            try expectEqual(list.filter { $0["builtin"] as? Bool == false }.compactMap { $0["id"] as? String }.sorted(), ["ember", "glow", "glow-2"])
+            // Merging after a removal; a copy.
+            _ = try sb.run(["collection", "remove", "Night Skies 2", "ember"], extraEnv: other)
+            r = try sb.run(["collection", "import", file.path], extraEnv: other)
+            try expect(r.out.contains("has 1 scene it doesn't: Ember") && r.out.contains("--merge"), r.out)
+            r = try sb.run(["collection", "import", file.path, "--merge", "--json"], extraEnv: other)
+            imported = try CLITestSupport.jsonObject(r.out)
+            try expectEqual(imported["outcome"] as? String, "merged")
+            try expectEqual(imported["added"] as? [String], ["ember"])
+            r = try sb.run(["collection", "import", file.path, "--copy"], extraEnv: other)
+            try expect(r.out.contains("Night Skies 3"), r.out)
+            try expectEqual(try sb.run(["collection", "import", file.path, "--merge", "--copy"], extraEnv: other).status, 2)
+            try expectEqual(try sb.run(["import", file.path, "--battery"], extraEnv: other).status, 2)
+            // Not a collection.
+            let junk = sb.root.appendingPathComponent("junk.lpcollection")
+            try Data("not a zip".utf8).write(to: junk)
+            r = try sb.run(["collection", "import", junk.path], extraEnv: other)
+            try expectEqual(r.status, 1)
+            try expect(r.err.contains("isn\u{2019}t a LivePaper collection"), r.err)
+        },
+        cliTest("cli.collection.screen-saver-follows") { sb in
+            _ = try sb.run(["new", "Glow"]); _ = try sb.run(["new", "Ember"])
+            _ = try sb.run(["collection", "new", "Pair", "glow", "starter"])
+            // Without a saver the link is stored; publishing needs the saver.
+            try sb.installFakeSaver()
+            var r = try sb.run(["publish", "--collection", "pair", "--mode", "sequence", "--json"])
+            try expectEqual(r.status, 0)
+            var summary = try CLITestSupport.jsonObject(r.out)
+            try expectEqual(summary["scenes"] as? [String], ["glow", "starter"])
+            try expectEqual(summary["collectionName"] as? String, "Pair")
+            let playlistDir = sb.saver.appendingPathComponent("Contents/Resources/Playlist")
+            // Changing the collection republishes it.
+            r = try sb.run(["collection", "add", "Pair", "ember", "--at", "1"])
+            try expectEqual(r.status, 0)
+            try expect(r.out.contains("updated the screen saver"), r.out)
+            try expectEqual(try LPPlaylist.load(from: playlistDir).scenes.map(\.id), ["ember", "glow", "starter"])
+            r = try sb.run(["collection", "move", "Pair", "starter", "--to", "first", "--json"])
+            try expectEqual((try CLITestSupport.jsonObject(r.out))["screenSaver"] as? String, "updated")
+            try expectEqual(try LPPlaylist.load(from: playlistDir).scenes.map(\.id), ["starter", "ember", "glow"])
+            let settings = try JSONDecoder().decode(PlaylistSettings.self, from: Data(contentsOf: sb.support.appendingPathComponent("playlist-settings.json")))
+            try expectEqual(settings.sceneIDs, ["starter", "ember", "glow"])   // the stored copy follows too
+            // `list` marks what the screen saver plays.
+            let listed = try CLITestSupport.jsonArray(try sb.run(["collection", "list", "--json"]).out)
+            try expectEqual(listed.first?["playing"] as? Bool, true)
+            // Deleting it: the screen saver keeps playing its scenes, as a list.
+            r = try sb.run(["collection", "delete", "Pair"])
+            try expect(r.out.contains("keeps playing"), r.out)
+            r = try sb.run(["publish", "--json"])
+            summary = try CLITestSupport.jsonObject(r.out)
+            try expectEqual(summary["scenes"] as? [String], ["starter", "ember", "glow"])
+            try expect(summary["collection"] == nil)
+            // --scenes and --collection don't mix; --collection none stops following.
+            _ = try sb.run(["collection", "new", "Solo", "glow"])
+            try expectEqual(try sb.run(["publish", "--scenes", "glow", "--collection", "Solo"]).status, 2)
+            try expectEqual(try sb.run(["publish", "--collection", "Nowhere"]).status, 2)
+            _ = try sb.run(["publish", "--collection", "Solo"])
+            r = try sb.run(["publish", "--collection", "none", "--json"])
+            summary = try CLITestSupport.jsonObject(r.out)
+            try expectEqual(summary["scenes"] as? [String], ["glow"])
+            try expect(summary["collection"] == nil)
+            r = try sb.run(["collection", "add", "Solo", "ember"])
+            try expect(!r.out.contains("screen saver"), "no longer followed: \(r.out)")
+        },
+    ] }
 
     private static func cliTest(_ name: String, _ body: @escaping (CLISandbox) throws -> Void) -> TestCase {
         TestCase(name: name) {
