@@ -9,6 +9,9 @@ enum InstallCommands {
             CLICommand(name: "doctor", synopsis: "[--no-ai] [--json]",
                        summary: "diagnose the installation (saver, helper, lock settings, render server, AI tools); exit 1 on problems",
                        run: doctor),
+            CLICommand(name: "select", synopsis: "",
+                       summary: "make LivePaper the screen saver for every display (only the screen-saver choice changes; a backup is kept)",
+                       run: select),
             CLICommand(name: "uninstall", synopsis: "[--yes] [--keep-scenes] [--dry-run]",
                        summary: "remove the helper and screen saver, restore changed settings, delete LivePaper's data",
                        run: uninstall),
@@ -255,6 +258,26 @@ enum InstallCommands {
     }
 
     // MARK: - uninstall
+
+    // MARK: - select
+
+    /// The installer's own selection (InstallService.selectSaver: only the wallpaper store's Idle
+    /// slots, with the backup uninstall restores from), for when something else changed it back.
+    static func select(_ argv: [String]) async throws -> Int32 {
+        let args = try Arguments(argv, flags: [])
+        guard args.positional.isEmpty else { throw UsageError("select takes no arguments") }
+        let install = CLIServices.live.install
+        guard install.status().saverInstalled else {
+            print("The LivePaper screen saver isn't installed yet: open LivePaper to set it up.")
+            return ExitCode.failed
+        }
+        guard try install.selectSaver() else {
+            print("macOS didn't take the change: pick LivePaper in System Settings › Wallpaper › Screen Saver.")
+            return ExitCode.unavailable
+        }
+        print("LivePaper is the screen saver for every display.")
+        return ExitCode.ok
+    }
 
     static func uninstall(_ argv: [String]) async throws -> Int32 {
         let args = try Arguments(argv, flags: ["yes", "keep-scenes", "dry-run"])
