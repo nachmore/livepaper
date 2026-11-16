@@ -1,5 +1,5 @@
-// PlaylistDraft — editing rules for the screen-saver playlist (Foundation-only; also compiled into
-// LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
+// PlaylistDraft — editing rules for the screen-saver playlist and its multiple-display settings
+// (Foundation-only; also compiled into LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
 //
 // `PlaylistSettings.sceneIDs` empty means "all scenes" (new scenes join automatically); a non-empty
 // list is an explicit, ordered selection.
@@ -231,6 +231,15 @@ extension PlaylistDraft {
             if m.spans { spanning.append(id) } else { notSpanning.append(id) }
         }
         return (spanning, notSpanning)
+    }
+
+    /// "Different on each display" with fewer scenes than displays: some displays share a scene
+    /// (display k shows what display k + n shows). nil when every display can differ.
+    static func differentNote(sceneCount: Int, displayCount: Int) -> String? {
+        guard displayCount >= 2, sceneCount > 0, sceneCount < displayCount else { return nil }
+        return sceneCount == 1
+            ? "The playlist has one scene, so every display shows it."
+            : "The playlist has \(sceneCount) scenes for \(displayCount) displays, so some displays show the same scene."
     }
 
     /// "3 of 5 scenes can span; the others show on every display." ("" without scenes.)

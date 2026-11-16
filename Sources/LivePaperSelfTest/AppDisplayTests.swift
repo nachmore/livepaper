@@ -105,6 +105,13 @@ extension SelfTests {
             try expectEqual(PlaylistDraft.spanSupportSummary(spanning: 0, total: 1), "This scene can\u{2019}t span, so it shows on every display.")
             try expectEqual(PlaylistDraft.spanSupportSummary(spanning: 0, total: 3), "None of these scenes can span, so they show on every display.")
             try expectEqual(PlaylistDraft.spanSupportSummary(spanning: 0, total: 0), "")
+            // "Different" with fewer scenes than displays says so.
+            try expectEqual(PlaylistDraft.differentNote(sceneCount: 1, displayCount: 2), "The playlist has one scene, so every display shows it.")
+            try expectEqual(PlaylistDraft.differentNote(sceneCount: 2, displayCount: 3),
+                            "The playlist has 2 scenes for 3 displays, so some displays show the same scene.")
+            try expectEqual(PlaylistDraft.differentNote(sceneCount: 3, displayCount: 3), nil)
+            try expectEqual(PlaylistDraft.differentNote(sceneCount: 1, displayCount: 1), nil)
+            try expectEqual(PlaylistDraft.differentNote(sceneCount: 0, displayCount: 2), nil)
             // The mock library's built-ins span, like the real ones; videos do by default.
             let samples = Dictionary(MockSampleData.samples().map { ($0.manifest.id, $0.manifest) }, uniquingKeysWith: { a, _ in a })
             let all = PlaylistDraft.spanSupport(ids: MockSampleData.samples().map(\.manifest.id), manifests: samples)

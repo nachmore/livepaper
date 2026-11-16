@@ -35,6 +35,13 @@ struct DisplaysSection: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
+            if mode == .different,
+               let note = PlaylistDraft.differentNote(sceneCount: draft.effectiveSceneIDs(available: model.availableSceneIDs).count,
+                                                      displayCount: layout.count) {
+                Label(note, systemImage: "info.circle")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
             if mode == .choose { rememberedRows }
             if mode == .span { spanRow }
             Picker("On battery, other displays show", selection: $draft.settings.displays.onBattery) {

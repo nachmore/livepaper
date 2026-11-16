@@ -63,7 +63,7 @@ enum SnapshotHarness {
         // Onboarding first: it starts from the initial (nothing installed) state.
         let sheet = CGSize(width: 800, height: 580)
         shoot("onboarding-welcome-light", sheet, dark: false, OnboardingView(initialStep: .welcome))
-        try? services.install.installSaver()
+        _ = try? services.install.installSaver()
         wait { await model.refreshInstallStatus() }
         shoot("onboarding-saver-dark", sheet, dark: true, OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
         shoot("onboarding-lock-light", sheet, dark: false, OnboardingView(initialStep: .lock))

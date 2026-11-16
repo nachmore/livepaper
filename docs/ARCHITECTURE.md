@@ -920,7 +920,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     chosen, pruned to assigned displays; "Display 37D8832A" for one assigned elsewhere, e.g. by the
     CLI). Choices stay in the settings in every mode but are published only in *Choose*, and only
     for scenes that still exist (`PlaylistDraft.effectiveAssignments`, as PublishService does).
-    *Span* says how many of the playlist's scenes can span (`SceneManifest.spans`: "3 of 5 scenes
+    *Different* says when the playlist has fewer scenes than there are displays (some then share
+    one). *Span* says how many of the playlist's scenes can span (`SceneManifest.spans`: "3 of 5 scenes
     can span; the others show on every display.", naming up to four that can't). "On battery, other
     displays show": the scene / a still picture / nothing (black), with the footnote that the main
     display always shows the scene. The connected displays come from `AppEnvironment.connectedDisplays`
