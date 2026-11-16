@@ -26,7 +26,8 @@ private func remove(_ url: URL) { try? FileManager.default.removeItem(at: url) }
 
 /// One display's view reduced to the bookkeeping LivePaperSaverView does against the shared session
 /// store, with the same SaverLogic calls: begin() plans and builds the deck, then shows step 0;
-/// show() → rememberShown(); willstop → recordEnded. Tests run several of these against one store.
+/// show() → rememberShown() (at the given time); willstop → recordEnded. Tests run several of these
+/// against one store.
 private struct SimDisplay {
     let ids: [String]
     let planned: (session: SaverSession, record: SaverSessionRecord, joined: Bool)
@@ -38,15 +39,15 @@ private struct SimDisplay {
         planned = SaverSessionPlanner.plan(now: now, stored: store.load())
         deck = SaverDeck(ids: ids, mode: mode, session: planned.session)
         record = planned.record
-        show(step: 0, store: store)
+        show(step: 0, at: now, store: store)
     }
 
     var joined: Bool { planned.joined }
     func scene(atStep step: Int) -> String { ids[deck.entryIndex(atStep: step)] }
 
-    mutating func show(step: Int, store: SaverSessionStore) { show(id: scene(atStep: step), store: store) }
-    mutating func show(id: String, store: SaverSessionStore) {
-        let update = SaverSessionPlanner.recordShown(id, own: record, stored: store.load())
+    mutating func show(step: Int, at now: Date, store: SaverSessionStore) { show(id: scene(atStep: step), at: now, store: store) }
+    mutating func show(id: String, at now: Date, store: SaverSessionStore) {
+        let update = SaverSessionPlanner.recordShown(id, own: record, stored: store.load(), now: now)
         record.noteShown(id)
         if let update { store.save(update) }
     }
@@ -198,35 +199,44 @@ extension SelfTests {
                 var a = SimDisplay(ids: ids, at: t0, store: store)
                 var b = SimDisplay(ids: ids, at: t0.addingTimeInterval(1), store: store)
                 let x = a.scene(atStep: 1), w = ids.first { $0 != x && $0 != a.scene(atStep: 0) }!
-                a.show(step: 1, store: store)
-                b.show(id: w, store: store)
+                a.show(step: 1, at: t0.addingTimeInterval(60), store: store)
+                b.show(id: w, at: t0.addingTimeInterval(61), store: store)
                 if stopOrder { a.stop(at: t0.addingTimeInterval(200), store: store); b.stop(at: t0.addingTimeInterval(200), store: store) }
                 else { b.stop(at: t0.addingTimeInterval(200), store: store); a.stop(at: t0.addingTimeInterval(200), store: store) }
                 let ended = try unwrap(store.load())
                 try expect(ended.endedAt != nil)
                 try expect(ended.recent?.contains(x) == true && ended.recent?.contains(w) == true, "\(ended.recent ?? [])")
 
-                // A display that starts 60 s late begins its own session. The first display changing
-                // scene afterwards must not replace that newer session in the store, and whichever
-                // display handles willstop last, the next lock still knows what both showed.
-                let late = SaverMemorySessionStore()
-                var first = SimDisplay(ids: ids, at: t0, store: late)
-                let second = SimDisplay(ids: ids, at: t0.addingTimeInterval(60), store: late)
-                try expect(!second.joined)
-                first.show(step: 1, store: late)
-                let third = SimDisplay(ids: ids, at: t0.addingTimeInterval(70), store: late)
-                try expect(third.joined && third.deck == second.deck, "a display joins the newest session")
-                for display in stopOrder ? [first, second, third] : [third, second, first] {
-                    display.stop(at: t0.addingTimeInterval(120), store: late)
+                // A display that starts late (60 s, or days later: a locked Mac whose displays slept
+                // over a weekend, then docked) begins its own session. The first display changing scene
+                // afterwards (waking, catching up) must not replace that newer session in the store —
+                // however long after the first session it began — and whichever display handles
+                // willstop last, the next lock still knows what both showed.
+                let lead = SaverSessionPlanner.epochLength * Double(SaverSessionPlanner.maxEpochLead)
+                for gap in [60, 3600, lead - 400, lead, lead + 3600, 3 * lead] {
+                    let label = "stopOrder=\(stopOrder) late by \(gap) s"
+                    let late = SaverMemorySessionStore()
+                    let lateStart = t0.addingTimeInterval(gap)
+                    var first = SimDisplay(ids: ids, at: t0, store: late)
+                    let second = SimDisplay(ids: ids, at: lateStart, store: late)
+                    try expect(!second.joined, label)
+                    first.show(step: 1, at: lateStart.addingTimeInterval(5), store: late)
+                    try expect(late.load()?.session == second.planned.session, "\(label): the first display replaced the newer session")
+                    let third = SimDisplay(ids: ids, at: lateStart.addingTimeInterval(10), store: late)
+                    try expect(third.joined && third.planned.session == second.planned.session && third.deck == second.deck,
+                               "\(label): a display joins the newest session")
+                    for display in stopOrder ? [first, second, third] : [third, second, first] {
+                        display.stop(at: lateStart.addingTimeInterval(60), store: late)
+                    }
+                    let record = try unwrap(late.load())
+                    let all = [first.scene(atStep: 0), first.scene(atStep: 1), second.scene(atStep: 0)]
+                    try expect(record.endedAt != nil && record.session == second.planned.session
+                               && all.allSatisfy { record.recent?.contains($0) == true }, "\(label): \(record)")
+                    let next = SaverSessionPlanner.plan(now: lateStart.addingTimeInterval(70), stored: record)
+                    try expect(!next.joined, label)
+                    let avoided = SaverDeck(ids: ids, mode: .shuffle, session: next.session).startAvoidSet
+                    try expect(Set(all).isSubset(of: avoided), "\(label): next lock avoids \(avoided), shown \(all)")
                 }
-                let record = try unwrap(late.load())
-                let all = [first.scene(atStep: 0), first.scene(atStep: 1), second.scene(atStep: 0)]
-                try expect(record.endedAt != nil && record.session == second.planned.session
-                           && all.allSatisfy { record.recent?.contains($0) == true }, "\(record)")
-                let next = SaverSessionPlanner.plan(now: t0.addingTimeInterval(130), stored: record)
-                try expect(!next.joined)
-                let avoided = SaverDeck(ids: ids, mode: .shuffle, session: next.session).startAvoidSet
-                try expect(Set(all).isSubset(of: avoided), "next lock avoids \(avoided), shown \(all)")
             }
             // No stored record (the store lost it): willstop still saves this display's, ended.
             let own = SaverSessionPlanner.plan(now: t0, stored: nil).record
@@ -283,7 +293,28 @@ extension SelfTests {
             try expect(b.joined && b.deck == a.deck)
             let damaged = SaverSessionRecord(epoch: .max, startedAt: 0, avoid: nil, lastShown: nil)
             let ancient = SaverSessionRecord(epoch: .min, startedAt: 0, avoid: nil, lastShown: nil)
-            try expect(!SaverSessionPlanner.isSession(damaged, newerThan: ancient) && !SaverSessionPlanner.isSession(ancient, newerThan: damaged))
+            try expect(!SaverSessionPlanner.isSession(damaged, newerThan: ancient, at: t)
+                       && !SaverSessionPlanner.isSession(ancient, newerThan: damaged, at: t))
+            // Newer is bounded by the clock, not by the gap to the other session: any later epoch
+            // short of `maxEpochLead` ahead of the clock is a newer session, one at or past it is not.
+            let old = SaverSessionRecord(epoch: clockEpoch - 3 * SaverSessionPlanner.maxEpochLead, startedAt: 0, avoid: nil, lastShown: nil)
+            for (epoch, newer) in [(clockEpoch, true), (clockEpoch + SaverSessionPlanner.maxEpochLead - 1, true),
+                                   (clockEpoch + SaverSessionPlanner.maxEpochLead, false), (old.epoch, false)] {
+                let record = SaverSessionRecord(epoch: epoch, startedAt: 0, avoid: nil, lastShown: nil)
+                try expect(SaverSessionPlanner.isSession(record, newerThan: old, at: t) == newer, "epoch \(epoch)")
+            }
+            // A running session stored ahead of the clock (written before the clock was moved back a
+            // day or more) is replaced by the new session's first scene, so the next display joins it.
+            for bad in [clockEpoch + SaverSessionPlanner.maxEpochLead, clockEpoch + 2 * SaverSessionPlanner.maxEpochLead] {
+                let ahead = SaverMemorySessionStore()
+                ahead.save(SaverSessionRecord(epoch: bad, startedAt: TimeInterval(bad) * SaverSessionPlanner.epochLength,
+                                              avoid: nil, lastShown: "a"))
+                let a = SimDisplay(ids: ids, at: t, store: ahead)
+                try expect(!a.joined && a.planned.session.epoch == clockEpoch, "epoch \(bad) → \(a.planned.session.epoch)")
+                try expect(ahead.load()?.session == a.planned.session, "epoch \(bad) kept in the store")
+                let b = SimDisplay(ids: ids, at: t.addingTimeInterval(2), store: ahead)
+                try expect(b.joined && b.deck == a.deck, "epoch \(bad)")
+            }
             // An epoch a little ahead (quick re-locks ran it past the clock) is still bumped past.
             let ahead = SaverSessionRecord(epoch: clockEpoch + 20, startedAt: 1_799_999_990, avoid: nil, lastShown: "a", endedAt: 1_799_999_995)
             let planned = SaverSessionPlanner.plan(now: t, stored: ahead)

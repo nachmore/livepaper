@@ -461,7 +461,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     private func rememberShown(_ id: String) {
         guard !gate.preview, var plan else { return }
         let store = SaverSessionStores.shared
-        let update = SaverSessionPlanner.recordShown(id, own: plan.record, stored: store.load())
+        let update = SaverSessionPlanner.recordShown(id, own: plan.record, stored: store.load(), now: Date())
         plan.record.noteShown(id)
         self.plan = plan
         if let update { store.save(update) }

@@ -175,10 +175,10 @@ enum SaverSessionPlanner {
         if let stored, stored.endedAt == nil, t - stored.startedAt >= -epochLength, t - stored.startedAt < joinWindow {
             return (stored.session, stored, true)
         }
-        var epoch = Int((t / epochLength).rounded(.down))
+        var epoch = clockEpoch(now)
         // A new session in the same 30 s epoch as an ended one still needs a different shuffle (and
         // so does one after quick re-locks ran the epoch ahead of the clock, up to `maxEpochLead`).
-        if let stored, epoch <= stored.epoch, stored.epoch < epoch + maxEpochLead { epoch = stored.epoch + 1 }
+        if let stored, epoch <= stored.epoch, isPlausible(stored.epoch, at: now) { epoch = stored.epoch + 1 }
         let start = t >= TimeInterval(epoch) * epochLength ? TimeInterval(epoch) * epochLength : t
         let recent = stored?.recent ?? (stored?.lastShown.map { [$0] } ?? [])
         let record = SaverSessionRecord(epoch: epoch, startedAt: start, avoid: stored?.lastShown, lastShown: nil,
@@ -186,26 +186,39 @@ enum SaverSessionPlanner {
         return (record.session, record, false)
     }
 
-    /// The record to save after a display put `id` on screen, or nil when there is nothing new.
-    /// `own` is the record of the session this display plays, `stored` what the shared store holds.
-    /// When the store holds the same session or a newer one, the scene goes into THAT record, so
-    /// displays never drop each other's history: one that skipped a failing scene, or one still in
-    /// the session a late display (> `joinWindow`) started after. Only an older record — the previous
-    /// session, when this display's session has just begun — is replaced by `own`.
-    static func recordShown(_ id: String, own: SaverSessionRecord, stored: SaverSessionRecord?) -> SaverSessionRecord? {
+    /// The record to save after a display put `id` on screen at `now`, or nil when there is nothing
+    /// new. `own` is the record of the session this display plays, `stored` what the shared store
+    /// holds. When the store holds the same session or a newer one, the scene goes into THAT record,
+    /// so displays never drop each other's history: one that skipped a failing scene, or one still in
+    /// the session a late display (> `joinWindow`, however much later) started after. Only an older
+    /// record — the previous session, when this display's session has just begun — or an implausible
+    /// one is replaced by `own`.
+    static func recordShown(_ id: String, own: SaverSessionRecord, stored: SaverSessionRecord?, now: Date) -> SaverSessionRecord? {
         var record = own
-        if let stored, stored.session == own.session || isSession(stored, newerThan: own) { record = stored }
+        if let stored, stored.session == own.session || isSession(stored, newerThan: own, at: now) { record = stored }
         guard record.lastShown != id else { return nil }
         record.noteShown(id)
         return record
     }
 
-    /// Whether `record` is a session that began after `other`'s: `plan` gives every new session a
-    /// later epoch than the stored one — unless that was more than `maxEpochLead` ahead, which this
-    /// treats as older too. Never overflows, whatever the records hold.
-    static func isSession(_ record: SaverSessionRecord, newerThan other: SaverSessionRecord) -> Bool {
-        let (gap, overflow) = record.epoch.subtractingReportingOverflow(other.epoch)
-        return !overflow && gap > 0 && gap < maxEpochLead
+    /// Whether `record` is a session that began after `other`'s, judged at `now`: `plan` gives every
+    /// new session a later epoch than the stored one, however long after it starts. A later epoch
+    /// that `plan` would not follow at `now` (`maxEpochLead` or more ahead of the clock: damaged, or
+    /// written before the clock was moved back) is not a newer session. The bound is the clock, not
+    /// the gap between the two sessions: a display that starts days into a session that never ended
+    /// (the Mac stayed locked over a weekend) begins a genuinely newer one. Never overflows.
+    static func isSession(_ record: SaverSessionRecord, newerThan other: SaverSessionRecord, at now: Date) -> Bool {
+        record.epoch > other.epoch && isPlausible(record.epoch, at: now)
+    }
+
+    /// The 30 s epoch `now` falls in.
+    static func clockEpoch(_ now: Date) -> Int { Int((now.timeIntervalSince1970 / epochLength).rounded(.down)) }
+
+    /// Whether a stored `epoch` is one `plan` follows at `now`: less than `maxEpochLead` ahead of the
+    /// clock. Never overflows, whatever the record holds.
+    static func isPlausible(_ epoch: Int, at now: Date) -> Bool {
+        let (bound, overflow) = clockEpoch(now).addingReportingOverflow(maxEpochLead)
+        return overflow || epoch < bound
     }
 
     /// The record to save when the saver stops (willstop), or nil when the store already says so.

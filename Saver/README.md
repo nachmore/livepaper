@@ -114,8 +114,9 @@ happen every `cycleMinutes` at wall-clock steps from the session start, so displ
 and a view that slept catches up. Changes crossfade (2 s; first reveal 0.6 s). Bookkeeping is a
 single blob in ScreenSaverDefaults (see the pitfalls in `SaverSupport.swift`); previews never write
 it. Each display adds the scenes it shows to the stored record when that record is its session or
-a newer one, and willstop marks the stored record ended, so displays writing in any order keep each
-other's history.
+a newer one (any later epoch, however long after its own session began — a display docked days into
+a lock that never ended — unless it is a day or more ahead of the clock), and willstop marks the
+stored record ended, so displays writing in any order keep each other's history.
 
 **Web scenes.** `loadHTMLString(_:baseURL: nil)` (scenes are self-contained; the sandboxed
 WebContent process couldn't read the bundle anyway), non-persistent data store, no navigation away
