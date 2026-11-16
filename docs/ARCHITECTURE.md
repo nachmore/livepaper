@@ -148,6 +148,11 @@ directories and inject fakes for commands, preferences and login items.
     .livepaper/                   stdout.log, stderr.log, last-message.txt (codex), render-spool/; agents keep out
     .kiro/agents/                 the restricted agent Kiro sessions run as
   Workspaces/.render-relay/<id>/  scenes compiled by the session runner for relayed render requests
+  Workspaces/.sessions/<id>/      the session's record (§10 "Session records and recovery"), next to its
+                                  workspace and outside every agent's reach: session.json, plus LivePaper's
+                                  copies of its images (ref-01.jpg …, asset.jpg|png: the picture to animate as
+                                  the scene got it) while it may still be reviewed; goes with its workspace
+  Workspaces/.sessions/.lock      flock: one change to a record at a time (app and CLI)
   state.json                      app → helper shared state (§4.4)
   playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes,
                                   displays: mode / per-display scenes / battery, §4.3), plus `displayNames`
@@ -649,6 +654,7 @@ livepaper ai create ["<prompt>"] [--ref <image|folder>]… [--animate <image>] [
                     [--command <template>] [--model <name>] [--timeout <minutes>] [--yes] [--json]
 livepaper ai modify <scene-id> ["<prompt>"] [--ref …]… [--animate <image>] …      (same options)
 livepaper ai harnesses [--json]
+livepaper ai sessions [--json]                     the last week's sessions (app and CLI) and what became of them
 livepaper server status|start|stop
 livepaper new <id> [--from <scene-id>] | list
 livepaper doctor [--no-ai] [--json] | select | uninstall [--yes] [--keep-scenes] [--dry-run]
@@ -689,6 +695,15 @@ live energy run (`--power`, battery profile: 30 fps, 75 %) → writes `.check/re
 coverage, regions, busy, flicker, map per size; + `reference` for animate scenes) + PNGs, prints a short
 summary for humans and agents (with the motion map when motion needs attention, and a `picture` line);
 exit 0 only if it passes.
+
+`ai sessions` lists the session records (§10), newest first: state (`running` — its agent runs and
+the app or CLI that started it is still there; `recovered` — a later LivePaper took it over and nobody
+has decided yet; `orphaned` — the agent runs but nothing watches it; `unreviewed` — finished or left
+behind without a decision; `accepted`, `discarded`, `failed`, `cancelled`), start, agent, request,
+the prompt's first line and the session id; a closing line says that LivePaper offers unreviewed and
+orphaned sessions for review the next time it starts. `--json`: an array of {id, state, origin,
+startedAt, finishedAt, request, sceneID, prompt, feedback, references (a count), harness, harnessName,
+model, workspace, agentPID (while it runs), outcome, message, acceptedID}.
 
 `ai create|modify` without `--ref`/`--animate` prints a note (a `note` event with `--json`) for up to
 3 image or folder paths typed into the prompt, suggesting `--ref`/`--animate`: the agent can't open
@@ -897,11 +912,15 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   variables set, refuses every other command (exit 2) and any scene path or `--out` outside the
   workspace (symlinks resolved). So `uninstall`, `publish`, `import`, `new`, nested `ai` sessions
   and `server` control are out of reach whatever the harness's own rules let through.
-* **Flow:** create/modify → workspace → harness → stdout parsed into events (text, tool calls) and
-  `scene/.check/*.png` reported as stills while the agent iterates (again each time a later check
-  rewrites a file; the session view reloads that tile) → on exit LivePaper runs the
+* **Flow:** create/modify → workspace (+ the session's record) → harness → stdout parsed into events
+  (text, tool calls) and `scene/.check/*.png` reported as stills while the agent iterates (again each
+  time a later check rewrites a file; the session view reloads that tile) → on exit LivePaper runs the
   check itself (never trusts the agent's word) → preview → "Add to library" / "Replace" (modify keeps
-  history; previous version kept in `history/`).
+  history; previous version kept in `history/`). Every accept — the app's, a recovered session's,
+  `livepaper ai`'s — goes through `AICandidate.accept`: a created scene's id is its name's slug
+  (`SceneManifest.slug`, made unique by the library) whatever the candidate's scene.json says (the
+  template's "quiet-aurora", an id the agent typed), a modified one keeps its id; the history entry is
+  the one the session's finish wrote (`create`/`modify`, harness, model, prompt, summary, reference counts).
 * **Stopping:** the harness runs in its own process group, which doesn't die with LivePaper. Cancel
   and the timeout send SIGTERM to the group and SIGKILL 3 s later; whatever the harness leaves in
   its group when it exits gets 1 s. `AISessionTerminating.terminateNow(grace:)` does the same
@@ -918,6 +937,63 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   SIGHUP (terminal closed) does the same and exits 129. A signal the CLI was started with ignored
   (SIGHUP under `nohup`) stays ignored, and the previous dispositions are restored once the
   session ends (before the accept prompt).
+* **Session records and recovery** (`AI/AISessionRecord.swift`, `AI/AISessionRecovery.swift`). A
+  crash, a force quit or a restart of the app (or a killed `livepaper ai`) leaves the agent running in
+  its own process group with nobody to read its output, check its scene or stop it. So each session
+  has a record, `<Workspaces>/.sessions/<id>/session.json` (§4.1) — next to the workspace, not in it: a
+  Codex sandbox and a custom command can write anywhere in their workspace, and the record says which
+  process group a later LivePaper may stop and which picture it puts back; and the names it shows stay
+  out of the agent's view. The runner (app or CLI) writes it as the session goes (`AISessionRecordStore`,
+  read-modify-write under `.sessions/.lock`; decoded field by field, a damaged field gets its default,
+  an unknown resolution counts as decided): `request` (create / modify + `sceneID`), `prompt` (as
+  TASK.md has it: attached paths already `references/ref-NN…`, earlier feedback included — what
+  history records), `feedback` (the chain, oldest first), `references` (role, the name the app shows —
+  the file's base name, never a path —, workspace path `references/ref-01.jpg`, format, size, the
+  summary) and `animate` (asset path, SHA-256, size, transparent/flattened), `harness` (kind, name,
+  executable, version, a custom template), `model`, `timeout`, `clonedFrom`, `sceneBefore` (SHA-256 of
+  scene.js as LivePaper left it: the template or the scene being changed), `startedAt`, `runner` and
+  `agent` (pid, process group, kernel start time from `proc_pidinfo(PROC_PIDTBSDINFO)` — what tells the
+  process from a later one with the same pid), `finishedAt`, `outcome` (passed / failed / cancelled, the
+  message, whether LivePaper's check passed and its first problems), `resolution` (accepted with the
+  scene id / discarded: Discard, Try Again, a declined CLI prompt, or LivePaper for a session in which
+  nothing happened) and `recoveredAt`. Written before the agent starts, with LivePaper's copies of the
+  vision images and the picture to animate; the agent's facts once it is spawned; the outcome when the
+  session ends (failed or cancelled: the copies go); the resolution when the user decides (the copies go).
+  At launch the app calls `AIServicing.recoverSessions` (off the main thread, after pruning, below), which
+  decides each record (`AISessionRecovery.decide`) and claims the ones it takes over — runner := the app,
+  `recoveredAt` — in the same locked step, so two LivePapers launched together never both take one:
+  * resolved, failed or cancelled → left alone; its runner still runs (the CLI in its terminal, another
+    copy of LivePaper) → left alone; its workspace is gone → left alone (pruning removes the record);
+  * the agent still runs — the pid exists **and** its start time and group are the recorded ones →
+    *watched*: "Still working (recovered)" with no transcript (its output went to the old pipe), the
+    stills as usual (`scene/.check/` polled), the render relay again for a sandboxed agent, the time limit
+    counted from `startedAt` (past it: stopped as at the timeout), and its exit noticed by a
+    `DispatchSource.makeProcessSource(.exit)` on the pid — no polling; it fires at once for a process
+    already gone. Then whatever is left in its group gets `leftoverGrace` (a group id isn't reused while
+    anything is in it), and the rest is exactly a normal session's: links refused, the picture to animate
+    put back from LivePaper's copy, LivePaper's check (with that picture as the reference), the candidate
+    normalised (id from the name, the history entry). The exit status isn't known (only the parent gets
+    it): the check alone judges;
+  * the agent is gone (or its pid belongs to another process now) and scene.js differs from `sceneBefore`
+    (or the record doesn't say) → the same check now, with "Recovered: <agent> finished while LivePaper
+    wasn't running." — also for a session that passed but was never decided (finishing again is
+    idempotent: the candidate keeps one history entry);
+  * gone and unchanged → discarded quietly (resolution `discarded`; the workspace goes with the pruning).
+  A recovered session's picture to animate is checked against LivePaper's copy (its SHA-256 must match);
+  without it the session fails ("LivePaper no longer has its copy of the picture to animate…"). Its
+  images for the app (thumbnails, Try Again) are rebuilt from the copies without decoding or opening any
+  original (`AISessionRecovery.preparedReferences`: the copy as the vision image, the picture to animate's
+  copy as its master). **Stopping** a recovered agent (Stop, Stop All, Discard, the time limit, quitting,
+  uninstalling) goes through `AttachedAgent`: SIGTERM to its group only while the pid is still the
+  recorded process, SIGKILL 3 s later; `terminateNow` the same synchronously. Nothing ever signals a
+  process whose start time doesn't match the record. Uninstall also runs
+  `AIServicing.stopOrphanedAgents` after stopping the app's own: agents whose runner is gone that no
+  session watches (orphaned since this launch), matched the same way. **Pruning**
+  (`WorkspaceBuilder.pruneWorkspaces`, once per run: at the app's recovery or the first session, and when
+  the app drops expired sessions) treats a session as old as its workspace or its record's `startedAt`,
+  whichever is older; a record goes with its workspace, a record without one goes too; an unreviewed
+  recovered session goes after the same 7 days; a workspace whose agent still runs, or whose runner is
+  still at work on it (no outcome yet), is never deleted; settled records lose their copies.
 * **A session fails when:** the harness can't be found or the template is invalid; it is cancelled
   ("Cancelled."); it runs past the timeout (`AISettings.timeoutMinutes`, default 20, clamped
   1–240; the process group is killed); it exits non-zero (message = exit status/signal + last stderr
@@ -928,7 +1004,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
 
 ## 11. App UX (`Sources/LivePaperApp`)
 * **Menu-bar extra:** Lock Now (shows the extra shortcut) · what the screen saver plays · Next
-  Scene · AI jobs (open / stop all) · Open LivePaper · Settings… · Quit.
+  Scene · AI jobs (open / stop all; running and waiting-for-review sessions, recovered ones marked
+  "(recovered)", and Stop All stops their agents too) · Open LivePaper · Settings… · Quit.
   Lock Now posts `lockNow` and falls back to ScreenSaverEngine after 1 s (§7). While the password
   isn't required immediately, Lock Now is disabled with a one-line explanation and an "Open Lock
   Screen Settings…" item (the status is re-read when the user leaves System Settings).
@@ -938,6 +1015,19 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     Clone, Modify with AI…, Export, Delete, check report and provenance.
   * *Create* — **Video** (drop a file; optional "optimise for battery" HEVC transcode) and
     **Describe it** (prompt, agent + model picker, reference images) → live session view.
+  * *AI Sessions* (sidebar, newest first; Stop / Close Session in the context menu). **Recovered
+    sessions** (§10 "Session records and recovery"; `AppModel.recoverSessions` in `start()`, after the
+    library loads) join the list with a "Recovered" badge (also in the session header) and one banner
+    ("Recovered an AI session" / "Recovered 3 AI sessions", Show). One whose agent still runs reads "Still
+    working (recovered)", shows the agent's renders but no transcript (the decision panel says why), and
+    counts as a running AI job (quitting waits for it like for any agent; `hasAgentsToStop`); its time
+    limit is the one it started with, from when it started. One whose agent had finished is checked at
+    once. Either ends in the normal review: Preview Full Screen, Add to Library / Replace, Try Again with
+    Feedback (same harness, model and references — rebuilt from LivePaper's copies — and the feedback
+    chain grows: `AISessionModel.feedback`), Discard. Accept, Discard and Try Again write the record's
+    resolution, so a session is never offered twice. Sessions (recovered or not) that aren't running and
+    started more than the workspace retention (7 days) ago leave the list (`expireOldSessions`, at
+    recovery and on each refresh from disk — the app becoming active) and their workspaces are pruned.
   * *Reference images* (`Views/Create/ReferenceTrayView.swift` over `Logic/ReferenceTray.swift`;
     the Describe-it card, between the prompt and the ideas, and — with smaller tiles — the Modify
     with AI sheet). Ways in: ⌘V in the prompt box (`Views/Common/PromptTextView.swift`, an
@@ -1143,6 +1233,7 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   data to PNGs and exits (`.prohibited` activation policy, off-screen windows, no live previews);
   `create-references-light`, `modify-references-dark` and `session-references-light` show the
   reference tray, the sheet's compact tray and a session's references with generated pictures;
+  `session-recovered-dark` a recovered session whose agent still runs (`MockAIService.recoveredRunningSession`);
   `playlist-displays-choose-light`, `playlist-displays-span-dark` and `playlist-displays-single-light`
   the Multiple displays section with mock displays (`MockSampleData.displays`: a built-in 1512×982
   display with the menu bar and a 2560×1440 one to its right, made-up ids; mock mode uses them too).

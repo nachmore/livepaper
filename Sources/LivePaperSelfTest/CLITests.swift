@@ -766,6 +766,56 @@ extension SelfTests {
             try expectEqual(try sb.run(["ai", "modify", "missing", "make it blue", "--command", agent.path]).status, 1)
             try expectEqual(try sb.run(["ai", "dance"]).status, 2)
         },
+        cliTest("cli.ai.sessions") { sb in
+            // `livepaper ai` keeps the same session record as the app (next to the workspace), and
+            // `ai sessions` lists what became of each.
+            let agent = try CLITestSupport.writeScript(sb.root.appendingPathComponent("tools/record-agent"), """
+            #!/bin/sh
+            echo '// v2' > scene/scene.js
+
+            """)
+            var r = try sb.run(["ai", "create", "a calm black screen", "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)   // the check can't render here
+            let started = r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }.first
+            let id = try SelfTests.unwrap(started?["session"] as? String)
+            let recordURL = sb.support.appendingPathComponent("Workspaces/.sessions/\(id)/session.json")
+            let record = try SelfTests.unwrap(AISessionRecord.decode(try Data(contentsOf: recordURL)))
+            try expectEqual(record.origin, .cli)
+            try expectEqual(record.prompt, "a calm black screen")
+            try expectEqual(record.outcome?.status, .failed)
+            try expect(record.agent != nil && record.runner != nil, "the CLI and its agent are on record")
+            try expect(!FileManager.default.fileExists(atPath: sb.support.appendingPathComponent("Workspaces/\(id)/.livepaper/session.json").path))
+            // One the app should offer for review: its runner is gone, it never got a decision.
+            var left = AISessionRecord(id: "20261116T080000Z-feed01", origin: .app,
+                                       runner: LPProcessFacts(pid: getpid(), group: getpgrp(), start: LPProcessStart(seconds: 1, microseconds: 0)),
+                                       request: .modify(sceneID: "lake", prompt: "Make the water move more\nwith detail"),
+                                       harness: AIHarness(kind: .claude, name: "Claude Code", executable: "/x/claude"), model: nil, timeout: 1200,
+                                       startedAt: Date().addingTimeInterval(-3_600))
+            left.outcome = .init(status: .passed, checkPassed: true)
+            try FileManager.default.createDirectory(at: sb.support.appendingPathComponent("Workspaces/\(left.id)/scene"), withIntermediateDirectories: true)
+            let leftURL = sb.support.appendingPathComponent("Workspaces/.sessions/\(left.id)/session.json")
+            try FileManager.default.createDirectory(at: leftURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try AISessionRecord.encoder().encode(left).write(to: leftURL)
+
+            r = try sb.run(["ai", "sessions", "--json"])
+            try expectEqual(r.status, 0)
+            let rows = try CLITestSupport.jsonArray(r.out)
+            try expectEqual(rows.map { $0["id"] as? String ?? "" }, [id, left.id])
+            try expectEqual(rows.map { $0["state"] as? String ?? "" }, ["failed", "unreviewed"])
+            try expectEqual(rows.first?["origin"] as? String, "cli")
+            try expectEqual(rows.last?["request"] as? String, "modify")
+            try expectEqual(rows.last?["sceneID"] as? String, "lake")
+            try expectEqual(rows.last?["harnessName"] as? String, "Claude Code")
+            r = try sb.run(["ai", "sessions"])
+            try expectEqual(r.status, 0)
+            let lines = r.out.split(separator: "\n").map(String.init)
+            try expect(lines.first?.hasPrefix("STATE") == true, r.out)
+            try expect(lines.contains { $0.hasPrefix("failed") && $0.contains("a calm black screen") && $0.hasSuffix(id) }, r.out)
+            try expect(lines.contains { $0.hasPrefix("unreviewed") && $0.contains("modify lake") && $0.contains("Make the water move more") &&
+                                        !$0.contains("with detail") }, r.out)
+            try expect(r.out.contains("offers unreviewed and orphaned sessions for review the next time it starts"), r.out)
+            try expectEqual(try sb.run(["ai", "sessions", "extra"]).status, 2)
+        },
         cliTest("cli.ai.terminal") { sb in
             // Regression: in a terminal (here script(1)'s pty is the CLI's controlling terminal), the
             // interactive login-shell probe was stopped by SIGTTOU: every `livepaper ai …` stalled
