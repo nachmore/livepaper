@@ -602,7 +602,18 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   * *Scene detail* — full live preview (16:10 and 32:9), Use as Screen Saver / Add to Playlist,
     Clone, Modify with AI…, Export, Delete, check report and provenance.
   * *Create* — **Video** (drop a file; optional "optimise for battery" HEVC transcode) and
-    **Describe it** (prompt, agent + model picker) → live session view.
+    **Describe it** (prompt, agent + model picker, reference images) → live session view.
+  * *Reference images* (`Logic/ReferenceTray.swift`; the Describe-it card and the Modify with AI
+    sheet): images, folders and pasted/dropped image data are prepared when added — off the main
+    thread, one at a time — so starting the session only hands over bytes; at most 10 (failed ones
+    don't count), duplicates by real path skipped, one "Animate this image" (choosing it for one
+    demotes the other), a note for whatever was left out. Paths typed into the prompt are offered
+    as "Attach" suggestions (never attached silently; paths in Desktop/Documents/Downloads/iCloud
+    Drive/volumes aren't looked at until clicked, so typing never raises a privacy prompt).
+    `ReferencePasteRules` decides whether ⌘V is images (a screenshot, Finder copies of images or
+    folders, Safari's Copy Image) or text; `ReferenceDropReader` turns drops into files, image data
+    or — for web URLs — a note (nothing is downloaded). A session keeps its prepared references, so
+    Try Again / Try Again with Feedback / Start Again reuse them (`AppModel.retry`).
   * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a
     publish that left scenes out lists them with the reason (and a banner says so).
 * **Full-screen preview** (`Views/FullScreen/`): one borderless black window on one screen (the

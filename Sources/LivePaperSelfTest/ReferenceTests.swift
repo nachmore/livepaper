@@ -40,6 +40,11 @@ extension SelfTests {
     static var referenceApp: [TestCase] { [
         TestCase(name: "app.model.ai-references-retry") { try ReferenceTests.appRetry() },
         TestCase(name: "app.provenance.references") { try ReferenceTests.appProvenance() },
+        TestCase(name: "app.references.tray") { try ReferenceTests.tray() },
+        TestCase(name: "app.references.suggestions") { try ReferenceTests.traySuggestions() },
+        TestCase(name: "app.references.paste-rules") { try ReferenceTests.pasteRules() },
+        TestCase(name: "app.references.drop-reader") { try ReferenceTests.dropReader() },
+        TestCase(name: "app.ai.prompts.references") { try ReferenceTests.promptsWithReferences() },
     ] }
 }
 
@@ -1084,5 +1089,193 @@ enum ReferenceTests {
         let entries = ProvenanceLog.parse(Data(lines.utf8))
         try expectEqual(entries.map(\.referenceCount), [3, 1, nil])
         try expectEqual(entries.map(\.referencesText), ["3 reference images (1 animated)", "1 picture animated", nil])
+    }
+
+    // MARK: - The tray (app logic)
+
+    /// A prepare that doesn't decode: every input becomes a copy of one real prepared image named
+    /// like the input ("bad…" fails; `gate` holds each call until released).
+    final class FakePrepare: @unchecked Sendable {
+        let template: PreparedReference
+        let gate: DispatchSemaphore?
+        private let lock = NSLock()
+        private var calls = 0
+        init(template: PreparedReference, gate: DispatchSemaphore? = nil) { self.template = template; self.gate = gate }
+        var count: Int { lock.withLock { calls } }
+        func callAsFunction(_ input: ReferenceInput) throws -> PreparedReference {
+            lock.withLock { calls += 1 }
+            gate?.wait()
+            if input.displayName.hasPrefix("bad") { throw ReferenceError.unsupported(name: input.displayName, kind: "Plain Text") }
+            var path: String?
+            if case .file(let u) = input.source { path = u.path }
+            return PreparedReference(role: input.role, displayName: input.displayName, requestedPath: path, originPath: path,
+                                     original: template.original, master: template.master, vision: template.vision, summary: template.summary)
+        }
+    }
+
+    static func trayTemplate(_ dir: URL) throws -> PreparedReference {
+        try prepare(write(png(ReferenceFixtures.photo(.flowers, width: 60, height: 40)), dir.appendingPathComponent("template.png")))
+    }
+
+    static func tray() throws {
+        let dir = try tempDir("tray").resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let fake = FakePrepare(template: try trayTemplate(dir))
+        let dot = png(ReferenceFixtures.photo(.city, width: 30, height: 20))
+        let many = try (1...12).map { try write(dot, dir.appendingPathComponent("many/img\($0).png")) }
+        try MainActor.assumeIsolated {
+            // A folder over the limit: the first 10 (Finder order), and a note.
+            let tray = ReferenceTray(prepare: { try fake($0) })
+            tray.addFiles([dir.appendingPathComponent("many")])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.activeCount, 10); try expectEqual(tray.remainingCapacity, 0)
+            try expectEqual(tray.items.map(\.displayName), (1...10).map { "img\($0).png" })
+            try expectEqual(tray.notes, ["Left out 2 more images (the limit is 10 per session)."])
+            try expect(tray.items.allSatisfy { if case .ready = $0.state { return true }; return false })
+            tray.addFiles([many[11]])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.activeCount, 10)
+            try expectEqual(tray.notes.last, "Left out 1 more image (the limit is 10 per session).")
+            tray.dismissNote(at: 0)
+            try expectEqual(tray.notes.count, 1)
+            tray.clear()
+            try expect(tray.isEmpty && tray.notes.isEmpty && tray.summaryText.isEmpty)
+
+            // Duplicates (by real path, also through a link), roles, removal, failures, pasted data.
+            let link = dir.appendingPathComponent("link.png")
+            try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: many[0].path)
+            let bad = try write(Data("x".utf8), dir.appendingPathComponent("bad.png"))
+            tray.addFiles([many[0], many[1]])
+            tray.addFiles([link, many[1], bad])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.items.map(\.displayName), ["img1.png", "img2.png", "bad.png"])
+            try expect(tray.notes.contains { $0.contains("2 images that were already attached") }, "\(tray.notes)")
+            try expect(tray.items[2].isFailed && tray.activeCount == 2, "failures don't count")
+            if case .failed(let why) = tray.items[2].state { try expect(why.contains("bad.png"), why) }
+            try expectEqual(tray.references.map(\.displayName), ["img1.png", "img2.png"])
+            tray.setRole(.animate, for: tray.items[0].id)
+            try expectEqual(tray.summaryText, "2 images \u{00B7} 1 to animate")
+            tray.setRole(.animate, for: tray.items[1].id)
+            try expectEqual(tray.items.map(\.role), [.reference, .animate, .reference])   // the other one was demoted
+            try expectEqual(tray.references.map(\.role), [.reference, .animate])
+            tray.remove(tray.items[0].id)
+            try expectEqual(tray.references.map(\.displayName), ["img2.png"])
+            tray.add([ReferenceInput(source: .data(dot, typeIdentifier: "public.png"), role: .reference, displayName: ReferenceTray.pastedName),
+                      ReferenceInput(source: .data(dot, typeIdentifier: "public.png"), role: .reference, displayName: ReferenceTray.pastedName)])
+            tray.add([ReferenceInput(source: .data(dot, typeIdentifier: nil), role: .reference, displayName: ReferenceTray.droppedName)], animate: true)
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.items.map(\.displayName), ["img2.png", "bad.png", "Pasted image 1", "Pasted image 2", "Dropped image 1"])
+            try expectEqual(tray.items.last?.role, .animate)
+            try expectEqual(tray.items.first?.role, .reference)
+            try expectEqual(tray.items.last?.originPath, nil)
+        }
+
+        // Preparing: visible while it runs, one image at a time.
+        let gate = DispatchSemaphore(value: 0)
+        let slow = FakePrepare(template: try trayTemplate(dir), gate: gate)
+        try MainActor.assumeIsolated {
+            let tray = ReferenceTray(prepare: { try slow($0) })
+            tray.addFiles([many[2], many[3]])
+            try SelfTests.awaitMain(until: { tray.items.count == 2 && slow.count == 1 })
+            try expect(tray.isPreparing && tray.references.isEmpty)
+            try expectEqual(tray.items.map(\.isPreparing), [true, true])
+            gate.signal()
+            try SelfTests.awaitMain(until: { slow.count == 2 })
+            try expectEqual(tray.items.map(\.isPreparing), [false, true])
+            gate.signal()
+            try SelfTests.awaitMain { await tray.settled() }
+            try expect(!tray.isPreparing && tray.references.count == 2)
+        }
+    }
+
+    final class ResolveLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var paths: [String] = []
+        func record(_ p: String) { lock.withLock { paths.append(p) } }
+        var all: [String] { lock.withLock { paths } }
+    }
+
+    static func traySuggestions() throws {
+        let dir = try tempDir("tray-suggest").resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let home = dir.appendingPathComponent("home")
+        let fake = FakePrepare(template: try trayTemplate(dir))
+        let image = try write(png(ReferenceFixtures.photo(.lake, width: 30, height: 20)), dir.appendingPathComponent("shots/heron.png"))
+        let second = try write(png(ReferenceFixtures.photo(.lake, width: 30, height: 20)), dir.appendingPathComponent("shots/egret.png"))
+        let folder = dir.appendingPathComponent("shots")
+        let log = ResolveLog()
+        try MainActor.assumeIsolated {
+            let tray = ReferenceTray(prepare: { try fake($0) }, resolve: { m in log.record(m.url.path); return PromptPaths.resolve(m) }, home: home)
+            let prompt = "animate \(image.path), style from \(folder.path)/ and ~/Desktop/secret.png, not \(dir.path)/nope.png"
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: prompt) }
+            try expectEqual(tray.suggestions.map(\.url.path), [image.path, folder.path, home.appendingPathComponent("Desktop/secret.png").path])
+            try expectEqual(tray.suggestions.map(\.kind), [.image, .folder, .image])
+            try expect(!log.all.contains { $0.contains("/Desktop/") }, "protected paths aren't looked up while typing: \(log.all)")
+            // Dismissed ones stay away.
+            tray.dismiss(tray.suggestions[1])
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: prompt) }
+            try expectEqual(tray.suggestions.map(\.url.lastPathComponent), ["heron.png", "secret.png"])
+            // Attach: looked up on the click; attached ones are no longer suggested.
+            tray.attach(tray.suggestions[0])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.items.map(\.displayName), ["heron.png"])
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: prompt) }
+            try expectEqual(tray.suggestions.map(\.url.lastPathComponent), ["secret.png"])
+            // Missing on click: a note.
+            tray.attach(tray.suggestions[0])
+            try SelfTests.awaitMain { await tray.settled() }
+            try expect(tray.notes.contains("\u{201C}secret.png\u{201D} wasn't found; check the path in the prompt."), "\(tray.notes)")
+            // "Animate It".
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "and \(second.path)") }
+            tray.attach(try SelfTests.unwrap(tray.suggestions.first), animate: true)
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.items.map(\.role), [.reference, .animate])
+        }
+    }
+
+    static func pasteRules() throws {
+        typealias R = ReferencePasteRules
+        try expectEqual(R.classify(itemTypes: [["public.png", "public.tiff"]], fileURLs: []), .images)            // a screenshot
+        let finder = [["public.file-url", "public.utf8-plain-text", "com.apple.icns", "public.tiff"]]
+        try expectEqual(R.classify(itemTypes: finder, fileURLs: [URL(fileURLWithPath: "/tmp/heron.png")]), .images)
+        try expectEqual(R.classify(itemTypes: finder, fileURLs: [URL(fileURLWithPath: "/tmp/refs", isDirectory: true)]), .images)
+        try expectEqual(R.classify(itemTypes: finder, fileURLs: [URL(fileURLWithPath: "/tmp/notes.txt")]), .text)   // the icon doesn't count
+        try expectEqual(R.classify(itemTypes: [["public.rtf", "com.apple.flat-rtfd", "public.utf8-plain-text", "public.tiff"]], fileURLs: []), .text)
+        try expectEqual(R.classify(itemTypes: [["com.apple.webarchive", "public.tiff", "public.url", "public.utf8-plain-text"]], fileURLs: []), .images)
+        try expectEqual(R.classify(itemTypes: [["public.utf8-plain-text"]], fileURLs: []), .text)                 // a typed path
+        try expectEqual(R.classify(itemTypes: [], fileURLs: []), .text)
+        try expectEqual(R.imageType(in: ["public.utf8-plain-text", "public.jpeg", "public.png"]), "public.jpeg")
+    }
+
+    static func dropReader() throws {
+        let dir = try tempDir("drop").resolvingSymlinksInPath()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let file = try write(png(ReferenceFixtures.photo(.portrait, width: 40, height: 50)), dir.appendingPathComponent("face.png"))
+        let pngData = png(ReferenceFixtures.photo(.city, width: 40, height: 30))
+        let fileProvider = NSItemProvider(object: file as NSURL)
+        let dataProvider = NSItemProvider()
+        dataProvider.registerDataRepresentation(forTypeIdentifier: UTType.png.identifier, visibility: .all) { done in done(pngData, nil); return nil }
+        let webProvider = NSItemProvider(object: URL(string: "https://example.com/photo.jpg")! as NSURL)
+        // NSItemProvider may answer on the main queue: keep the main run loop going while waiting.
+        var read: (inputs: [ReferenceInput], notes: [String])?
+        try SelfTests.awaitMain { read = await ReferenceDropReader.inputs(from: [fileProvider, dataProvider, webProvider, webProvider]) }
+        let result = try SelfTests.unwrap(read)
+        try expectEqual(result.inputs.count, 2)
+        try expectEqual(result.inputs[0].source, .file(file))
+        try expectEqual(result.inputs[1].source, .data(pngData, typeIdentifier: UTType.png.identifier))
+        try expectEqual(result.inputs[1].displayName, ReferenceTray.droppedName)
+        try expectEqual(result.notes, [ReferenceDropReader.webNote])
+        try expect(ReferenceDropReader.acceptedTypes.contains(.fileURL) && ReferenceDropReader.acceptedTypes.contains(.image))
+    }
+
+    static func promptsWithReferences() throws {
+        try expect(PromptComposer.isUsable("", hasReferences: true))
+        try expect(PromptComposer.isUsable("fog", hasReferences: true))
+        try expect(!PromptComposer.isUsable("fog", hasReferences: false))
+        try expect(PromptComposer.isUsable("A calm aurora", hasReferences: false))
+        try expect(PromptComposer.effectivePrompt("  ", roles: [.reference, .animate]).hasPrefix("Bring the attached picture to life"))
+        try expectEqual(PromptComposer.effectivePrompt("", roles: [.reference]), "Create a scene inspired by the attached reference images.")
+        try expectEqual(PromptComposer.effectivePrompt(" more fog ", roles: [.animate]), "more fog")
+        try expectEqual(PromptComposer.effectivePrompt("", roles: []), "")
     }
 }
