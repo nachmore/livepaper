@@ -45,6 +45,12 @@ struct AppEnvironment {
     /// The login session is locked right now (any thread; live: CGSSessionScreenIsLocked). The
     /// installed saver is never swapped under a running lock screen.
     var isSessionLocked: @Sendable () -> Bool = { false }
+    /// The connected displays, keyed and arranged as the saver sees them (live: Entry/DisplayProbe,
+    /// NSScreen.screens; mock mode: MockSampleData.displays; tests: none unless a test injects some).
+    var connectedDisplays: @MainActor () -> [LPDisplay] = { [] }
+    /// Calls the handler on the main actor whenever the displays change (connected, disconnected,
+    /// rearranged) until the returned closure cancels it. Live: DisplayProbe; mock mode and tests: never.
+    var observeDisplays: @MainActor (@escaping @MainActor () -> Void) -> (@MainActor () -> Void) = { _ in {} }
 
     static let onboardingCompletedKey = "onboardingCompleted"
 }
@@ -217,6 +223,11 @@ final class AppModel {
     /// read shows it running.
     @ObservationIgnored private var helperBanners: Set<UUID> = []
     private(set) var isLocking = false
+    /// The connected displays in the saver's order (AppEnvironment.connectedDisplays), for the Screen
+    /// Saver screen's "Multiple displays" section and the playlist summary. Read at start and on
+    /// every change the environment reports.
+    private(set) var displays = LPDisplayLayout([])
+    @ObservationIgnored private var cancelDisplayObservation: (@MainActor () -> Void)?
 
     // AI
     private(set) var harnesses: [AIHarness] = []
@@ -242,6 +253,8 @@ final class AppModel {
     func start() async {
         // Before the first read, so nothing changed during the initial load goes unnoticed.
         startWatchingDisk()
+        startObservingDisplays()
+        refreshDisplays()
         await clearPreviewCache()
         async let lib: Void = reloadLibrary()
         async let pl: Void = loadPlaylist()
@@ -438,6 +451,9 @@ final class AppModel {
     func delete(_ id: String) async {
         let library = services.library
         let name = entry(id: id)?.manifest.name ?? id
+        // A display it was chosen for keeps the choice (the Screen Saver screen shows "Scene deleted")
+        // and plays the playlist once the saver is published without it.
+        let assigned = PlaylistDraft(playlist).effectiveAssignments(available: availableSceneIDs).values.contains(id)
         do {
             try await offMain { try library.delete(id: id) }
             libraryPath.removeAll { $0 == id }
@@ -446,6 +462,8 @@ final class AppModel {
                 var s = playlist
                 s.sceneIDs.removeAll { $0 == id }
                 await savePlaylist(s, announce: false)
+            } else if assigned {
+                await republishQuietly()
             }
             banners.post(.success, "Deleted \u{201C}\(name)\u{201D}")
         } catch {
@@ -524,11 +542,17 @@ final class AppModel {
     }
 
     /// The saver plays the copies compiled when the playlist was published, so a scene in the
-    /// playlist whose contents changed is published again (quietly; a scene that is no longer
-    /// playable is still reported). Nothing happens while the saver isn't installed.
+    /// playlist (or chosen for a display) whose contents changed is published again (quietly; a scene
+    /// that is no longer playable is still reported). Nothing happens while the saver isn't installed.
     private func republishIfInPlaylist(_ id: String) async {
+        guard isShownBySaver(id) else { return }
+        await republishQuietly()
+    }
+
+    /// Publishes the current settings again, quietly, when the saver is installed.
+    private func republishQuietly() async {
         if !installStatusLoaded { await refreshInstallStatus() }
-        guard installStatus.saverInstalled, isInPlaylist(id) else { return }
+        guard installStatus.saverInstalled else { return }
         await savePlaylist(playlist, announce: false)
     }
 
@@ -629,12 +653,32 @@ final class AppModel {
     // MARK: - Playlist / publishing
 
     var playlistSummary: String {
-        PlaylistDraft.summary(playlist, available: availableSceneIDs, names: sceneNames)
+        PlaylistDraft.summary(playlist, available: availableSceneIDs, names: sceneNames, displays: displays)
     }
 
-    /// Whether the saver will show this scene with the current settings.
+    /// Whether the saver will play this scene as part of the playlist with the current settings.
     func isInPlaylist(_ id: String) -> Bool {
         PlaylistDraft(playlist).effectiveSceneIDs(available: availableSceneIDs).contains(id)
+    }
+
+    /// Whether the saver has this scene: in the playlist, or chosen for a display ("Choose per
+    /// display" publishes those scenes too).
+    func isShownBySaver(_ id: String) -> Bool {
+        isInPlaylist(id) || PlaylistDraft(playlist).effectiveAssignments(available: availableSceneIDs).values.contains(id)
+    }
+
+    // MARK: - Displays
+
+    /// Re-reads the connected displays (start, and every change the environment reports).
+    func refreshDisplays() {
+        let next = LPDisplayLayout(environment.connectedDisplays())
+        if next != displays { displays = next }
+    }
+
+    /// Idempotent: `start()` may run more than once.
+    private func startObservingDisplays() {
+        guard cancelDisplayObservation == nil else { return }
+        cancelDisplayObservation = environment.observeDisplays { [weak self] in self?.refreshDisplays() }
     }
 
     func loadPlaylist() async {
@@ -703,7 +747,7 @@ final class AppModel {
     /// publishes (the saver won't play them); otherwise `announce` posts the success banner.
     private func reportPublish(_ result: PublishResult, announce: Bool) {
         lastPublishResult = result
-        let n = result.playlist.scenes.count
+        let n = result.playlist.scenes.count + result.playlist.displayScenes.count   // display-only scenes are published too
         let published = n == 1 ? "1 scene published" : "\(n) scenes published"
         if !result.skipped.isEmpty {
             let skipped = result.skippedScenes

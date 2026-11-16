@@ -210,7 +210,7 @@ struct PlaylistView: View {
     private var statusText: String {
         if hasChanges { return "Unsaved changes \u{2014} " + PlaylistDraft.summary(draft.settings, available: available, names: model.sceneNames) }
         if let result = model.lastPublishResult {
-            let n = result.playlist.scenes.count
+            let n = result.playlist.scenes.count + result.playlist.displayScenes.count
             let left = result.skipped.count
             return "Published \u{00B7} " + (n == 1 ? "1 scene" : "\(n) scenes") + (left > 0 ? " \u{00B7} \(left) left out" : "")
         }

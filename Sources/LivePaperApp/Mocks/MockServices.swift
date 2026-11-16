@@ -281,20 +281,50 @@ final class MockPublishService: PublishServicing, @unchecked Sendable {
         let byID = Dictionary(scenes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let chosen = PlaylistDraft(s).effectiveSceneIDs(available: scenes.map(\.id))
         guard !chosen.isEmpty else { throw PublishError.noScenes }
-        let skipped = simulatedSkips.filter { chosen.contains($0.key) }
+        var skipped = simulatedSkips.filter { chosen.contains($0.key) }
         let ids = chosen.filter { skipped[$0] == nil }
         guard !ids.isEmpty else { throw PublishError.nothingPublishable(skipped.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" }) }
         generation += 1
-        let entries: [LPPlaylistEntry] = ids.compactMap { id in
+        func entry(_ id: String) -> LPPlaylistEntry? {
             guard let m = byID[id]?.manifest else { return nil }
             return m.kind == .video
                 ? LPPlaylistEntry(id: id, name: m.name, kind: .video, file: "\(id).\(m.video.map { ($0.file as NSString).pathExtension } ?? "mov")",
-                                  clock: m.clock.position, fit: m.video?.fit)
-                : LPPlaylistEntry(id: id, name: m.name, kind: .web, file: "\(id).html", clock: m.clock.position)
+                                  clock: m.clock.position, fit: m.video?.fit, span: m.spans)
+                : LPPlaylistEntry(id: id, name: m.name, kind: .web, file: "\(id).html", clock: m.clock.position, span: m.spans)
         }
+        let entries = ids.compactMap(entry)
+        let (displays, displayScenes) = displaySettings(s.displays, deck: Set(entries.map(\.id)), entry: entry, skipped: &skipped)
         let playlist = LPPlaylist(generation: generation, mode: s.mode, cycleMinutes: s.cycleMinutes, showClock: s.showClock,
-                                  performance: s.performance, scenes: entries)
+                                  performance: s.performance, scenes: entries, displays: displays, displayScenes: displayScenes)
         return PublishResult(playlist: playlist, skipped: skipped)
+    }
+
+    /// What PublishService.stageDisplayScenes publishes: mode and battery behaviour always;
+    /// assignments only for "Choose per display" and only when their scene is in the deck or could be
+    /// staged on its own (into `displayScenes`, once). An unknown scene is dropped; a simulated skip is
+    /// reported and dropped.
+    private func displaySettings(_ requested: LPDisplaySettings, deck: Set<String>, entry: (String) -> LPPlaylistEntry?,
+                                 skipped: inout [String: String]) -> (LPDisplaySettings, [LPPlaylistEntry]) {
+        var published = LPDisplaySettings(mode: requested.mode, assignments: [:], onBattery: requested.onBattery)
+        guard requested.mode == .choose else { return (published, []) }
+        var extras: [LPPlaylistEntry] = [], staged: [String: Bool] = [:]
+        for (display, id) in LPDisplaySettings.normalized(requested.assignments).sorted(by: { $0.key < $1.key }) {
+            if deck.contains(id) { published.assignments[display] = id; continue }
+            if let ok = staged[id] {
+                if ok { published.assignments[display] = id }
+                continue
+            }
+            guard skipped[id] == nil, let extra = entry(id) else { staged[id] = false; continue }
+            if let reason = simulatedSkips[id] {
+                skipped[id] = reason
+                staged[id] = false
+                continue
+            }
+            extras.append(extra)
+            staged[id] = true
+            published.assignments[display] = id
+        }
+        return (published, extras)
     }
 }
 
