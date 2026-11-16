@@ -49,7 +49,14 @@ SHORT="$(git rev-parse --short=7 "$GITHUB_SHA")"
 gh_do() {
   if [ "$DRY" = 1 ]; then printf '  [dry-run] gh'; printf ' %q' "$@"; echo; else gh "$@"; fi
 }
-query() { [ "$DRY" = 1 ] && return 1; gh "$@" 2>/dev/null; }
+# A failed lookup prints nothing: `gh api` writes GitHub's error body to stdout (a 404 for a tag
+# that doesn't exist yet), which callers would otherwise read as an answer.
+query() {
+  [ "$DRY" = 1 ] && return 1
+  local out
+  out="$(gh "$@" 2>/dev/null)" || return 1
+  printf '%s\n' "$out"
+}
 
 # MARK: Assets ------------------------------------------------------------------------------------
 

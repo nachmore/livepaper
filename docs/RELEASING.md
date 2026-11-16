@@ -187,6 +187,7 @@ Nothing here pushes, tags remotely or opens anything:
 ```sh
 scripts/ci/lint.sh                         # shellcheck + actionlint (brew install shellcheck actionlint)
 scripts/ci/test-version-from-ref.sh        # the ref → version rules
+scripts/ci/test-publish-release.sh         # publish-release.sh against a fake gh (first and later nightly)
 scripts/ci/version-from-ref.sh refs/tags/v0.1.0-beta.2
 
 # What CI's build job does, for a nightly, into /tmp/lp-dist:
