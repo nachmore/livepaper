@@ -904,8 +904,36 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     (`AISessionModel.slimmed`; this menu-bar app runs for days). A check
     report of an animate session adds "Looks like the picture: 0.92" (§9), and the scene's history
     "· 3 reference images (1 animated)".
-  * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a
-    publish that left scenes out lists them with the reason (and a banner says so).
+  * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, multiple displays, profile) →
+    Save & Publish; a publish that left scenes out lists them with the reason (and a banner says so).
+    **Multiple displays** (`Views/Playlist/DisplaysSection.swift` over `Logic/PlaylistDraft.swift`;
+    always shown, between Playback and Performance): the display mode (*Same on every display* /
+    *Different on each display* / *Choose per display* / *Span across displays*, §4.3, §6) with a
+    one-line explanation; a small picture of the arrangement (System Settings › Displays, scaled,
+    numbered, the main display tinted, one gradient across all of them while spanning); the connected
+    displays in the saver's order — number, `NSScreen.localizedName`, a "Main" tag (the built-in
+    display, else the menu-bar one), size, context menu "Copy Display ID"; with one display, "Only
+    one display is connected. These settings take effect when you connect another." *Choose* gives
+    each connected display a picker ("Playlist" + every library scene; a deleted scene shows "Scene
+    deleted — plays the playlist") and lists the choices of displays that aren't connected ("<name>
+    (not connected)" — scene — Forget), named from `displayNames` (recorded when a scene is
+    chosen, pruned to assigned displays; "Display 37D8832A" for one assigned elsewhere, e.g. by the
+    CLI). Choices stay in the settings in every mode but are published only in *Choose*, and only
+    for scenes that still exist (`PlaylistDraft.effectiveAssignments`, as PublishService does).
+    *Span* says how many of the playlist's scenes can span (`SceneManifest.spans`: "3 of 5 scenes
+    can span; the others show on every display.", naming up to four that can't). "On battery, other
+    displays show": the scene / a still picture / nothing (black), with the footnote that the main
+    display always shows the scene. The connected displays come from `AppEnvironment.connectedDisplays`
+    (live: `Entry/DisplayProbe.swift`, `NSScreen.screens` keyed and framed exactly as the saver does
+    — `Logic/DisplayIdentity.swift`: the UUID of `CGDisplayCreateUUIDFromDisplayID` uppercased, else
+    "DISPLAY-<id>"; `LPDisplay.cocoa` with the menu-bar screen's height — so choices name the displays
+    the saver sees) and are re-read on `NSApplication.didChangeScreenParameters`
+    (`observeDisplays`) into `AppModel.displays`. The summary in the publish bar, the menu bar and
+    Settings adds the mode when it changes what plays (" · different on each display", " · chosen
+    per display", " · spanning all displays"; not with one display for Different and Span). A scene
+    chosen for a display counts as one the saver has (`AppModel.isShownBySaver`): replacing or
+    AI-modifying it republishes, and deleting it republishes without it (the choice stays, shown as
+    deleted). The full-screen preview stays single-screen.
 * **Full-screen preview** (`Views/FullScreen/`): one borderless black window on one screen (the
   main window's, or the one under the pointer from the menu bar) at status-bar level, menu bar and
   Dock hidden. It renders exactly like the saver: web scenes get the saver's own
@@ -1000,7 +1028,10 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   `.build/debug/LivePaperApp --snapshot <dir> [--only name,…]` renders every key screen with mock
   data to PNGs and exits (`.prohibited` activation policy, off-screen windows, no live previews);
   `create-references-light`, `modify-references-dark` and `session-references-light` show the
-  reference tray, the sheet's compact tray and a session's references with generated pictures.
+  reference tray, the sheet's compact tray and a session's references with generated pictures;
+  `playlist-displays-choose-light`, `playlist-displays-span-dark` and `playlist-displays-single-light`
+  the Multiple displays section with mock displays (`MockSampleData.displays`: a built-in 1512×982
+  display with the menu bar and a 2560×1440 one to its right, made-up ids; mock mode uses them too).
 
 ## 12. Performance & battery policy
 * Budgets enforced by `livepaper check` (§9), shown in the UI as energy badges.
