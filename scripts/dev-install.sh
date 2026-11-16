@@ -16,7 +16,7 @@
 # The helper's login item can't always be restarted from here: launchd only starts it with the code
 # signature recorded when it was registered, and an ad-hoc-signed helper's signature changes with
 # every build that changes it. Only LivePaper.app itself can register it again (SMAppService), which
-# it does at launch; this script says when that is needed (docs/RESEARCH.md §6).
+# it does at launch when needed; this script says when to launch it (docs/RESEARCH.md §6).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -57,8 +57,13 @@ cannot_start_reason() {
   printf '%s' "$why"
 }
 
-cdhash() { { codesign -dvvv "$1" 2>&1 || true; } | sed -n '/^CDHash=/{s///p;q;}'; }
 is_adhoc() { { codesign -dvvv "$1" 2>&1 || true; } | grep -q '^Signature=adhoc'; }
+# The executable process $1 runs, as the kernel knows it (empty: it was deleted). Note that
+# `codesign -dvvv <pid>` describes the file now at that path, not the code that runs: whether that
+# is still the same code only `codesign --verify <pid>` says ("the code on disk does not match what
+# is running" otherwise; docs/RESEARCH.md §6.1).
+running_executable() { { codesign -dvvv "$1" 2>&1 || true; } | sed -n '/^Executable=/{s///p;q;}'; }
+real_path() { (cd "$(dirname "$1")" 2>/dev/null && printf '%s/%s\n' "$(pwd -P)" "$(basename "$1")") || printf '%s\n' "$1"; }
 
 [ -d "$SRC/Contents" ] || { echo "✗ $SRC not found — run scripts/build.sh first" >&2; exit 1; }
 codesign --verify --deep --strict "$SRC" || { echo "✗ $SRC has an invalid signature — rebuild it" >&2; exit 1; }
@@ -88,10 +93,6 @@ if pgrep -x LivePaper >/dev/null 2>&1; then
   if pgrep -x LivePaper >/dev/null 2>&1; then echo "✗ LivePaper is still running; quit it and try again" >&2; exit 1; fi
 fi
 
-# The helper being replaced, to tell whether this build changes it.
-OLD_HELPER_CDHASH=""
-if [ -e "$DEST/$HELPER_REL" ]; then OLD_HELPER_CDHASH="$(cdhash "$DEST/$HELPER_REL")"; fi
-
 echo "▸ installing $DEST"
 # Copy next to the destination, then swap: a running helper keeps its (old) executable file, and a
 # failed copy never leaves a half-installed app.
@@ -109,32 +110,47 @@ LSREGISTER="${LIVEPAPER_LSREGISTER:-/System/Library/Frameworks/CoreServices.fram
 
 # A registered helper keeps running the old binary until it restarts. The LaunchAgent fallback (its
 # own label, a plain plist) simply restarts with the new one. The login item is restarted only when
-# that can work: restarting an ad-hoc-signed helper that changed only gets the launch refused, and
-# launchd's own repair after that can leave the job unable to start at all ("spawn failed",
-# EX_CONFIG) until LivePaper registers it again.
+# that can work: launchd starts it only as the code it recorded when the item was registered (for
+# ad-hoc code its cdhash), and a refused start sets off launchd's own repair, which can leave the job
+# unable to start at all ("spawn failed", EX_CONFIG) until LivePaper registers it again. What was
+# recorded is what runs now — so the new helper is compared with the running process, never with the
+# file this install replaced (that may be a build that never ran) — and a stopped ad-hoc login item
+# is never started from here.
 if launchctl print "$FALLBACK_JOB" >/dev/null 2>&1; then
   echo "▸ restarting the helper (LaunchAgent)"
   launchctl kickstart -k "$FALLBACK_JOB" >/dev/null 2>&1 || true
 fi
-HELPER_NOTE=""     # why the login item needs registering again (empty: it doesn't)
+NEW_HELPER="$(real_path "$DEST/$HELPER_REL")"
+HELPER_NOTE=""     # why the login item needs LivePaper.app (empty: it doesn't)
 HELPER_PID=""      # the helper process running before LivePaper is launched
 if JOB="$(launchctl print "$LOGIN_JOB" 2>/dev/null)"; then
   WHY="$(cannot_start_reason "$JOB")"
-  if [ "$(job_field "$JOB" state)" = running ]; then HELPER_PID="$(job_field "$JOB" pid)"; fi
+  PID="$(job_field "$JOB" pid)"
+  if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then HELPER_PID="$PID"; fi
   if [ -n "$WHY" ]; then
     HELPER_NOTE="launchd can't start it ($WHY)"
-  elif [ -n "$OLD_HELPER_CDHASH" ] && [ "$OLD_HELPER_CDHASH" = "$(cdhash "$DEST/$HELPER_REL")" ]; then
-    echo "▸ restarting the helper (unchanged in this build)"
-    launchctl kickstart -k "$LOGIN_JOB" >/dev/null 2>&1 || true
-    sleep 1
-    WHY="$(cannot_start_reason "$(launchctl print "$LOGIN_JOB" 2>/dev/null || true)")"
-    if [ -n "$WHY" ]; then HELPER_NOTE="launchd can't start it ($WHY)"; HELPER_PID=""; fi
-  elif is_adhoc "$DEST/$HELPER_REL"; then
-    HELPER_NOTE="this build changes the ad-hoc-signed helper, and launchd only starts the one recorded when the login item was registered"
-    if [ -n "$HELPER_PID" ]; then HELPER_NOTE="$HELPER_NOTE; the previous build's helper keeps running until then"; fi
+  elif [ -n "$HELPER_PID" ]; then
+    RUNNING="$(running_executable "$HELPER_PID")"
+    if [ -n "$RUNNING" ] && [ "$(real_path "$RUNNING")" != "$NEW_HELPER" ]; then
+      echo "! the helper that runs belongs to another copy of LivePaper (${RUNNING%/Contents/Helpers/LivePaperHelper}); left alone." \
+           "Use Settings › Lock › Start Helper in this one to move it here." >&2
+    elif [ -n "$RUNNING" ] && codesign --verify "$HELPER_PID" >/dev/null 2>&1; then
+      echo "▸ the helper already runs this build's code (unchanged); nothing to restart"
+    elif is_adhoc "$NEW_HELPER"; then
+      HELPER_NOTE="the running helper isn't this build's, and launchd only starts the ad-hoc-signed helper recorded when the login item was registered; the running one keeps going until then"
+    else
+      # A Team ID-signed helper: launchd starts the new build under the same requirement.
+      echo "▸ restarting the helper"
+      launchctl kickstart -k "$LOGIN_JOB" >/dev/null 2>&1 || true
+      sleep 1
+      WHY="$(cannot_start_reason "$(launchctl print "$LOGIN_JOB" 2>/dev/null || true)")"
+      if [ -n "$WHY" ]; then HELPER_NOTE="launchd can't start it ($WHY)"; HELPER_PID=""; fi
+    fi
+  elif is_adhoc "$NEW_HELPER"; then
+    HELPER_NOTE="it isn't running, and only LivePaper knows whether launchd would accept this build's ad-hoc-signed helper (a refused start can break the job)"
   else
-    echo "▸ restarting the helper"
-    launchctl kickstart -k "$LOGIN_JOB" >/dev/null 2>&1 || true
+    echo "▸ starting the helper"
+    launchctl kickstart "$LOGIN_JOB" >/dev/null 2>&1 || true
   fi
 fi
 # A render daemon started from the old bundle hands over to the next one on demand.
@@ -152,9 +168,9 @@ VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST
 BUILD="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$DEST/Contents/Info.plist")"
 echo "✓ LivePaper $VERSION (build $BUILD) installed in $DEST"
 if [ -n "$HELPER_NOTE" ]; then
-  echo "! the helper's login item has to be registered again: $HELPER_NOTE."
-  echo "  This script can't do that (only LivePaper.app itself can talk to SMAppService); launching LivePaper"
-  echo "  does it by itself (macOS may show \"Login Item Added\")."
+  echo "! the helper's login item needs LivePaper.app: $HELPER_NOTE."
+  echo "  This script can't register it again (only LivePaper.app itself can talk to SMAppService); launching LivePaper"
+  echo "  starts it, or registers it again, by itself (macOS may then say a login item was added)."
 fi
 if [ "$LAUNCH" = 1 ]; then
   open "$DEST"

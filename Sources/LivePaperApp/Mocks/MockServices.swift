@@ -354,7 +354,7 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
 
     func registerHelper() throws {
         mutate { $0.helperRunning = true; $0.helperLoginItem = .enabled; $0.helperProblem = nil; $0.passwordImmediately = true }
-        lock.lock(); registerRequests += 1; lock.unlock()
+        lock.lock(); registerRequests += 1; uninstalled = false; lock.unlock()
     }
     func unregisterHelper() throws { mutate { $0.helperRunning = false; $0.helperLoginItem = .notRegistered; $0.helperProblem = nil } }
 
@@ -365,11 +365,15 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     private var recoverRequests = 0, registerRequests = 0
     enum RecoveryBehaviour { case needsApproval, fails(String) }
     var recoveryBehaviour: RecoveryBehaviour?
+    /// Like InstallService's uninstall marker: set by performUninstall, lifted by setting the helper up again.
+    private var uninstalled = false
 
-    /// InstallService's rules, minus launchd: only an enabled login item with a problem is repaired.
+    /// InstallService's rules, minus launchd: only an enabled login item with a problem is repaired,
+    /// never after an uninstall.
     func recoverHelper() throws -> HelperRecoveryOutcome {
         lock.lock(); defer { lock.unlock() }
         recoverRequests += 1
+        guard !uninstalled else { return .notNeeded("LivePaper was uninstalled") }
         guard current.helperLoginItem == .enabled else {
             return .notNeeded(current.helperLoginItem == .requiresApproval ? "waiting for approval" : "the helper isn't set up")
         }
@@ -415,6 +419,9 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
 
     func performUninstall(removeLibrary: Bool) -> [InstallStep] {
         lock.lock(); defer { lock.unlock() }
+        uninstalled = true
+        // InstallService reports no helper problem once it is uninstalled.
+        current.helperProblem = nil
         var steps: [InstallStep] = []
         func step(_ title: String, needed: Bool, skipReason: String, _ apply: () -> Void) {
             if !needed { steps.append(InstallStep(title: title, outcome: .skipped(skipReason))); return }

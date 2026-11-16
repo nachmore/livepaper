@@ -183,21 +183,31 @@ enum InstallCommands {
         return DoctorReport(version: CLIEnvironment.version.display, checks: checks, paths: pathList)
     }
 
-    /// The helper row: running, running an older build, can't start (with the fix), or not running.
+    /// The helper row: running, running an older build or another copy's, can't start or left
+    /// unregistered by a repair (with the fix), or not running.
     static func helperCheck(_ status: InstallStatus) -> (status: Check.Status, detail: String) {
         let label = LPPaths.helperLabel
+        // Only the app's main executable can register the login item; it does so at launch when it is
+        // the copy the helper belongs to (the one that registered it, else the one in /Applications).
+        let reopen = "Open LivePaper (the copy that registered the helper, or the one in /Applications, does so by itself at " +
+                     "launch) or use its Settings › Lock › Repair Helper"
         switch (status.helperRunning, status.helperProblem) {
         case (true, .outdated(let detail)?):
-            return (.warning, "running, but an older build than this LivePaper (\(detail)). Open LivePaper: it registers the helper " +
-                    "again at launch, so the next start doesn't run into the code signature macOS recorded for the old one.")
+            return (.warning, "running, but an older build than this LivePaper (\(detail)). Open LivePaper: at launch it restarts " +
+                    "the helper, or registers it again when macOS would refuse the new one.")
+        case (true, .otherCopy(let app)?):
+            return (.warning, "running, but it is the helper of another copy of LivePaper (\(app)). LivePaper leaves it with that " +
+                    "copy; keep one copy, or use Settings › Lock › Start Helper in the copy that should run it.")
         case (true, _):
             return (.ok, "running (\(label))")
         case (false, .cannotStart(let detail)?):
             return (.problem, "\(label) can't start: launchd reports \(detail), so LivePaper's lock shortcut and \u{201C}Lock now\u{201D} " +
-                    "don't work. After an update of an ad-hoc-signed LivePaper, macOS still expects the helper " +
-                    "it recorded when the login item was registered, and only the app itself can register it again: open " +
-                    "LivePaper (it does so at launch) or use Settings › Lock › Repair Helper. If it still can't start, switch " +
-                    "LivePaper off and on in System Settings › General › Login Items, or log out and back in.")
+                    "don't work. After an update of an ad-hoc-signed LivePaper, macOS still expects the helper it recorded when the " +
+                    "login item was registered, and only the app itself can register it again. \(reopen). If it still can't start, " +
+                    "switch LivePaper off and on in System Settings › General › Login Items, or log out and back in.")
+        case (false, .unregistered(let detail)?):
+            return (.problem, "\(label) isn't registered: LivePaper unregistered its login item to register it again, and that " +
+                    "didn't finish (\(detail)), so LivePaper's lock shortcut and \u{201C}Lock now\u{201D} don't work. \(reopen).")
         case (false, _):
             return (.problem, "\(label) isn't running: LivePaper's lock shortcut and \u{201C}Lock now\u{201D} don't work. " +
                     "Open LivePaper to start it (and allow it in System Settings › General › Login Items).")

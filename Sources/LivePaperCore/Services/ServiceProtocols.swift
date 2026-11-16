@@ -294,9 +294,9 @@ public enum LoginItemStatus: String, Sendable, Equatable {
 }
 
 /// What is wrong with the helper's launchd job while it is set up (the login item, or the
-/// LaunchAgent fallback) — from `launchctl print` (HelperJobAssessment). The app repairs it by
-/// itself once per launch (InstallServicing.recoverHelper); "Start Helper" / "Repair Helper" do it
-/// on request.
+/// LaunchAgent fallback) — from `launchctl print` and the helper's process (HelperJobAssessment). The
+/// app repairs it by itself once per launch when it is the copy the helper belongs to
+/// (InstallServicing.recoverHelper); "Start Helper" / "Repair Helper" do it on request.
 public enum HelperProblem: Sendable, Equatable {
     /// launchd has the job but can't start the helper; the detail is what it reports (e.g. "spawn
     /// failed, last exit code 78: EX_CONFIG, needs LWCR update"). After an update of an ad-hoc-signed
@@ -310,10 +310,24 @@ public enum HelperProblem: Sendable, Equatable {
     case stopped
     /// Running, but an older build than this LivePaper's (the detail says how LivePaper can tell).
     case outdated(String)
+    /// Running, but it is another copy of LivePaper's helper (that copy's path). Not repaired by
+    /// itself: the helper stays with the copy it belongs to unless the user asks for this one's.
+    case otherCopy(String)
+    /// LivePaper unregistered the login item to register it again, and registering it didn't finish
+    /// (the detail says since when). The next launch, or Repair Helper, registers it again.
+    case unregistered(String)
 
-    /// Only this one keeps the helper from working although the user set it up: the UI calls it
-    /// out with its own wording and a "Repair Helper" button.
-    public var cannotStart: Bool { if case .cannotStart = self { return true }; return false }
+    /// The helper doesn't work although the user set it up, and only registering it again helps: the
+    /// UI calls it out with its own wording and a "Repair Helper" button.
+    public var cannotStart: Bool {
+        switch self {
+        case .cannotStart, .unregistered: return true
+        default: return false
+        }
+    }
+
+    /// The app's automatic repair (once per launch) looks at it. Another copy's helper is reported only.
+    public var isRepairable: Bool { if case .otherCopy = self { return false }; return true }
 
     /// One line for logs and `livepaper doctor`.
     public var summary: String {
@@ -322,6 +336,8 @@ public enum HelperProblem: Sendable, Equatable {
         case .notLoaded: return "launchd doesn't have its job loaded"
         case .stopped: return "its job is loaded but not running"
         case .outdated(let detail): return "it runs an older build (\(detail))"
+        case .otherCopy(let app): return "it runs the helper of another copy of LivePaper (\(app))"
+        case .unregistered(let detail): return "LivePaper unregistered its login item to register it again, and that didn't finish (\(detail))"
         }
     }
 }
@@ -330,9 +346,11 @@ public enum HelperProblem: Sendable, Equatable {
 public enum HelperRecoveryOutcome: Sendable, Equatable {
     /// Nothing to do, and why (running, not set up, waiting for approval, uninstalled, …).
     case notNeeded(String)
-    /// The job was started again (`launchctl kickstart`, or the fallback bootstrapped again).
+    /// The job was started again (`launchctl kickstart`, `kickstart -k` for an older helper launchd
+    /// starts this build's in place of, or the fallback bootstrapped again).
     case started
-    /// The login item was unregistered and registered again, and the helper runs.
+    /// The login item was registered again (unregistered first unless an earlier attempt already
+    /// had), and the helper runs.
     case reregistered
     /// Registered again, but macOS now waits for the user to allow it in System Settings ›
     /// General › Login Items.
@@ -430,13 +448,17 @@ public protocol InstallServicing: AnyObject, Sendable {
     /// (the UI then shows the one-click guided step via openScreenSaverSettings()).
     func selectSaver() throws -> Bool
     /// Sets the helper up (login item, else the LaunchAgent fallback) and makes sure it runs this
-    /// build: starts a stopped job, and registers the login item again when launchd can't start it
-    /// or it belongs to an older build. The user's "Start Helper" / "Repair Helper".
+    /// build: starts a stopped job, and registers the login item again when launchd can't run this
+    /// build's helper — also when the login item belongs to another copy of LivePaper (the user asked
+    /// for this one). The user's "Start Helper" / "Repair Helper".
     func registerHelper() throws
     /// The app's automatic repair, at most once per launch: when the helper is set up but its job
     /// doesn't run this build's helper (InstallStatus.helperProblem), start it again or register the
-    /// login item again. Never sets up a helper that isn't, never after an uninstall and never while
-    /// macOS waits for the user's approval. Throws when the repair didn't work.
+    /// login item again. Never sets up a helper that isn't (a re-registration that didn't finish
+    /// counts as set up), never after an uninstall, never while macOS waits for the user's approval,
+    /// and never moves the helper to this copy from another one: only the copy that registered it, or
+    /// — when that isn't known — the one in /Applications (or ~/Applications) repairs it. Throws when
+    /// the repair didn't work.
     func recoverHelper() throws -> HelperRecoveryOutcome
     func unregisterHelper() throws
     /// Turns the lock-keys takeover on or off (`immediateLockLaunchesScreenSaver`). The value from
