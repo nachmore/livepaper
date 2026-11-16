@@ -377,6 +377,29 @@ enum SpanRuntimeTests {
 
     // MARK: - End to end
 
+    /// One render server for all the span e2e tests of this run (a test process may launch the
+    /// daemon only once): the one LIVEPAPER_HOME serves, or a fresh one shut down at exit.
+    nonisolated(unsafe) private static var spanServer: RenderClient?
+    nonisolated(unsafe) private static var spanServerHome: URL?
+
+    static func withSpanServer(_ body: (RenderClient) throws -> Void) throws {
+        if spanServer == nil {
+            let env = ProcessInfo.processInfo.environment
+            let ownHome = env["LIVEPAPER_HOME"]?.isEmpty ?? true
+            let home = ownHome ? URL(fileURLWithPath: "/tmp/lp-st-\(getpid())-span") : LPPaths.supportRoot
+            spanServer = RenderClient(socket: home.appendingPathComponent("render.sock"))
+            if ownHome {
+                spanServerHome = home
+                atexit {
+                    guard let client = SpanRuntimeTests.spanServer, let home = SpanRuntimeTests.spanServerHome else { return }
+                    _ = try? client.sendBlocking(RenderRequest(op: .shutdown), timeout: 10)
+                    try? FileManager.default.removeItem(at: home)
+                }
+            }
+        }
+        try body(spanServer!)
+    }
+
     static func endToEndCrops() throws {
         guard e2e else {
             print("  (skipped: set LIVEPAPER_SELFTEST_E2E=1 to run it; it uses or starts one LivePaperRenderd)")
@@ -384,7 +407,7 @@ enum SpanRuntimeTests {
         }
         let env = ProcessInfo.processInfo.environment
         let only = env["LIVEPAPER_SPAN_ONLY"].map { Set($0.split(separator: ",").map(String.init)) }
-        try RuntimeTests.withE2EServer("span") { client in
+        try withSpanServer { client in
             var failures: [String] = []
             var packages: [(String, URL)] = []
             var cleanup: [URL] = []
@@ -470,7 +493,7 @@ enum SpanRuntimeTests {
             return
         }
         let only = ProcessInfo.processInfo.environment["LIVEPAPER_SPAN_ONLY"].map { Set($0.split(separator: ",").map(String.init)) }
-        try RuntimeTests.withE2EServer("span-cost") { client in
+        try withSpanServer { client in
             var failures: [String] = []
             let b = try unwrap(SpanCheck.arrangement("B"))
             var view = b.views[1]
@@ -513,7 +536,7 @@ enum SpanRuntimeTests {
             print("  (skipped: set LIVEPAPER_SELFTEST_E2E=1 to run it; it uses or starts one LivePaperRenderd)")
             return
         }
-        try RuntimeTests.withE2EServer("span-negative") { client in
+        try withSpanServer { client in
             var failures: [String] = []
             let b = try unwrap(SpanCheck.arrangement("B")).at(dpr: 1)
             for (name, js) in brokenScenes {

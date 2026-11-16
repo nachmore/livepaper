@@ -2,7 +2,9 @@
 //
 // Plays the playlist the app publishes into Contents/Resources/Playlist: web scenes in a WKWebView,
 // video scenes with AVPlayerLayer, a static fallback when nothing is published. Scenes change every
-// `cycleMinutes` with a crossfade; every display agrees on the scene (see SaverSessionPlanner).
+// `cycleMinutes` with a crossfade; every display shares the session (see SaverSessionPlanner) and
+// picks its scene from it by the display mode (SaverDisplayPlan): the same scene, a different one,
+// its assigned one or its slice of a spanning one — or a still or nothing on battery.
 //
 // macOS 26 host notes (legacyScreenSaver, sandboxed, hosted by WallpaperAgent):
 //  * stopAnimation() is often never called and views are not released between runs, so we listen
@@ -47,6 +49,8 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         var schedule: SaverSchedule
         var session: SaverSession
         var record: SaverSessionRecord
+        /// How this display takes part (mode, source, liveness, lead, span).
+        var displays: SaverDisplayPlan
     }
 
     private let bundle = Bundle(for: LivePaperSaverView.self)
@@ -54,6 +58,10 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     private var content: SaverContent?
     private var plan: Plan?
     private var shownStep = 0
+    /// What the current (or incoming) scene shows: a step change reloads only when this changes.
+    private var shownResolved: SaverResolvedScene?
+    /// Dev hosts only: the display key this view pretends to be on (`livepaperSetDisplayKey:`).
+    private var devDisplayKey: String?
     /// Scenes skipped after repeated failures (added to the deck step so recovery moves on).
     private var skipOffset = 0
     private var current: SceneHost?
@@ -208,6 +216,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     private func release() {
         tearDownScenes()
         plan = nil
+        shownResolved = nil
         content = nil
         started = false
         shownStep = 0
@@ -237,20 +246,85 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             return
         }
 
+        // A display that starts while another display of this process runs joins that display's
+        // session whatever its age (a display connected mid-run must share the time origin); the
+        // shared store is the fallback across processes.
         let store = SaverSessionStores.shared
-        let planned = SaverSessionPlanner.plan(now: Date(), stored: store.load())
-        let deck = SaverDeck(ids: content.entries.map(\.id), mode: playlist.mode, session: planned.session)
+        let planned = inProcessSession() ?? SaverSessionPlanner.plan(now: Date(), stored: store.load())
+        let displays = currentDisplayPlan(content)
+        let deck = SaverDeck(ids: content.entries.map(\.id), mode: playlist.mode, session: planned.session,
+                             spread: displays.spread, previous: displays.previous(for: planned.session))
         let schedule = SaverSchedule(startedAt: planned.session.startedAt, cycleMinutes: playlist.cycleMinutes,
                                      deckCount: deck.count, mode: playlist.mode, cycles: !gate.preview)
-        plan = Plan(deck: deck, schedule: schedule, session: planned.session, record: planned.record)
+        plan = Plan(deck: deck, schedule: schedule, session: planned.session, record: planned.record, displays: displays)
         SaverLog.saver.notice("""
             start: publish \(playlist.generation, privacy: .public), \(deck.count, privacy: .public) scenes, \
             \(playlist.mode.rawValue, privacy: .public), \(planned.joined ? "joined" : "new", privacy: .public) session \
-            \(planned.session.epoch, privacy: .public), preview \(self.gate.preview, privacy: .public)
+            \(planned.session.epoch, privacy: .public), preview \(self.gate.preview, privacy: .public), \
+            \(displays.summary, privacy: .public)
             """)
-        logLifecycle("load", "publish=\(playlist.generation) scenes=\(deck.count)")
-        show(step: schedule.step(at: Date()), crossfade: Self.firstRevealDuration)
+        logLifecycle("load", "publish=\(playlist.generation) scenes=\(deck.count) \(displays.summary) displays=[\(Self.describe(displays.layout))]")
+        if displays.liveness == .off {
+            // Battery, "other displays show nothing": no scene, no timers — black.
+            logLifecycle("display-off", "on battery or in Low Power Mode; this display stays black")
+        } else {
+            show(step: schedule.step(at: Date()), crossfade: Self.firstRevealDuration)
+        }
         applyRunState()
+    }
+
+    /// The session of the running view of this process that started it most recently, if any.
+    private func inProcessSession() -> (session: SaverSession, record: SaverSessionRecord, joined: Bool)? {
+        guard !gate.preview else { return nil }
+        let running = Self.registry.allObjects.filter { $0 !== self && $0.started && $0.gate.shouldRun && !$0.gate.preview && $0.plan != nil }
+        guard let other = running.max(by: { ($0.plan?.session.epoch ?? 0) < ($1.plan?.session.epoch ?? 0) }), let p = other.plan else { return nil }
+        return (p.session, p.record, true)
+    }
+
+    /// This view's display: its key (dev hosts may set one), read fresh.
+    private var saverDisplayKey: String? { devDisplayKey ?? saverScreenDisplayKey }
+
+    /// The display plan for the arrangement and power state right now.
+    private func currentDisplayPlan(_ content: SaverContent) -> SaverDisplayPlan {
+        SaverDisplayPlan.make(settings: content.playlist?.displays ?? .standard, layout: SaverDisplays.current(), key: saverDisplayKey,
+                              content: content, power: power, preview: gate.preview)
+    }
+
+    /// Displays changed (connected, rearranged, this window moved) or the power state did: follow
+    /// them — another slice or scene, live ⇄ still, or black.
+    private func refreshDisplayPlan(reason: String) {
+        guard started, let content, content.playlist != nil, !content.isEmpty, var plan else { return }
+        let displays = currentDisplayPlan(content)
+        guard displays != plan.displays else { return }
+        let old = plan.displays
+        plan.displays = displays
+        plan.deck = SaverDeck(ids: content.entries.map(\.id), mode: plan.deck.mode, session: plan.session,
+                              spread: displays.spread, previous: displays.previous(for: plan.session))
+        self.plan = plan
+        logLifecycle("displays", "reason=\(reason) \(displays.summary) displays=[\(Self.describe(displays.layout))]")
+        if displays.liveness == .off {
+            tearDownScenes()
+            shownResolved = nil
+        } else {
+            let step = plan.schedule.step(at: Date())
+            let next = displays.resolve(step: step, skipOffset: skipOffset, deck: plan.deck, content: content, session: plan.session,
+                                        schedule: plan.schedule)
+            if next != shownResolved || old.liveness == .off || (current == nil && incoming == nil) {
+                show(step: step, crossfade: Self.firstRevealDuration)
+            } else {
+                current?.setLiveness(displays.liveness)
+                incoming?.setLiveness(displays.liveness)
+            }
+        }
+        applyRunState()
+    }
+
+    /// "37D8832A 0,0 1512x982 2x built-in; …" (the log keeps only a key prefix).
+    private static func describe(_ layout: LPDisplayLayout) -> String {
+        layout.displays.map { d in
+            "\(d.id.prefix(8)) \(Int(d.frame.x)),\(Int(d.frame.y)) \(Int(d.frame.width))x\(Int(d.frame.height)) \(String(format: "%g", d.scale))x"
+                + (d.isBuiltin ? " built-in" : "") + (d.isMenuBar ? " menu-bar" : "")
+        }.joined(separator: "; ")
     }
 
     private func loadContent() -> SaverContent {
@@ -273,9 +347,17 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     /// Shows the scene for the current schedule step (after sleep or a pause the step may have moved
     /// on) and arms a one-shot timer for the next change.
     private func catchUpAndScheduleCycle() {
-        guard let plan, let next = plan.schedule.nextChange(after: Date()) else { return }
+        guard let plan, plan.displays.liveness != .off, let next = plan.schedule.nextChange(after: Date()) else { return }
         let step = plan.schedule.step(at: Date())
-        if step != shownStep { show(step: step, crossfade: Self.cycleCrossfadeDuration) }
+        if step != shownStep {
+            // An assigned scene (or a deck too small for every display) doesn't change: no reload.
+            if let content, let r = plan.displays.resolve(step: step, skipOffset: skipOffset, deck: plan.deck, content: content,
+                                                          session: plan.session, schedule: plan.schedule), r == shownResolved {
+                shownStep = step
+            } else {
+                show(step: step, crossfade: Self.cycleCrossfadeDuration)
+            }
+        }
         let timer = Timer(fire: next, interval: 0, repeats: false) { [weak self] _ in
             guard let self, self.gate.shouldRun else { return }
             self.catchUpAndScheduleCycle()
@@ -301,6 +383,7 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     private func restart() {
         tearDownScenes()
         plan = nil
+        shownResolved = nil
         started = false
         update()
     }
@@ -350,6 +433,11 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             refreshWindowVisibility()
             logLifecycle(event.rawValue)
             update()
+            // The window may have moved to another display.
+            refreshDisplayPlan(reason: "window")
+        case .screensChanged:
+            logLifecycle(event.rawValue, "displays=[\(Self.describe(SaverDisplays.current()))]")
+            refreshDisplayPlan(reason: "screens")
         case .willStop:
             gate.apply(event)
             logLifecycle(event.rawValue, previewLike ? "ignored by previews" : "")
@@ -369,6 +457,15 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             // Real sessions read the playlist once at start; previews follow the app live.
             if previewLike && started { restart() }
         }
+    }
+
+    /// Dev hosts only (LIVEPAPER_SAVER_SIMULATED_SYSTEM): the display this view is on, by key, since
+    /// their off-screen windows aren't on the simulated displays. Ignored in the real host.
+    @objc(livepaperSetDisplayKey:)
+    func setDevDisplayKey(_ key: NSString?) {
+        guard SaverDevOverrides.simulatedSystem else { return }
+        devDisplayKey = key.map { LPDisplay.normalizedID($0 as String) }
+        refreshDisplayPlan(reason: "dev")
     }
 
     // MARK: Window (previews' visibility; logs)
@@ -430,6 +527,8 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
         SaverLog.saver.info("power changed: battery saver \(now.prefersBatterySaver, privacy: .public) → \(profile.fps, privacy: .public) fps")
         current?.powerDidChange(profile: profile, power: now)
         incoming?.powerDidChange(profile: profile, power: now)
+        // Other displays may switch to a still or to black on battery (and back).
+        refreshDisplayPlan(reason: "power")
     }
 
     private var resolvedProfile: LPPerformanceProfile.Resolved {
@@ -439,37 +538,55 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
     // MARK: Scenes
 
     private func show(step: Int, crossfade: TimeInterval) {
-        guard let plan, let content, !content.isEmpty else { return }
+        guard let plan, let content, !content.isEmpty, plan.displays.liveness != .off else { return }
         shownStep = step
-        let entry = content.entries[plan.deck.entryIndex(atStep: step + skipOffset)]
-        rememberShown(entry.id)
-        let context = SceneContext(showClock: content.playlist?.showClock ?? true, clockPosition: entry.clock,
+        guard let resolved = plan.displays.resolve(step: step, skipOffset: skipOffset, deck: plan.deck, content: content,
+                                                   session: plan.session, schedule: plan.schedule) else { return }
+        let entry = resolved.entry
+        if plan.displays.recordsHistory { rememberShown(entry.id) }
+        var context = SceneContext(showClock: content.playlist?.showClock ?? true, clockPosition: entry.clock,
                                    lockUIShowing: lockUI.isShowing, paused: !gate.shouldRun, profile: resolvedProfile,
                                    power: power, seed: plan.session.sceneSeed)
+        context.liveness = plan.displays.liveness
+        context.span = resolved.span
+        // A spanning scene has one clock, on the main display.
+        context.clockOnThisDisplay = resolved.span == nil || plan.displays.isMain
+        context.generation = content.playlist?.generation ?? 0
         let url = content.fileURL(for: entry)
         let host: SceneHost
         switch entry.kind {
         case .web: host = WebSceneHost(entry: entry, fileURL: url, context: context)
         case .video: host = VideoSceneHost(entry: entry, fileURL: url, context: context)
         }
-        SaverLog.saver.notice("showing \(entry.id, privacy: .public) (\(entry.kind.rawValue, privacy: .public)), step \(step, privacy: .public)")
+        shownResolved = resolved
+        SaverLog.saver.notice("""
+            showing \(entry.id, privacy: .public) (\(entry.kind.rawValue, privacy: .public)), step \(step, privacy: .public), \
+            \(plan.displays.liveness.rawValue, privacy: .public)\(resolved.span == nil ? "" : " span", privacy: .public)\
+            \(plan.displays.isAssigned ? " assigned" : "", privacy: .public)
+            """)
         install(host, crossfade: crossfade)
     }
 
     /// Bookkeeping for no-repeat: adds the scene to the recent history the next session's first scene
-    /// avoids (never to this session's deck: see `SaverSessionRecord.startRecent`). Previews never write.
+    /// avoids (never to this session's deck: see `SaverSessionRecord.startRecent`), and to what this
+    /// display showed last. Only the lead display writes `lastShown` (all of them but in "Different").
+    /// Previews never write.
     private func rememberShown(_ id: String) {
         guard !gate.preview, var plan else { return }
         let store = SaverSessionStores.shared
-        let update = SaverSessionPlanner.recordShown(id, own: plan.record, stored: store.load(), now: Date())
-        plan.record.noteShown(id)
+        let display = plan.displays.key, lead = plan.displays.isLead
+        let update = SaverSessionPlanner.recordShown(id, own: plan.record, stored: store.load(), now: Date(),
+                                                     display: display, updatesLastShown: lead)
+        plan.record.noteShown(id, display: display, updatesLastShown: lead)
         self.plan = plan
         if let update { store.save(update) }
     }
 
     private func fallbackContext() -> SceneContext {
-        SceneContext(showClock: content?.playlist?.showClock ?? true, clockPosition: .top, lockUIShowing: lockUI.isShowing,
-                     paused: !gate.shouldRun, profile: resolvedProfile, power: power, seed: 1)
+        var context = SceneContext(showClock: content?.playlist?.showClock ?? true, clockPosition: .top, lockUIShowing: lockUI.isShowing,
+                                   paused: !gate.shouldRun, profile: resolvedProfile, power: power, seed: 1)
+        context.liveness = plan?.displays.liveness == .still ? .still : .live
+        return context
     }
 
     /// Adds a scene invisibly above the current one and starts loading it; it fades in when ready.
@@ -510,7 +627,8 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             retryWork?.cancel()
             install(FallbackSceneHost(reason: .scenesFailed, context: fallbackContext()), crossfade: Self.firstRevealDuration)
         case .retry(let delay, let skip):
-            if skip, let plan, plan.deck.count > 1 { skipOffset += 1 }
+            // An assigned scene gives way to the playlist; the playlist skips ahead when it can.
+            if skip, let plan, plan.deck.count > 1 || (plan.displays.isAssigned && skipOffset == 0) { skipOffset += 1 }
             retryWork?.cancel()
             let work = DispatchWorkItem { [weak self] in
                 guard let self, self.started, !self.gate.exiting else { return }
@@ -550,6 +668,10 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
             d["deck"] = (0..<plan.deck.count).map { plan.deck.ids[plan.deck.entryIndex(atStep: $0)] }
             d["session"] = plan.session.epoch
             d["cycleSeconds"] = plan.schedule.cycle ?? 0
+            let p = plan.displays
+            d["display"] = p.key ?? NSNull(); d["displayIndex"] = p.index; d["displayCount"] = p.layout.count
+            d["displayMode"] = p.mode.rawValue; d["liveness"] = p.liveness.rawValue; d["isMain"] = p.isMain; d["isLead"] = p.isLead
+            d["assigned"] = p.isAssigned; d["span"] = shownResolved?.span != nil
         }
         if let current { d["current"] = current.diagnostics }
         return d as NSDictionary

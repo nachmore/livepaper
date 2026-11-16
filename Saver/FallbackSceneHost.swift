@@ -28,12 +28,15 @@ final class FallbackSceneHost: SceneHost {
     private let clock: ClockOverlay?
     private var paused: Bool
     private var lockUIShowing: Bool
+    /// `.still`: no clock (it wouldn't tick) and no hint, nothing running.
+    private var still: Bool
     private var readyWork: DispatchWorkItem?
 
     init(reason: Reason, context: SceneContext) {
         self.reason = reason
         paused = context.paused
         lockUIShowing = context.lockUIShowing
+        still = context.liveness == .still
         clock = context.wantsNativeClock ? ClockOverlay(position: context.clockPosition) : nil
 
         // Deep indigo fading to near-black: calm under the lock UI and kind to OLED/mini-LED panels.
@@ -82,7 +85,7 @@ final class FallbackSceneHost: SceneHost {
         // Report asynchronously so the saver's install/reveal sequence is the same for every host.
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            self.clock?.setRunning(!self.paused)
+            self.clock?.setRunning(!self.paused && !self.still)
             self.delegate?.sceneHostDidBecomeReady(self)
         }
         readyWork = work
@@ -92,7 +95,15 @@ final class FallbackSceneHost: SceneHost {
     func setPaused(_ paused: Bool) {
         guard paused != self.paused else { return }
         self.paused = paused
-        clock?.setRunning(!paused)
+        clock?.setRunning(!paused && !still)
+    }
+
+    func setLiveness(_ liveness: SaverDisplayLiveness) {
+        let still = liveness == .still
+        guard still != self.still else { return }
+        self.still = still
+        clock?.setRunning(!paused && !still)
+        applyLockUI(animated: true)
     }
 
     func setLockUIShowing(_ showing: Bool, animated: Bool) {
@@ -102,11 +113,12 @@ final class FallbackSceneHost: SceneHost {
 
     /// macOS draws its own clock and password field over the saver: hide ours and the hint.
     private func applyLockUI(animated: Bool) {
-        clock?.setVisible(!lockUIShowing, animated: animated)
+        let hidden = lockUIShowing || still
+        clock?.setVisible(!hidden, animated: animated)
         CATransaction.begin()
         CATransaction.setAnimationDuration(animated ? ClockOverlay.fadeDuration : 0)
         CATransaction.setDisableActions(!animated)
-        message.opacity = lockUIShowing ? 0 : 1
+        message.opacity = hidden ? 0 : 1
         CATransaction.commit()
     }
 
@@ -121,7 +133,8 @@ final class FallbackSceneHost: SceneHost {
 
     var diagnostics: [String: Any] {
         var d: [String: Any] = ["kind": kind, "reason": reason == .noScenes ? "noScenes" : "scenesFailed",
-                                "paused": paused, "lockUIShowing": lockUIShowing, "messageOpacity": message.opacity]
+                                "paused": paused, "lockUIShowing": lockUIShowing, "messageOpacity": message.opacity,
+                                "liveness": still ? "still" : "live"]
         if let clock { d["clockOpacity"] = clock.opacity }
         return d
     }
