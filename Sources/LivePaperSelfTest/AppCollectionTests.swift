@@ -1,6 +1,8 @@
-// Self tests for collections in the app: multi-selection in a grid, the "Add to Collection ▸"
-// rules and the banners' wording, the Screen Saver screen's sources, the full-screen order, the disk
-// watcher, and AppModel over the mock services (seeded with MockSampleData.collections()).
+// Self tests for collections in the app: the Library's sections (collections, Your Scenes, Included;
+// search inside each, collapsing remembered per collection id, keyboard order across sections),
+// multi-selection, what a drop on a collection does, the "Add to Collection ▸" rules and the banners'
+// wording, the Screen Saver screen's sources, the full-screen order, the disk watcher, and AppModel
+// over the mock services (seeded with MockSampleData.collections()).
 import Foundation
 import LivePaperCore
 
@@ -147,6 +149,126 @@ extension SelfTests {
             try expect(FullScreenPreviewRequest.collection(["gone"], available: ["a"], playlist: PlaylistSettings()) == nil)
             try expectEqual(FullScreenPreviewRequest.collection(["b", "a"], available: ["a", "b"], playlist: PlaylistSettings())?.sequence.current, "b")
         },
+        TestCase(name: "app.collections.library-sections") {
+            func entry(_ id: String, _ name: String, builtin: Bool = false, kind: SceneManifest.Kind = .web, tags: [String] = []) -> LibraryEntry {
+                LibraryEntry(item: SceneItem(manifest: SceneManifest(id: id, name: name, kind: kind, video: kind == .video ? .init(file: "v.mov") : nil,
+                                                                     tags: tags),
+                                             packageURL: URL(fileURLWithPath: "/nonexistent/\(id).lpscene"), isBuiltin: builtin),
+                             hasAIHistory: false)
+            }
+            let entries = [entry("mine", "Mine", tags: ["night"]), entry("clip", "Clip", kind: .video), entry("aurora", "Aurora", builtin: true, tags: ["night"]),
+                           entry("zen", "Zen", builtin: true)]
+            let night = SceneCollection(id: "n", name: "Night", sceneIDs: ["aurora", "gone", "mine", "aurora"])
+            let empty = SceneCollection(id: "e", name: "Empty")
+            // Collections first (in the order given), then Your Scenes, then Included; a collection's
+            // scenes in its order, once each, those the library lacks skipped.
+            var sections = LibrarySections.make(entries: entries, collections: [empty, night], query: LibraryQuery(), collapsed: [])
+            try expectEqual(sections.map(\.id), [.collection("e"), .collection("n"), .yourScenes, .builtin])
+            try expectEqual(sections.map(\.title), ["Empty", "Night", "Your Scenes", "Included with LivePaper"])
+            try expectEqual(sections[1].sceneIDs, ["aurora", "mine"])
+            try expectEqual(sections[2].sceneIDs, ["mine", "clip"]); try expectEqual(sections[3].sceneIDs, ["aurora", "zen"])
+            try expect(sections[0].entries.isEmpty && sections[0].collection == empty, "an empty collection still shows (its drop hint)")
+            try expectEqual(sections.map(\.countText), ["0", "2", "2", "2"])
+            // The same scene in several sections: each card is its section's; ← → walk them in order,
+            // across sections; the selection's order has each scene once.
+            try expectEqual(LibrarySections.cards(sections).map(\.scene), ["aurora", "mine", "mine", "clip", "aurora", "zen"])
+            try expectEqual(LibrarySections.sceneOrder(sections), ["aurora", "mine", "clip", "zen"])
+            let first = LibraryCardID(section: .collection("n"), scene: "mine")
+            try expectEqual(LibrarySections.card(first, movedBy: 1, in: sections), LibraryCardID(section: .yourScenes, scene: "mine"))
+            try expectEqual(LibrarySections.card(LibraryCardID(section: .collection("n"), scene: "aurora"), movedBy: -1, in: sections), nil)
+            // Collapsed: the header stays, its cards leave the keyboard order (and the selection's).
+            sections = LibrarySections.make(entries: entries, collections: [empty, night], query: LibraryQuery(), collapsed: ["your-scenes"])
+            try expect(sections[2].isCollapsed && sections[2].entries.count == 2)
+            try expectEqual(LibrarySections.card(first, movedBy: 1, in: sections), LibraryCardID(section: .builtin, scene: "aurora"))
+            try expectEqual(LibrarySections.sceneOrder(sections), ["aurora", "mine", "zen"])
+            try expectEqual(LibrarySections.focusAfterCollapsing(.yourScenes, focus: .card(LibraryCardID(section: .yourScenes, scene: "clip"))),
+                            .header(.yourScenes))
+            try expectEqual(LibrarySections.focusAfterCollapsing(.yourScenes, focus: .card(first)), .card(first))
+            // Searching applies inside every section; sections without matches go, collapsed or not.
+            var q = LibraryQuery(); q.text = "night"
+            sections = LibrarySections.make(entries: entries, collections: [empty, night], query: q, collapsed: ["builtin"])
+            try expectEqual(sections.map(\.id), [.collection("n"), .yourScenes, .builtin])
+            try expectEqual(sections.map(\.countText), ["2", "1 of 2", "1 of 2"])
+            try expect(sections[2].isCollapsed)
+            q.text = ""; q.kind = .video
+            try expectEqual(LibrarySections.make(entries: entries, collections: [empty, night], query: q, collapsed: []).map(\.id), [.yourScenes])
+            try expect(LibrarySections.hides("n", entries: entries, collections: [night], query: q))
+            try expect(!LibrarySections.hides("n", entries: entries, collections: [night], query: LibraryQuery()))
+            // Your Scenes and Included only when there are some.
+            try expectEqual(LibrarySections.make(entries: [entries[2]], collections: [], query: LibraryQuery(), collapsed: []).map(\.id), [.builtin])
+            // Keys: per collection id (a rename keeps it).
+            for id in [LibrarySectionID.collection("5c0e-1"), .yourScenes, .builtin] { try expectEqual(LibrarySectionID(key: id.key), id) }
+            try expect(LibrarySectionID(key: "collection:") == nil && LibrarySectionID(key: "results") == nil)
+            let prefs = InMemoryPreferences()
+            try expectEqual(LibraryCollapsedSections.load(prefs), [])
+            LibraryCollapsedSections.save(["collection:n", "builtin"], to: prefs)
+            try expectEqual(LibraryCollapsedSections.load(prefs), ["collection:n", "builtin"])
+            prefs.set(Data(#"["builtin", "nonsense", 3]"#.utf8), forKey: LibraryCollapsedSections.preferenceKey)
+            try expectEqual(LibraryCollapsedSections.load(prefs), [])   // unreadable: all expanded
+            prefs.set(Data(#"["builtin", "nonsense"]"#.utf8), forKey: LibraryCollapsedSections.preferenceKey)
+            try expectEqual(LibraryCollapsedSections.load(prefs), ["builtin"])
+            LibraryCollapsedSections.save([], to: prefs)
+            try expect(prefs.data(forKey: LibraryCollapsedSections.preferenceKey) == nil)
+        },
+        TestCase(name: "app.collections.drop-rule") {
+            let c = SceneCollection(id: "c", name: "Night", sceneIDs: ["a", "b", "c"])
+            func plan(_ ids: [String], from source: String?, card: String? = nil, header: Bool = false) -> CollectionDropPlan {
+                CollectionDropPlan.plan(sceneIDs: ids, source: source, onto: c, card: card, onHeader: header)
+            }
+            // From Your Scenes / Included: added (at the card, or the end).
+            try expectEqual(plan(["x"], from: nil), .add(["x"], .end, copiedFrom: nil))
+            try expectEqual(plan(["x", "y"], from: nil, card: "b"), .add(["x", "y"], .before("b"), copiedFrom: nil))
+            try expectEqual(plan(["x"], from: nil, header: true), .add(["x"], .end, copiedFrom: nil))
+            // From another collection: added too (a copy; they stay there).
+            try expectEqual(plan(["x"], from: "other", card: "a"), .add(["x"], .before("a"), copiedFrom: "other"))
+            // Within the collection: reordered (onto a card: its place); nothing on the header or itself.
+            try expectEqual(plan(["a"], from: "c", card: "c"), .reorder(["a"], .after("c")))
+            try expectEqual(plan(["c"], from: "c", card: "a"), .reorder(["c"], .before("a")))
+            try expectEqual(plan(["a"], from: "c"), .reorder(["a"], .end))
+            try expectEqual(plan(["a"], from: "c", header: true), .none)
+            try expectEqual(plan(["a", "b"], from: "c", card: "a"), .none)
+            try expectEqual(plan([], from: nil), .none)
+            // Dragged from here with scenes it lacks (a selection across sections): those are added.
+            try expectEqual(plan(["a", "x"], from: "c", card: "b"), .add(["a", "x"], .before("b"), copiedFrom: nil))
+            // What the drop target says.
+            try expectEqual(CollectionText.dropLabel(plan(["x"], from: nil), collection: "Night"), "Add to \u{201C}Night\u{201D}")
+            try expectEqual(CollectionText.dropLabel(plan(["x", "y"], from: "o"), collection: "Night"), "Add 2 to \u{201C}Night\u{201D}")
+            try expectEqual(CollectionText.dropLabel(plan(["a"], from: "c", card: "c"), collection: "Night"), "Move here")
+            try expectEqual(CollectionText.dropLabel(.none, collection: "Night"), nil)
+            try expectEqual(CollectionText.copiedNote(["x"], from: "Calm"),
+                            "It stays in \u{201C}Calm\u{201D} too. To move scenes instead, use Move to Collection in their menu.")
+        },
+        TestCase(name: "app.collections.selection-section") {
+            let night = LibrarySectionID.collection("n").key, mine = LibrarySectionID.yourScenes.key
+            var s = LibrarySelection()
+            try expect(s.section == nil)
+            _ = s.click("a", .toggle, order: ["a", "b", "c"], section: night)
+            _ = s.click("c", .extend, order: ["a", "b", "c"], section: night)
+            try expectEqual(s.section, night)
+            try expectEqual(s.ordered(["c", "b", "a"]), ["c", "b", "a"])
+            // A card chosen in another section: no single section any more.
+            _ = s.click("z", .toggle, order: ["z"], section: mine)
+            try expect(s.section == nil)
+            // Deselecting everything starts over.
+            for id in ["a", "b", "c", "z"] { _ = s.click(id, .toggle, order: [], section: mine) }
+            try expect(s.isEmpty)
+            _ = s.click("z", .toggle, order: ["z"], section: mine)
+            try expectEqual(s.section, mine)
+            // ⇧-click ranges are in the clicked section's order; an anchor from elsewhere adds one card.
+            var r = LibrarySelection()
+            _ = r.click("b", .toggle, order: ["a", "b", "c", "d"], section: night)
+            _ = r.click("d", .extend, order: ["d", "c", "b"], section: night)
+            try expectEqual(r.ids, ["b", "c", "d"])
+            _ = r.click("x", .extend, order: ["x", "y"], section: mine)
+            try expectEqual(r.ids, ["b", "c", "d", "x"])
+            // Select All: in a section, or the whole Library (no section).
+            r.selectAll(["a", "b"], section: night)
+            try expectEqual(r.section, night)
+            r.selectAll(["a", "b", "x"])
+            try expect(r.section == nil)
+            r.retain([])
+            try expect(r.isEmpty && r.section == nil)
+        },
         TestCase(name: "app.collections.watcher") {
             try expectEqual(LibraryWatcher.classify(relative: ["collections.json"]), .collections)
             try expectEqual(LibraryWatcher.classify(relative: ["collections.json", "x"]), [])
@@ -168,10 +290,15 @@ extension SelfTests {
 
                 // New (empty: shown at once), rename, a taken name, delete (never the scenes).
                 var created: SceneCollection?
+                model.libraryPath = ["neon-rain"]
                 try awaitMain { created = await model.createCollection(name: "Favourites") }
                 let fav = try unwrap(created)
-                try expectEqual(model.section, .collection(fav.id))
-                model.collectionPath = ["neon-rain"]
+                // An empty one is revealed: its Library section, expanded and scrolled to.
+                try expectEqual(model.section, .library)
+                try expectEqual(model.libraryPath, [])
+                try expectEqual(model.libraryReveal, .collection(fav.id))
+                try expect(model.librarySections.contains { $0.id == .collection(fav.id) && $0.entries.isEmpty && !$0.isCollapsed })
+                model.libraryReveal = nil
                 try awaitMain { _ = await model.renameCollection(fav.id, to: "Best") }
                 try expectEqual(model.collection(id: fav.id)?.name, "Best")
                 var ok = true
@@ -182,7 +309,12 @@ extension SelfTests {
                 model.section = .library
                 try awaitMain { created = await model.createCollection(name: "Pair", sceneIDs: ["ink-bloom", "drifting-dunes"]) }
                 try expectEqual(model.section, .library)
+                try expect(model.libraryReveal == nil)
                 try expectEqual(model.banners.banners.last?.actions.map(\.title), ["Show"])
+                model.banners.banners.last?.actions.first?.perform()
+                let pair = try unwrap(created).id
+                try expectEqual(model.libraryReveal, .collection(pair))
+                model.libraryReveal = nil
 
                 // Add / toggle / remove with banners.
                 try awaitMain { await model.addToCollection(["ink-bloom", "tidal-glass"], fav.id) }
@@ -200,23 +332,102 @@ extension SelfTests {
                 try awaitMain { await model.moveToCollection(["tidal-glass"], from: fav.id, to: calm) }
                 try expectEqual(model.collection(id: fav.id)?.sceneIDs, ["ink-bloom"])
                 try expectEqual(model.collection(id: calm)?.sceneIDs, ["coastline-at-dusk", "morning-fog", "tidal-glass"])
-                // The selection follows what the collection screen shows.
-                model.showCollection(fav.id)
-                _ = model.selection.click("ink-bloom", .toggle, order: ["ink-bloom"])
+                // Cards chosen in a collection's section that leave it end the selection.
+                let favKey = LibrarySectionID.collection(fav.id).key
+                _ = model.selection.click("ink-bloom", .toggle, order: ["ink-bloom"], section: favKey)
+                try expectEqual(model.selection.section, favKey)
                 try awaitMain { await model.removeFromCollection(["ink-bloom"], fav.id) }
                 try expect(model.selection.isEmpty)
                 try expectEqual(model.collection(id: fav.id)?.sceneIDs, [])
-                // Changing screens drops the selection and the opened scene.
+                // Changing screens drops the selection.
                 _ = model.selection.click("aurora-lake", .toggle, order: ["aurora-lake"])
-                model.collectionPath = ["aurora-lake"]
-                model.section = .collection(night)
-                try expect(model.selection.isEmpty && model.collectionPath.isEmpty)
-                // Deleting the collection on screen goes back to the library; its scenes stay.
+                model.section = .playlist
+                try expect(model.selection.isEmpty)
+                model.section = .library
+                // Deleting a collection: its scenes stay; a selection chosen in it ends, and its
+                // remembered collapsed state goes (a later collection starts expanded).
+                model.setCollapsed(.collection(night), true)
+                _ = model.selection.click("neon-rain", .toggle, order: ["neon-rain"], section: LibrarySectionID.collection(night).key)
                 try awaitMain { await model.deleteCollection(night) }
-                try expectEqual(model.section, .library)
+                try expect(model.selection.isEmpty)
+                try expect(!model.collapsedSections.contains(LibrarySectionID.collection(night).key))
+                try expect(!model.librarySections.contains { $0.id == .collection(night) })
                 try expect(model.collection(id: night) == nil)
                 try expect(model.entry(id: "neon-rain") != nil)
                 try expectEqual(model.banners.banners.last?.message, "Its 4 scenes stay in your library.")
+            }
+        },
+        TestCase(name: "app.model.library-sections") {
+            try withModel("library-sections") { model, fx in
+                let nightKey = LibrarySectionID.collection(night).key
+                try expectEqual(model.librarySections.map(\.id), [.collection(calm), .collection(night), .collection(warm), .yourScenes, .builtin])
+                // Collapsing is remembered across launches, per collection id: a rename keeps it.
+                model.setCollapsed(.collection(night), true)
+                model.setCollapsed(.builtin, true)
+                try expect(model.isCollapsed(.collection(night)) && model.isCollapsed(.builtin))
+                try awaitMain { _ = await model.renameCollection(night, to: "Starry") }
+                let relaunched = AppModel(services: fx.services, environment: model.environment)
+                try expectEqual(relaunched.collapsedSections, [nightKey, "builtin"])
+                try expect(relaunched.isCollapsed(.collection(night)) && !relaunched.isCollapsed(.collection(calm)))
+                // New collections start expanded.
+                var created: SceneCollection?
+                try awaitMain { created = await model.createCollection(name: "Later", sceneIDs: ["ink-bloom"]) }
+                let later = try unwrap(created).id
+                try expect(!model.isCollapsed(.collection(later)))
+                model.setCollapsed(.builtin, false)
+                try expectEqual(AppModel(services: fx.services, environment: model.environment).collapsedSections, [nightKey])
+                // Collapsing a section whose cards are selected (and shown nowhere else) ends their selection.
+                let calmOrder = model.librarySections.first { $0.id == .collection(calm) }?.sceneIDs ?? []
+                _ = model.selection.click("tidal-glass", .toggle, order: calmOrder, section: LibrarySectionID.collection(calm).key)
+                model.setCollapsed(.collection(calm), true)
+                try expect(model.selection.contains("tidal-glass"), "still shown in Your Scenes")
+                model.setCollapsed(.yourScenes, true)
+                try expect(model.selection.isEmpty)
+                model.setCollapsed(.yourScenes, false)
+                // Revealing a collection: the Library, expanded, scrolled to; a search hiding it is cleared.
+                model.section = .playlist
+                model.query.text = "volcano"
+                model.revealCollection(night)
+                try expectEqual(model.section, .library)
+                try expect(!model.isCollapsed(.collection(night)) && model.query.text.isEmpty)
+                try expectEqual(model.libraryReveal, .collection(night))
+                model.query.text = "lanterns"
+                model.revealCollection(night)
+                try expectEqual(model.query.text, "lanterns")   // it has a match: the search stays
+                model.query = LibraryQuery()
+            }
+        },
+        TestCase(name: "app.model.library-drops") {
+            try withModel("library-drops") { model, _ in
+                // From Your Scenes onto a card of Night Skies: added at its place.
+                var plan = model.dropPlan(["ink-bloom"], from: nil, onto: night, card: "neon-rain")
+                try expectEqual(plan, .add(["ink-bloom"], .before("neon-rain"), copiedFrom: nil))
+                model.libraryDrag = LibraryDrag(sceneIDs: ["ink-bloom"], sourceCollection: nil)
+                try awaitMain { await model.performDrop(plan, onto: night) }
+                try expect(model.libraryDrag == nil)
+                try expectEqual(model.collection(id: night)?.sceneIDs, ["aurora-lake", "ink-bloom", "neon-rain", "paper-lanterns", "orbiting-garden"])
+                try expectEqual(model.banners.banners.last?.title, "Added \u{201C}Ink Bloom\u{201D} to \u{201C}Night Skies\u{201D}")
+                // Within Night Skies: reordered, no banner.
+                let before = model.banners.banners.count
+                plan = model.dropPlan(["orbiting-garden"], from: night, onto: night, card: "aurora-lake")
+                try awaitMain { await model.performDrop(plan, onto: night) }
+                try expectEqual(model.collection(id: night)?.sceneIDs, ["orbiting-garden", "aurora-lake", "ink-bloom", "neon-rain", "paper-lanterns"])
+                try expectEqual(model.banners.banners.count, before)
+                // From Night Skies to Calm Water: a copy, and the banner says how to move instead.
+                plan = model.dropPlan(["neon-rain"], from: night, onto: calm, card: nil, onHeader: true)
+                try awaitMain { await model.performDrop(plan, onto: calm) }
+                try expectEqual(model.collection(id: calm)?.sceneIDs.last, "neon-rain")
+                try expect(model.collection(id: night)?.sceneIDs.contains("neon-rain") == true)
+                try expectEqual(model.banners.banners.last?.message,
+                                "It stays in \u{201C}Night Skies\u{201D} too. To move scenes instead, use Move to Collection in their menu.")
+                try expectEqual(model.banners.banners.last?.actions.map(\.title), ["Show"])
+                // Dropped back on its own header: nothing. An unknown collection: nothing.
+                try expectEqual(model.dropPlan(["neon-rain"], from: night, onto: night, card: nil, onHeader: true), .none)
+                try expectEqual(model.dropPlan(["neon-rain"], from: nil, onto: "gone", card: nil), .none)
+                // Already there: an info banner, nothing changes.
+                plan = model.dropPlan(["neon-rain"], from: nil, onto: calm, card: nil)
+                try awaitMain { await model.performDrop(plan, onto: calm) }
+                try expectEqual(model.banners.banners.last?.style, .info)
             }
         },
         TestCase(name: "app.model.collections-screen-saver-follows") {
@@ -316,12 +527,14 @@ extension SelfTests {
                 try expect(!model.collections.contains { $0.name == "From the CLI" })
                 try awaitMain { await model.refreshFromDisk(.collections) }
                 try expect(model.collections.contains { $0.name == "From the CLI" })
-                // The collection on screen deleted elsewhere: back to the library.
+                // Deleted elsewhere while cards were chosen in its section: the selection ends.
                 let id = try unwrap(model.collections.first { $0.name == "From the CLI" }).id
-                model.showCollection(id)
+                try expect(model.librarySections.contains { $0.id == .collection(id) })
+                _ = model.selection.click("ink-bloom", .toggle, order: ["ink-bloom"], section: LibrarySectionID.collection(id).key)
                 try fx.services.collections.delete(id: id)
                 try awaitMain { await model.refreshFromDisk(.collections) }
-                try expectEqual(model.section, .library)
+                try expect(model.selection.isEmpty)
+                try expect(!model.librarySections.contains { $0.id == .collection(id) })
             }
         },
     ] }

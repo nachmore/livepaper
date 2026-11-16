@@ -64,6 +64,21 @@ enum CollectionText {
         "Moved \(scenes(ids, names: names)) to \(quoted(collection))"
     }
 
+    /// After dragging scenes from one collection's section to another's: a drag adds, it doesn't move.
+    static func copiedNote(_ ids: [String], from collection: String) -> String {
+        (ids.count == 1 ? "It stays in \(quoted(collection)) too." : "They stay in \(quoted(collection)) too.")
+            + " To move scenes instead, use Move to Collection in their menu."
+    }
+
+    /// What a drop target says while scene cards are dragged over it.
+    static func dropLabel(_ plan: CollectionDropPlan, collection: String) -> String? {
+        switch plan {
+        case .none: return nil
+        case .add(let ids, _, _): return ids.count == 1 ? "Add to \(quoted(collection))" : "Add \(ids.count) to \(quoted(collection))"
+        case .reorder: return "Move here"
+        }
+    }
+
     /// Nothing was added: every scene is in it already.
     static func alreadyIn(_ ids: [String], collection: String, names: [String: String]) -> String {
         ids.count == 1 ? "\(quoted(names[ids[0]] ?? ids[0])) is already in \(quoted(collection))"

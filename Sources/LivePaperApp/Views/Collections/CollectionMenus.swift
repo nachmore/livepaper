@@ -1,5 +1,6 @@
-// CollectionMenus — "Add to Collection ▸" (with checkmarks), "Move to Collection ▸", and the bar
-// that appears while cards are selected in a grid.
+// CollectionMenus — a collection's actions (its Library section's "…" menu and context menu), "Add to
+// Collection ▸" (with checkmarks), "Move to Collection ▸", and the bar that appears while cards are
+// selected in the Library.
 import LivePaperCore
 import SwiftUI
 
@@ -58,20 +59,61 @@ struct MoveToCollectionMenu: View {
     }
 }
 
-/// While cards are selected (⌘-click, ⇧-click): how many, what can be done with them, and Done.
-struct SelectionBar: View {
-    let grid: SceneGrid
-    /// The grid's cards in order (the selection is acted on in this order).
-    let order: [String]
+/// A collection's actions: its Library section's "…" menu and context menu.
+struct CollectionMenuItems: View {
+    let collection: SceneCollection
     @Environment(AppModel.self) private var model
 
     var body: some View {
+        let id = collection.id
+        let empty = model.sceneCount(of: collection) == 0
+        if model.isFollowed(id) {
+            Button("Playing in the Screen Saver") {}
+                .disabled(true)
+            Button("Screen Saver Settings\u{2026}") { model.section = .playlist }
+        } else {
+            Button("Play as Screen Saver") { Task { await model.useCollectionAsScreenSaver(id) } }
+                .disabled(empty || model.isPublishing)
+                .help(empty ? "Add scenes first" : "The screen saver plays this collection and follows its changes")
+        }
+        Button("Preview Full Screen") { FullScreenPreviewLauncher.previewCollection(id, model: model) }
+            .disabled(!FullScreenPreviewLauncher.canPreviewCollection(id, model: model))
+        Divider()
+        Button("Export\u{2026}") {
+            if let url = SystemActions.chooseCollectionExportDestination(for: collection) {
+                Task { await model.exportCollection(id, to: url) }
+            }
+        }
+        Divider()
+        Button("Rename\u{2026}") { model.collectionAction = .rename(id) }
+        Button("Delete Collection\u{2026}", role: .destructive) { model.collectionAction = .delete(id) }
+    }
+}
+
+/// While cards are selected (⌘-click, ⇧-click): how many, what can be done with them, and Done. Chosen
+/// in a collection's section, it also moves them to another collection or removes them from this one.
+struct SelectionBar: View {
+    let sections: [LibrarySection]
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let order = LibrarySections.sceneOrder(sections)
         let ids = model.selection.ordered(order)
+        let chosenIn = model.selection.section.flatMap(LibrarySectionID.init(key:))
+        let scope = chosenIn.flatMap { id in sections.first { $0.id == id } }
+        let source = chosenIn?.collectionID.flatMap { model.collection(id: $0) }
+        let inSource = source.map { c in ids.filter(c.sceneIDs.contains) } ?? []
         HStack(spacing: 10) {
             Image(systemName: "checkmark.circle.fill").foregroundStyle(.tint)
             Text(ids.count == 1 ? "1 scene selected" : "\(ids.count) scenes selected")
                 .font(.callout.weight(.medium))
                 .monospacedDigit()
+            if let source {
+                Text("in \(CollectionText.quoted(source.name))")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
             Spacer()
             Menu {
                 AddToCollectionItems(sceneIDs: ids)
@@ -79,24 +121,30 @@ struct SelectionBar: View {
                 Label("Add to Collection", systemImage: "rectangle.stack.badge.plus")
             }
             .fixedSize()
-            if let id = grid.collectionID, let c = model.collection(id: id) {
+            .help("Add them to a collection (or drag them onto one); they stay where they are")
+            if let source, !inSource.isEmpty {
+                let others = model.collections.filter { $0.id != source.id }
                 Menu {
-                    ForEach(model.collections.filter { $0.id != id }) { other in
-                        Button(other.name) { Task { await model.moveToCollection(ids, from: id, to: other.id) } }
+                    ForEach(others) { other in
+                        Button(other.name) { Task { await model.moveToCollection(inSource, from: source.id, to: other.id) } }
                     }
                 } label: {
                     Label("Move to", systemImage: "arrow.right.square")
                 }
                 .fixedSize()
-                .disabled(model.collections.count < 2)
+                .disabled(others.isEmpty)
+                .help("Move them to another collection: out of \(CollectionText.quoted(source.name))")
                 Button(role: .destructive) {
-                    Task { await model.removeFromCollection(ids, id) }
+                    Task { await model.removeFromCollection(inSource, source.id) }
                 } label: {
-                    Label("Remove from \u{201C}\(c.name)\u{201D}", systemImage: "minus.circle")
+                    Label("Remove from \(CollectionText.quoted(source.name))", systemImage: "minus.circle")
                 }
+                .help("Take them out of the collection; the scenes stay in your library")
             }
-            Button("Select All") { model.selection.selectAll(order) }
-                .disabled(ids.count == order.count)
+            // In the section the cards were chosen in, else the whole Library.
+            let all = scope?.sceneIDs ?? order
+            Button("Select All") { model.selection.selectAll(all, section: scope?.id.key) }
+                .disabled(all.allSatisfy(model.selection.contains))
             Button("Done") { model.selection.clear() }
                 .keyboardShortcut(.cancelAction)
                 .help("End the selection (Esc)")

@@ -1,7 +1,9 @@
-// CollectionDrag — what dragging scene cards inside LivePaper carries: the scenes' ids (every
-// selected card when the dragged one is selected) and the collection they come from, if any. Drop
-// targets: a sidebar collection (adds them), "New Collection…" (a new one with them), a card in a
-// collection's grid (moves them there, CollectionOrder.dropPlacement) and the grid's empty space (the end).
+// CollectionDrag — what dragging scene cards in the Library carries: the scenes' ids (every selected
+// card when the dragged one is selected) and the collection whose section they come from, if any.
+// Drop targets (LibraryView, CollectionDropPlan): a collection's section — its header and empty space
+// (the end) or one of its cards (that place, CollectionOrder.dropPlacement); dragged from elsewhere
+// the scenes are added, dragged within their collection they are reordered — and "New Collection" (the
+// toolbar button, the row after the collections) makes a collection with them.
 import CoreTransferable
 import LivePaperCore
 import SwiftUI
@@ -14,7 +16,7 @@ extension UTType {
 
 struct SceneDragPayload: Codable, Transferable, Equatable {
     var sceneIDs: [String]
-    /// The collection whose grid they were dragged from (nil: the library).
+    /// The collection whose section they were dragged from (nil: Your Scenes, Included).
     var sourceCollection: String?
 
     static var transferRepresentation: some TransferRepresentation {
@@ -27,7 +29,8 @@ struct SceneDragPayload: Codable, Transferable, Equatable {
     }
 }
 
-/// Which grid a scene card is in: what a click opens into, what Space previews, what its menu offers.
+/// Which kind of section a scene card is in: what Space previews (the library, or the collection in
+/// its order) and what its menu offers.
 enum SceneGrid: Equatable {
     case library
     case collection(String)

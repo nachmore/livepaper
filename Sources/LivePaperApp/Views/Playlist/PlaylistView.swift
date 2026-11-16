@@ -160,7 +160,7 @@ struct PlaylistView: View {
         }
     }
 
-    /// The followed collection's scenes, in its order (edited on the collection's screen).
+    /// The followed collection's scenes, in its order (edited in its Library section).
     @ViewBuilder
     private var collectionRows: some View {
         if let c = followed {
@@ -169,7 +169,8 @@ struct PlaylistView: View {
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer()
-                Button("Edit Collection") { model.showCollection(c.id) }
+                Button("Edit in Library") { model.revealCollection(c.id) }
+                    .help("Its section in the Library: add, reorder, move or remove its scenes")
             }
             let entries = model.collectionEntries(c.id)
             if entries.isEmpty {
