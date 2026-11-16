@@ -58,12 +58,15 @@ public enum PromptPaths {
             guard !covered.contains(where: { NSIntersectionRange($0, m.range).length > 0 }) else { continue }
             var token = ns.substring(with: m.range)
             var length = m.range.length
-            // Sentence punctuation after a path isn't part of it.
+            // Sentence punctuation after a path isn't part of it, and the path ends there: it isn't
+            // carried on into the next sentence ("…/refs. Then 3 shots like x.png").
+            var endsClause = false
             while let last = token.last, trailing.contains(last), !token.hasSuffix("\\" + String(last)) {
                 token.removeLast(); length -= (String(last) as NSString).length
+                endsClause = true
             }
             var span = NSRange(location: m.range.location, length: length)
-            switch extend(token, in: ns, after: m.range.location + m.range.length) {
+            switch endsClause ? .none : extend(token, in: ns, after: m.range.location + m.range.length) {
             case .extended(let longer, let end):
                 token = longer
                 span = NSRange(location: m.range.location, length: end - m.range.location)
@@ -83,10 +86,12 @@ public enum PromptPaths {
     /// parentheses, word by word on the same line (≤ `maxExtraWords`, ≤ `maxExtraLength`), stopping
     /// at a word that starts another path. It is carried on to the first word that ends in an image
     /// file name when that reads like one name — a single word ("old photo.jpg", "photo (1).png"),
-    /// a folder name with a slash ("My Refs/heron.png"), a parenthesis, or a word with a digit before
-    /// the last ("Screenshot 2026-11-15 at 10.41.23.png") — and not otherwise ("refs and sunset.png"
-    /// stays the folder refs); or to a word ending in "/" within two words ("My Refs/"). A token
-    /// directly followed by a word with a slash inside that leads nowhere is a `fragment`.
+    /// a folder name with a slash ("My Refs/heron.png"), a parenthesis that opens right after the
+    /// token and closes in the file name ("photo (copy 2).png", not "refs (the folder) and x.png"),
+    /// or a word with a digit before the last ("Screenshot 2026-11-15 at 10.41.23.png") — and not
+    /// otherwise ("refs and sunset.png" stays the folder refs); or to a word ending in "/" within two
+    /// words ("My Refs/"). A token directly followed by a word with a slash inside that leads
+    /// nowhere is a `fragment`.
     static func extend(_ token: String, in text: NSString, after end: Int) -> Extension {
         guard !token.hasSuffix("/"), !ReferenceFolders.isImageFileName(token) else { return .none }
         var words: [(text: String, start: Int, end: Int)] = []
@@ -117,7 +122,8 @@ public enum PromptPaths {
             let candidate = token + text.substring(with: NSRange(location: end, length: wordEnd - end))
             if ReferenceFolders.isImageFileName(candidate) {
                 let extra = words[0...n].map(\.text)
-                let reads = n == 0 || extra.contains { $0.contains("/") } || words[0].text.hasPrefix("(")
+                let parenthesised = words[0].text.hasPrefix("(") && !extra.dropLast().contains { $0.contains(")") }
+                let reads = n == 0 || extra.contains { $0.contains("/") } || parenthesised
                     || extra.dropLast().contains { $0.contains(where: \.isNumber) }
                 return reads ? .extended(candidate, end: wordEnd) : .none
             }

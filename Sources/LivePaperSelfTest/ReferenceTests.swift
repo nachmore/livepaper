@@ -733,6 +733,14 @@ enum ReferenceTests {
         // …and not across ordinary words, or into another path.
         try expectEqual(found("compare /tmp/refs and sunset.png").map { [$0.1, "\($0.2)"] }, [["/tmp/refs", "folder"]])
         try expectEqual(paths("~/Desktop/refs with 3.png files"), ["/Users/tester/Desktop/refs"])
+        // A parenthesis belongs to the name only when it closes in the file name; a path that ends a
+        // clause isn't carried on into the next one.
+        try expectEqual(paths("like ~/Pictures/photo (copy 2).png"), ["/Users/tester/Pictures/photo (copy 2).png"])
+        try expectEqual(found("style from ~/Desktop/refs (the folder) and x.png").map { [$0.1, "\($0.2)"] },
+                        [["/Users/tester/Desktop/refs", "folder"]])
+        try expectEqual(found("style from ~/Desktop/refs. Then 2026 shots like x.png").map { [$0.1, "\($0.2)"] },
+                        [["/Users/tester/Desktop/refs", "folder"]])
+        try expectEqual(found("**~/Desktop/refs** and 3 like x.png").map { [$0.1, "\($0.2)"] }, [["/Users/tester/Desktop/refs", "folder"]])
         try expectEqual(paths("~/Desktop/a b /tmp/c.png"), ["/Users/tester/Desktop/a", "/tmp/c.png"])
         // A fragment of a longer path that can't be read is no folder.
         try expectEqual(paths("~/Desktop/My Refs/notes and more"), [])
