@@ -93,6 +93,7 @@ Sources/LivePaperCore/            models, paths, the playlist contract, library,
   Services/ServiceProtocols.swift the service API the app and CLI program against (+ LivePaperServices.live())
   Playlist/PlaylistModel.swift    Codable playlist + notification names, compiled into BOTH Core and the
                                   saver (keep it Foundation-only and self-contained)
+  Playlist/DisplayLayout.swift    display keys, arrangement, main display, virtual canvas (also in the saver)
 Sources/LivePaperRenderKit/       off-screen WKWebView renderer + socket server (AppKit/WebKit)
 Sources/LivePaperApp/             SwiftUI app (+ embeds the RenderKit server)
   Entry/ Model/ Logic/ Mocks/     app entry, AppModel, Foundation-only logic, mock services
@@ -105,7 +106,8 @@ Sources/LivePaperSelfTest/        `swift run LivePaperSelfTest [filter]` — a t
                                   app's Logic/Model/Mocks files and the saver's pure logic into the tests.
 Saver/                            LivePaper.saver sources (compiled with swiftc -Xlinker -bundle by
                                   scripts/build-saver.sh; self-contained, no dependency on Core except
-                                  PlaylistModel.swift). See Saver/README.md.
+                                  PlaylistModel.swift, DisplayLayout.swift and SceneNavigationGate.swift).
+                                  See Saver/README.md.
 Runtime/                          runtime.js, livepaper.d.ts, SCENE_API.md, AGENTS.md (agent guide), templates/
 Scenes/                           built-in example scenes (original work only — the repo is public)
 App/                              Info.plist (document type, LSUIElement), icon sources
@@ -137,7 +139,11 @@ directories and inject fakes for commands, preferences and login items.
     .kiro/agents/                 the restricted agent Kiro sessions run as
   Workspaces/.render-relay/<id>/  scenes compiled by the session runner for relayed render requests
   state.json                      app → helper shared state (§4.4)
-  playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes)
+  playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes,
+                                  displays: mode / per-display scenes / battery, §4.3), plus `displayNames`
+                                  (display id → last seen name, for assigned displays; app UI only, never
+                                  published). Decoded field by field: a missing or malformed field gets its
+                                  default, the rest is kept (old files, newer versions)
   ai-settings.json                AISettings: Settings › AI (shared by the app, the CLI and sessions)
   publish.lock                    flock: one publish / saver install, update or removal at a time (app and CLI
                                   may race)
@@ -211,9 +217,14 @@ history/<stamp>/  previous versions kept by "Replace" (AI modify accept, Replace
   "author": "you", "created": "2026-11-13T…Z", "updated": "…",
   "parent": "aurora-lake",                   // when cloned: the id it was cloned from
   "tags": ["night"],
-  "performance": { "benchMs": 1.4, "energyMw": 60, "checkedAt": "…" }   // written by check
+  "performance": { "benchMs": 1.4, "energyMw": 60, "checkedAt": "…" },  // written by check
+  "span": true                               // optional: may stretch across displays (below)
 }
 ```
+`"span": true` means "this web scene is a pure function of lp.t, the seed and the canvas size, and may
+stretch across displays" ("Span across displays", §6; SCENE_API.md §16; `livepaper check` verifies it).
+Videos span unless they say `"span": false` (one shared player shows every display its crop, exact by
+construction). Decoded tolerantly (a non-bool is ignored); `SceneManifest.spans` is the effective value.
 
 ### 4.3 Playlist (published into the saver; `Sources/LivePaperCore/Playlist/PlaylistModel.swift`)
 `LivePaper.saver/Contents/Resources/Playlist/playlist.json`:
@@ -223,9 +234,24 @@ history/<stamp>/  previous versions kept by "Replace" (AI modify accept, Replace
   "cycleMinutes": 5,                 // 0 = never change while running
   "showClock": true,
   "performance": "automatic",        // automatic | best | balanced | battery
-  "scenes": [ { "id": "aurora-lake", "name": "Aurora Lake", "kind": "web", "file": "aurora-lake.html", "clock": "top" },
-              { "id": "beach", "name": "Beach", "kind": "video", "file": "beach.mov", "fit": "fill", "clock": "top" } ] }
+  "displays": { "mode": "choose",    // same | different | choose | span (multiple displays, §6)
+                "assignments": { "37D8832A-2D66-02CA-B9F7-8F30A301B230": "ringed-giant" },   // choose only
+                "onBattery": "still" },          // live | still | off: what non-main displays show on battery
+  "displayScenes": [ { "id": "ringed-giant", "name": "Ringed Giant", "kind": "web", "file": "ringed-giant.html",
+                       "clock": "top", "span": true } ],   // published only for a display assigned to it
+  "scenes": [ { "id": "aurora-lake", "name": "Aurora Lake", "kind": "web", "file": "aurora-lake.html", "clock": "top", "span": true },
+              { "id": "beach", "name": "Beach", "kind": "video", "file": "beach.mov", "fit": "fill", "clock": "top", "span": true } ] }
 ```
+Multiple displays (`LPDisplaySettings`, `Playlist/DisplayLayout.swift` for keys and arrangement):
+`displays` defaults to `{same, {}, live}` — exactly the behaviour before display modes — and so does a
+file without it. Assignment keys are display UUIDs, uppercase (`CGDisplayCreateUUIDFromDisplayID`, the
+form the wallpaper store uses; "DISPLAY-<id>" for a display without one). Publish writes `mode` and
+`onBattery` always, assignments only in `choose` mode and only to scenes it published — a deck scene, or
+a library scene staged once into `displayScenes` (one that fails to stage is reported in `skipped`; an
+unknown one is dropped) — and every entry's `span` (`SceneManifest.spans`). `schema` stays 1: the seven
+original keys are required as before (unreadable → the saver's fallback), the new ones are optional and
+tolerant both ways (an unknown mode or battery value → the default, a broken `displayScenes` item is
+dropped; an older saver ignores them all and plays "same").
 Web scenes are compiled to single self-contained HTML (runtime and assets inlined) at publish time.
 Supported files: `html`/`htm` for web scenes, `mov`/`mp4`/`m4v` for video
 (`LPPlaylistEntry.webExtensions` / `.videoExtensions`; the saver skips anything else, so publish
@@ -280,7 +306,8 @@ LivePaper.scene({
 (render scale from profile + governor, already in dpr), t, dt, frame, mode ('live'|'still'|'bench'|
 'manual'), rand (seeded), quality (0.5…1, set by the governor), clockRect ({x,y,w,h}|null),
 clockVisible, clockAlpha (eased 0–1 opacity of any clock), env {power: 'ac'|'battery', lowPower,
-reducedMotion, preview}, cfg, util`. `LivePaper.util` (clamp, lerp, smoothstep, ease.*,
+reducedMotion, preview}, cfg, util`, and for spanning displays `viewport ({x,y,w,h}: this page's part
+of the canvas), span, fragOffset ([x, y] device px, GL bottom-left), clockBox`. `LivePaper.util` (clamp, lerp, smoothstep, ease.*,
 noise1/2, fbm2, mulberry32, rgba/mix, glowSprite/glow, makeStars), `LivePaper.clockParts()` for
 scenes that draw their own clock (`clock: 'none'`; must fade it by `lp.clockAlpha` and hide it when
 `lp.clockVisible` is false), and assets from `assets/`: `LivePaper.image(name)` (decoded
@@ -297,17 +324,30 @@ Host responsibilities (the scene never implements these):
 * performance governor: `performance` profile → fps cap + render scale; adaptive step-down when
   measured frame time exceeds budget; exposes `lp.quality` so scenes can thin particles.
 * error reporting to the host (`{type:'error'}`), `{type:'ready'}`, `{type:'stats'}`.
+* **spanning displays** (SCENE_API.md §16): with `spanW`/`spanH` > 0 the page shows the viewport
+  (`spanX`, `spanY`, window size) of a virtual canvas; `lp.w/h` are the canvas, `lp.pw/ph` its device
+  pixels, the stage only the viewport. The stage context's absolute transforms
+  (`setTransform`/`resetTransform`, `getTransform` un-offset) and, in WebGL, `viewport`/`scissor` on
+  the default framebuffer are offset by the viewport's device-pixel origin, so scenes drawing the
+  whole canvas draw their slice. While spanning the governor is off, canvas-sized `util.layer`s are
+  capped at 16 MP, a WebGL page lowers its density to stay within `MAX_VIEWPORT_DIMS`, and the clock
+  is laid out in the clock box (`spanClock*`: the main display's viewport) in canvas coordinates and
+  drawn only by the page whose viewport holds it. `timeOrigin` (ms since 1970, live mode) makes
+  `lp.t` the wall-clock time since then, monotonic, the same on every page; `paused` loads the page
+  paused (one frame, no frame loop, no clock timer).
 
 Configuration, lowest to highest precedence: defaults < `window.LIVEPAPER_CONFIG` (user script at
 document start) < URL hash (development) < `LivePaper.host.config({...})`. Keys (runtime.js `TYPES`;
 unknown keys are ignored, so hosts must use these): `still, t, bench, manual, clock, clockPosition,
 hour12, clockTime, fps, scale, dprMax, performance, power, lowPower, reducedMotion, preview, lockUI,
-seed, debug, governor, budgetMs, statsEvery`. `lockUI: true` starts a scene with its clock hidden
+seed, debug, governor, budgetMs, statsEvery, spanW, spanH, spanX, spanY, spanClockX, spanClockY,
+spanClockW, spanClockH, timeOrigin, paused`. `lockUI: true` starts a scene with its clock hidden
 (the saver sets it when it creates a scene while the lock UI is up); `preview: true` marks small
 previews (the app's library and detail previews) and becomes `lp.env.preview`.
 
 Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume()`, `.lockUI(bool)`,
-`.power(obj)`, `.advance(dt)` (manual mode). Page→host via `webkit.messageHandlers.livepaper.postMessage({...})`.
+`.power(obj)`, `.advance(dt)` (manual mode). Page→host via `webkit.messageHandlers.livepaper.postMessage({...})`;
+`ready` carries `viewport`, `span` and `hasUpdate` (the scene defines `update()`).
 
 ## 6. Saver (`Saver/`, details in `Saver/README.md`)
 * **Run gate** (`SaverRunGate`, switches in `SaverGatePolicy`): a non-preview instance renders only
@@ -325,8 +365,9 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
 * **Web scenes:** `WKWebView` (`PassiveWebView`: no hit-testing), `loadHTMLString(baseURL: nil)`
   (the only navigation `SceneNavigationGate` lets through; no new windows or downloads),
   non-persistent data store, `window.LIVEPAPER_CONFIG = {clock, clockPosition, fps, scale, seed,
-  power, lowPower, lockUI}` injected at document start, occlusion detection disabled, failure
-  recovery with backoff.
+  power, lowPower, lockUI}` (+ the span keys and `timeOrigin` for a spanning step, `paused` for a
+  still display) injected at document start, occlusion detection disabled, failure recovery with
+  backoff.
 * **Video scenes:** native `AVPlayerLayer` + `AVPlayerLooper` (hardware decode, lowest power),
   native clock overlay (`CATextLayer`s) styled like the runtime clock.
 * **Clock hand-off:** observe `com.apple.screenLockUIIsShown|IsHidden` →
@@ -336,8 +377,39 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
 * Power: pause on `screensDidSleep`, resume on wake; `Automatic` profile = battery saver on battery
   or Low Power Mode; previews at 15 fps; exit host process 0.5 s after `com.apple.screensaver.willstop`
   (non-preview only).
-* Options sheet: summary + "Open LivePaper…" (posts `openApp`, which the helper turns into launching
-  the app — the sandboxed saver can't launch apps itself).
+* Options sheet: summary (+ the display mode when it isn't the default) + "Open LivePaper…" (posts
+  `openApp`, which the helper turns into launching the app — the sandboxed saver can't launch apps
+  itself).
+* **Multiple displays** (`playlist.displays`; `SaverDisplayPlan` in `SaverLogic.swift`): every
+  display's view runs in one `legacyScreenSaver` process (verified). Each finds its display
+  (`window.screen` → `NSScreenNumber` → `CGDisplayCreateUUIDFromDisplayID`, uppercase; "DISPLAY-<id>"
+  without a UUID), the arrangement (`NSScreen.screens`, converted to top-left global points;
+  `Playlist/DisplayLayout.swift`), its index in the stable order (left edge, then top edge, then key)
+  and the **main** display (the built-in one if it is on, else the menu-bar screen, else the first),
+  re-read at every start, on `NSApplication.didChangeScreenParameters` and when its window changes
+  screen. A view starting while another view of the process runs **joins that view's session**
+  whatever its age (a display connected mid-run shares the time origin); the store-based join (45 s)
+  stays the fallback. Modes (all keep the session's seed, schedule and no-repeat rules):
+  *same* — today's behaviour; *different* — display k plays deck step s + k, with the deck's
+  `spread` = the display count so any d consecutive steps are distinct (across reshuffles too), the
+  first d positions avoid the recent scenes, and no display starts with what it showed last
+  (`shownOn` in the session record); only the last display in order that shows anything writes
+  `lastShown` (sequence continues after it); *choose* — a display with an assignment whose scene is
+  playable shows it (no cycling, no history; repeated failures fall back to the playlist), the others
+  play the playlist; *span* — a step whose entry has `span: true` spans: each display renders its
+  viewport of the union of all frames (web: the runtime's span keys, §5; video: one shared player, the
+  player layer framed as the whole canvas offset by −viewport and clipped by the host view), with the
+  time base and seed shared and exactly one clock, on the main display; other steps play as *same*.
+  Different and span need two displays (else *same*). Previews and a display whose key isn't in the
+  arrangement always play as *same*, live (never black on uncertainty).
+* **Shared video decode:** one `AVQueuePlayer` + `AVPlayerLooper` per (file, publish generation) per
+  process (`SharedVideoPlayers`), leased by every display's `AVPlayerLayer` that shows that file; it
+  plays while any lease runs and is dropped with the last; a looper failure fails every leaseholder.
+* **Battery** (`onBattery`): on battery or in Low Power Mode every display but the main one shows the
+  scene live, a **still** (the page loaded paused: one frame, no frame loop or clock timer, clock
+  hidden; a video's frame at the shared player's time in a plain layer, no player) or **nothing** (no
+  scene host, no timers: black). Span with `off` shows the whole scene on the main display. Followed
+  live on power changes, like the fps/scale profile.
 * **Publishing after signing:** publish rewrites `Contents/Resources/Playlist/` of the installed,
   already-signed bundle. That breaks the resource seal (`codesign --verify` fails) but the bundle
   still loads and plays the new content: the load-time signature covers the executable, which
@@ -447,6 +519,8 @@ connection; the server renders strictly one request at a time on the main thread
 → {"op":"thumbnail","scene":"/abs/x.lpscene","out":"/abs/thumbnail.jpg"}
 → {"op":"motion","html":…,"width":1280,"height":720,"dpr":0.5,"times":[3,17,41,120],"gaps":[0.5,2,5],"grid":[16,9],
    "out":"/abs/.check/motion-1280x720@0.5.png"}
+→ {"op":"still","html":…,"width":2560,"height":1440,"dpr":1,"t":12,"clock":false,
+   "span":{"canvasW":4072,"canvasH":1440,"x":1512,"y":0,"clockX":0,"clockY":458,"clockW":1512,"clockH":982}}
 → {"op":"ping"}  |  {"op":"shutdown"}                     (answered without queuing)
 ← {"ok":true,"ready":true,"errors":[],"bench_ms":1.4,"out":"…","fps":30,"cpu_mW":61,"mean_luma":…,"clock_luma":…,
    "motion":{"width":640,"height":360,"cols":16,"rows":9,"samples":[{"t":3,"gaps":[{"gap":0.5,"tiles":{"level":[…],"area":[…]}},…],
@@ -463,6 +537,14 @@ connection; the server renders strictly one request at a time on the main thread
   maps (`MotionAnalysis.summarize`/`verdict`). The answer is one line, so cols × rows × times ×
   (gaps + 1) may be at most 65,536 (`MotionAnalysis.maxTileValues`; the check uses 2,304–3,328); a
   failure names the moment it happened at ("… (at t = 41 s)").
+* **`span`** (still and bench; `RenderSpan`): the page is the viewport (`width`×`height`) of a
+  spanning canvas — the runtime's span keys merged into its config (`RenderSpan.config`). Span stills
+  skip the clock-luma measurement (the clock rect is in canvas coordinates). The answer echoes the
+  page's `span` and `hasUpdate` from its ready message; a server without span support ignores the
+  key (and echoes nothing), which `SpanCheck` reports as "not checked". `SpanCheck.swift` (Core)
+  renders an arrangement once as a whole and once per display and compares each slice with its crop:
+  strictly at equal densities (mean ≤ 1.5/255, ≤ 0.5 % of pixels over 8/255), after averaging over
+  8-point cells at mixed densities (mean ≤ 4/255).
 * **Time limits** (`RenderLimits`): every request runs under the server's own deadline — 60 s, bench
   90 s, motion 150 s, live its (clamped) warm-up and run + 30 s. A request's `timeout` can set
   another, but at most 15 minutes: the server has one render slot for every client on the Mac.
@@ -506,8 +588,11 @@ livepaper ai create ["<prompt>"] [--ref <image|folder>]… [--animate <image>] [
 livepaper ai modify <scene-id> ["<prompt>"] [--ref …]… [--animate <image>] …      (same options)
 livepaper ai harnesses [--json]
 livepaper server status|start|stop
-livepaper new <id> [--from <scene-id>] | list | publish                (planned)
+livepaper new <id> [--from <scene-id>] | list
 livepaper doctor [--no-ai] [--json] | select | uninstall [--yes] [--keep-scenes] [--dry-run]
+livepaper publish [--scenes <id,…>|all] [--mode shuffle|sequence|single] [--cycle <min>] [--performance …]
+                  [--clock|--no-clock] [--displays same|different|choose|span]
+                  [--display <display-uuid>=<scene-id>|playlist]… [--battery-displays live|still|off] [--json]
 ```
 `select` is the installer's own selection (`InstallService.selectSaver`, docs/RESEARCH.md §5.6):
 `SystemDefault`, every explicit Idle slot and the placeholder of every display record, originals
@@ -518,12 +603,22 @@ gets them filled); exit 3 when LivePaper refuses to touch the store (the reason 
 (the store's display records when the connected displays aren't known) or not selected at all is a
 problem whose fix it names: `livepaper select`; a store in a format LivePaper doesn't know that names
 LivePaper is a warning ("can't tell which displays use it"), never OK.
+`publish --display` (repeatable) assigns a scene to a display (UUID, any case, stored uppercase;
+"display-<n>" for one without a UUID), `<uuid>=playlist` removes the assignment and `all=playlist` all
+of them; scene ids must exist (exit 2, like `--scenes`). Assignments are kept in the settings in every
+mode but published only with `--displays choose` (a note on stderr says so when they won't apply).
+`--json` adds `displays {mode, onBattery, assignments}` (as published), `displayScenes` and
+`spanScenes`; the human summary names the display mode and the battery behaviour when they aren't the
+defaults.
 `check` = compile → stills at 1512×982@2 for t = 0, 4, 12, 30, 90, 240, 600, plus 32:9 (2560×720
 @1, t = 12/90/600), 5:4 (1280×1024 @1, t = 12/90) and thumbnail size (320×200 @2, t = 12) →
 JS-error check → motion at 1280×720@0.5 and 1024×820@0.5 (t = 3, 17, 41, 120; gaps 0.5/2/5 s;
 16 tiles across; heat maps `.check/motion-<size>.png`) → short probe benches (30 frames) at every
 sampled time but the last, to find the heaviest phase → full benches (120 frames) at that time at
-1512×982@2 and 5120×1440@1 → luminance checks → (with a reference target, below) resemblance → optional
+1512×982@2 and 5120×1440@1 → luminance checks → (with a reference target, below) resemblance → (for
+`"span": true`, not `--quick`) the span check: arrangement B of `SpanCheck.standard` (a 1512×982 laptop
+bottom-aligned left of a 2560×1440 display, a 4072×1440 canvas) at 1×, t = 12, clock off, rendered as a
+whole and per display (`.check/span-B-t12-*.png`, `span[]` in the report) → optional
 live energy run (`--power`, battery profile: 30 fps, 75 %) → writes `.check/report.json` (+ `motion[]`:
 coverage, regions, busy, flicker, map per size; + `reference` for animate scenes) + PNGs, prints a short
 summary for humans and agents (with the motion map when motion needs attention, and a `picture` line);
@@ -578,6 +673,7 @@ Budgets (`CheckBudgets`):
 | Busy: tiles with level ≥ 16 within 0.5 s | > 50 % of the frame | |
 | Flicker: tiles whose largest step between successive burst frames (1–8 frames apart: within ¼ s) is ≥ 10 — flashes, strobing, fast whole-frame fades | > 30 % of the frame | |
 | Motion not measured (render server too old) | | always |
+| `"span": true`: a slice doesn't match its crop of the whole canvas; the scene defines `update()`; scene.js calls `Math.random()` | any | span not checked (render server too old); `gl_FragCoord` without `lp.fragOffset` |
 | Animate scenes: scene.js loads `assets/reference.*` (`ReferenceBudgets`) | no string names it | |
 | Animate scenes: resemblance to the cover-fit picture (0–1) | median < 0.35 (most stills flat: "too flat", darkened or fogged too much) | a 16:10 still < 0.70; 32:9 or 5:4 median < 0.70 and ≥ 0.25 under 16:10 (stretched / letterboxed); median colour match of the 16:10 stills < 0.3 (desaturated, tinted, recoloured); asset changed; picture too flat to compare (luma std < 4) or < 20 % opaque |
 
@@ -824,8 +920,37 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     (`AISessionModel.slimmed`; this menu-bar app runs for days). A check
     report of an animate session adds "Looks like the picture: 0.92" (§9), and the scene's history
     "· 3 reference images (1 animated)".
-  * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a
-    publish that left scenes out lists them with the reason (and a banner says so).
+  * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, multiple displays, profile) →
+    Save & Publish; a publish that left scenes out lists them with the reason (and a banner says so).
+    **Multiple displays** (`Views/Playlist/DisplaysSection.swift` over `Logic/PlaylistDraft.swift`;
+    always shown, between Playback and Performance): the display mode (*Same on every display* /
+    *Different on each display* / *Choose per display* / *Span across displays*, §4.3, §6) with a
+    one-line explanation; a small picture of the arrangement (System Settings › Displays, scaled,
+    numbered, the main display tinted, one gradient across all of them while spanning); the connected
+    displays in the saver's order — number, `NSScreen.localizedName`, a "Main" tag (the built-in
+    display, else the menu-bar one), size, context menu "Copy Display ID"; with one display, "Only
+    one display is connected. These settings take effect when you connect another." *Choose* gives
+    each connected display a picker ("Playlist" + every library scene; a deleted scene shows "Scene
+    deleted — plays the playlist") and lists the choices of displays that aren't connected ("<name>
+    (not connected)" — scene — Forget), named from `displayNames` (recorded when a scene is
+    chosen, pruned to assigned displays; "Display 37D8832A" for one assigned elsewhere, e.g. by the
+    CLI). Choices stay in the settings in every mode but are published only in *Choose*, and only
+    for scenes that still exist (`PlaylistDraft.effectiveAssignments`, as PublishService does).
+    *Different* says when the playlist has fewer scenes than there are displays (some then share
+    one). *Span* says how many of the playlist's scenes can span (`SceneManifest.spans`: "3 of 5 scenes
+    can span; the others show on every display.", naming up to four that can't). "On battery, other
+    displays show": the scene / a still picture / nothing (black), with the footnote that the main
+    display always shows the scene. The connected displays come from `AppEnvironment.connectedDisplays`
+    (live: `Entry/DisplayProbe.swift`, `NSScreen.screens` keyed and framed exactly as the saver does
+    — `Logic/DisplayIdentity.swift`: the UUID of `CGDisplayCreateUUIDFromDisplayID` uppercased, else
+    "DISPLAY-<id>"; `LPDisplay.cocoa` with the menu-bar screen's height — so choices name the displays
+    the saver sees) and are re-read on `NSApplication.didChangeScreenParameters`
+    (`observeDisplays`) into `AppModel.displays`. The summary in the publish bar, the menu bar and
+    Settings adds the mode when it changes what plays (" · different on each display", " · chosen
+    per display", " · spanning all displays"; not with one display for Different and Span). A scene
+    chosen for a display counts as one the saver has (`AppModel.isShownBySaver`): replacing or
+    AI-modifying it republishes, and deleting it republishes without it (the choice stays, shown as
+    deleted). The full-screen preview stays single-screen.
 * **Full-screen preview** (`Views/FullScreen/`): one borderless black window on one screen (the
   main window's, or the one under the pointer from the menu bar) at status-bar level, menu bar and
   Dock hidden. It renders exactly like the saver: web scenes get the saver's own
@@ -945,13 +1070,20 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   `.build/debug/LivePaperApp --snapshot <dir> [--only name,…]` renders every key screen with mock
   data to PNGs and exits (`.prohibited` activation policy, off-screen windows, no live previews);
   `create-references-light`, `modify-references-dark` and `session-references-light` show the
-  reference tray, the sheet's compact tray and a session's references with generated pictures.
+  reference tray, the sheet's compact tray and a session's references with generated pictures;
+  `playlist-displays-choose-light`, `playlist-displays-span-dark` and `playlist-displays-single-light`
+  the Multiple displays section with mock displays (`MockSampleData.displays`: a built-in 1512×982
+  display with the menu bar and a 2560×1440 one to its right, made-up ids; mock mode uses them too).
 
 ## 12. Performance & battery policy
 * Budgets enforced by `livepaper check` (§9), shown in the UI as energy badges.
 * Automatic profile: 60 fps full-res on AC; 30 fps @ 75 % on battery / Low Power Mode.
 * Pause when displays sleep; exit the saver host on willstop; video scenes use hardware decode.
-* Governor steps render scale down (to 0.6) if frame time stays over budget for 2 s.
+* Governor steps render scale down (to 0.6) if frame time stays over budget for 2 s (off while a
+  scene spans displays: every display must draw the same).
+* Multiple displays on battery or in Low Power Mode: the displays other than the main one show the
+  scene, a still (nothing runs) or nothing, per the playlist's `onBattery` (§6); videos shown on
+  several displays decode once.
 
 ## 13. Milestones
 1. Core + runtime + RenderService + CLI `check` (AI-ready framework).

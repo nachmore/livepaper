@@ -63,7 +63,7 @@ enum SnapshotHarness {
         // Onboarding first: it starts from the initial (nothing installed) state.
         let sheet = CGSize(width: 800, height: 580)
         shoot("onboarding-welcome-light", sheet, dark: false, OnboardingView(initialStep: .welcome))
-        try? services.install.installSaver()
+        _ = try? services.install.installSaver()
         wait { await model.refreshInstallStatus() }
         shoot("onboarding-saver-dark", sheet, dark: true, OnboardingView(initialStep: .screenSaver, showGuidedSelection: true))
         shoot("onboarding-lock-light", sheet, dark: false, OnboardingView(initialStep: .lock))
@@ -196,6 +196,38 @@ enum SnapshotHarness {
         var failed = log
         failed[4].outcome = .failed("\u{201C}LivePaper.saver\u{201D} couldn\u{2019}t be moved because you don\u{2019}t have permission to access \u{201C}Screen Savers\u{201D}.")
         shoot("uninstall-failed-dark", CGSize(width: 520, height: 520), dark: true, UninstallSheet(report: .make(failed)))
+
+        // Multiple displays (the Screen Saver screen's section) with mock displays: "Choose per
+        // display" with two connected displays and one remembered, spanning (3 of 5 scenes can), and a
+        // single display. Last, so the playlist changes here don't show in the shots above.
+        let displaysSize = CGSize(width: 820, height: 1400)
+        let laptop = MockSampleData.builtinDisplayID, studio = MockSampleData.externalDisplayID
+        let office = "00000000-0000-4000-8000-0000000000A3"
+        (services.publish as? MockPublishService)?.simulatedSkips = [:]
+        MockSampleData.displays = MockSampleData.defaultDisplays
+        model.refreshDisplays()
+        var choose = model.playlist
+        choose.displays = LPDisplaySettings(mode: .choose, assignments: [studio: "morning-fog", office: "paper-lanterns"], onBattery: .still)
+        choose.displayNames = [studio: "Studio Display", office: "DELL U2723QE"]
+        wait { await model.savePlaylist(choose, announce: false) }
+        clearBanners(model)
+        shoot("playlist-displays-choose-light", displaysSize, dark: false, PlaylistView())
+        var span = model.playlist
+        span.mode = .shuffle
+        span.sceneIDs = ["aurora-lake", "neon-rain", "coastline-at-dusk", "paper-lanterns", "morning-fog"]
+        span.displays.mode = .span
+        span.displays.onBattery = .off
+        wait { await model.savePlaylist(span, announce: false) }
+        clearBanners(model)
+        shoot("playlist-displays-span-dark", displaysSize, dark: true, PlaylistView())
+        MockSampleData.displays = MockSampleData.defaultDisplays.filter { $0.id == laptop }
+        model.refreshDisplays()
+        var single = model.playlist
+        single.displays = .standard
+        single.displayNames = [:]
+        wait { await model.savePlaylist(single, announce: false) }
+        clearBanners(model)
+        shoot("playlist-displays-single-light", displaysSize, dark: false, PlaylistView())
 
         running?.cancel()
         print("snapshot: wrote PNGs to \(dir.path)")

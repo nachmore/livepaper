@@ -145,7 +145,9 @@ stale() {
 SAVER_KIND="$([ "$DEBUG" = 1 ] && echo debug || echo release)"
 SAVER_DIR="$CACHE/saver-$SAVER_KIND"
 SAVER_STAMP="$SAVER_DIR/.built-$VERSION-$BUILD-$(IFS=-; echo "${ARCHS[*]}")"
-if stale "$SAVER_STAMP" "$ROOT/Saver" "$ROOT/Sources/LivePaperCore/Playlist/PlaylistModel.swift" "$ROOT/scripts/build-saver.sh"; then
+if stale "$SAVER_STAMP" "$ROOT/Saver" "$ROOT/Sources/LivePaperCore/Playlist/PlaylistModel.swift" \
+         "$ROOT/Sources/LivePaperCore/Playlist/DisplayLayout.swift" "$ROOT/Sources/LivePaperCore/Render/SceneNavigationGate.swift" \
+         "$ROOT/scripts/build-saver.sh"; then
   rm -rf "$SAVER_DIR"; mkdir -p "$SAVER_DIR"
   saver_flags=(--out "$SAVER_DIR")
   [ "$DEBUG" = 1 ] && saver_flags+=(--debug)

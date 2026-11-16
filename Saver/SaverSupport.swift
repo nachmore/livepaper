@@ -86,15 +86,24 @@ final class SaverNotificationRelay: NSObject {
                      NSWorkspace.didActivateApplicationNotification] {
             workspace.addObserver(self, selector: #selector(receivedApp(_:)), name: name, object: nil)
         }
+        // Displays connected, disconnected or rearranged. Whether the saver host posts this is
+        // unverified (Saver/README.md), so the arrangement is also re-read at every start.
+        NotificationCenter.default.addObserver(self, selector: #selector(receivedScreens(_:)),
+                                               name: NSApplication.didChangeScreenParametersNotification, object: nil)
     }
 
     deinit {
         DistributedNotificationCenter.default().removeObserver(self)
         NSWorkspace.shared.notificationCenter.removeObserver(self)
+        NotificationCenter.default.removeObserver(self)
     }
 
     @objc private func received(_ note: Notification) {
         forward(note.name.rawValue)
+    }
+
+    @objc private func receivedScreens(_ note: Notification) {
+        forward(SaverSystemEvent.screensChangedName)
     }
 
     @objc private func receivedApp(_ note: Notification) {
@@ -146,6 +155,14 @@ enum SaverDevOverrides {
     /// through the test hook (`livepaperHandleNotificationNamed:`).
     static let simulatedSystemKey = "LIVEPAPER_SAVER_SIMULATED_SYSTEM"
     static let simulatedSystem: Bool = getenv(simulatedSystemKey) != nil
+
+    /// Dev hosts only (with `simulatedSystem`): the displays, as a JSON array of LPDisplay, instead
+    /// of NSScreen.screens. Each view's display key is set through `livepaperSetDisplayKey:`.
+    static let displaysKey = "LIVEPAPER_SAVER_DISPLAYS"
+    static let simulatedDisplays: [LPDisplay]? = {
+        guard simulatedSystem, let json = ProcessInfo.processInfo.environment[displaysKey], !json.isEmpty else { return nil }
+        return try? JSONDecoder().decode([LPDisplay].self, from: Data(json.utf8))
+    }()
 }
 
 // MARK: - Session lock
@@ -162,7 +179,46 @@ enum SaverSessionLock {
 
 // MARK: - Displays
 
+/// The displays as the saver process sees them (ARCHITECTURE §6, "Multiple displays"): keys, the
+/// arrangement from NSScreen.screens and which one this view is on.
+enum SaverDisplays {
+    /// The display's key: its UUID (CGDisplayCreateUUIDFromDisplayID, uppercase — the form the
+    /// wallpaper store uses), or "DISPLAY-<id>" when it has none.
+    static func key(for id: CGDirectDisplayID) -> String {
+        if let uuid = CGDisplayCreateUUIDFromDisplayID(id)?.takeRetainedValue(),
+           let string = CFUUIDCreateString(nil, uuid) as String? {
+            return LPDisplay.normalizedID(string)
+        }
+        return LPDisplay.fallbackID(id)
+    }
+
+    static func displayID(of screen: NSScreen) -> CGDirectDisplayID? {
+        (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value
+    }
+
+    /// Every screen of this process, in the stable layout order. NSScreen.screens[0] has the menu bar.
+    static func current() -> LPDisplayLayout {
+        if let simulated = SaverDevOverrides.simulatedDisplays { return LPDisplayLayout(simulated) }
+        let screens = NSScreen.screens
+        guard let menuBar = screens.first else { return LPDisplayLayout([]) }
+        let height = Double(menuBar.frame.height)
+        return LPDisplayLayout(screens.enumerated().compactMap { index, screen in
+            guard let id = displayID(of: screen) else { return nil }
+            let f = screen.frame
+            return LPDisplay.cocoa(id: key(for: id), name: screen.localizedName, x: Double(f.minX), y: Double(f.minY),
+                                   width: Double(f.width), height: Double(f.height), menuBarScreenHeight: height,
+                                   scale: Double(screen.backingScaleFactor), isBuiltin: CGDisplayIsBuiltin(id) != 0, isMenuBar: index == 0)
+        })
+    }
+}
+
 extension NSView {
+    /// The key of the display this view's window is on (nil while it isn't on a screen).
+    var saverScreenDisplayKey: String? {
+        guard let screen = window?.screen, let id = SaverDisplays.displayID(of: screen) else { return nil }
+        return SaverDisplays.key(for: id)
+    }
+
     /// True when the display showing this view is asleep (falls back to the main display while the
     /// view isn't on a screen yet).
     var saverDisplayIsAsleep: Bool {

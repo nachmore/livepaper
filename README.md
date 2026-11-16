@@ -129,6 +129,13 @@ re-run from Settings and only changes what still needs it.
 * **The playlist.** Choose which scenes the screen saver shows, shuffle / in sequence / one scene,
   how often it changes, whether to show the clock, and the performance profile. Changes are
   published into the saver and take effect the next time it starts.
+* **Multiple displays.** On the same Screen Saver screen: every display shows the same scene (the
+  default), a different scene on each display, a scene you choose per display (displays without a
+  choice play the playlist; a choice is remembered while its display is disconnected), or one scene
+  spanning all displays as they're arranged in System Settings › Displays (videos and scenes that
+  declare `"span": true` span; the others show on every display, and the clock appears once, on the
+  main display). On battery or in Low Power Mode the displays other than the main one — the
+  built-in display, or the one with the menu bar — can show the scene, a still picture or nothing.
 
 ## The `livepaper` command
 
@@ -149,6 +156,7 @@ is limited to editing the scene and running those commands (details in
 | `list [--json]` | the library (yours first, then built-in), with frame times and playlist membership |
 | `import <video \| .lpscene \| .zip> [--name N] [--battery]` | add a video or a scene package |
 | `publish [--scenes a,b\|all] [--mode M] [--cycle MIN] [--performance P] [--clock\|--no-clock]` | update the playlist settings (optional) and publish into the installed saver |
+| `publish [--displays same\|different\|choose\|span] [--display <uuid>=<id>\|playlist]… [--battery-displays live\|still\|off]` | the multiple-display settings: the mode, a scene per display (its UUID, as Copy Display ID in the app gives it; `all=playlist` clears them) and what other displays show on battery |
 | `ai create "<prompt>"` / `ai modify <id> "<prompt>"` | run an AI session in the terminal; `--harness claude\|codex\|kiro\|custom`, `--command "<template>"`, `--model`, `--timeout`, `--yes` to accept without asking, `--json` for one JSON event per line |
 | `ai create [...] --ref <image\|folder>… [--animate <image>]` | the same with reference images (up to 10; `--ref` is repeatable and folders expand) and at most one picture to animate exactly; the prompt may be left out when images are given (also for `ai modify`) |
 | `ai harnesses` | the AI command-line tools LivePaper found |
@@ -177,7 +185,10 @@ livepaper publish
   in Low Power Mode; *Best*, *Balanced* and *Battery* fix it. Scenes step their render scale down
   on their own if frames take too long.
 * Video scenes play through AVFoundation with hardware decoding — the most frugal option; the
-  battery-optimised import makes them cheaper still.
+  battery-optimised import makes them cheaper still. A video on several displays is decoded once.
+* With several displays, *On battery, other displays show* (Screen Saver › Multiple displays) can
+  stop the extra displays' work on battery: a still picture renders one frame and then nothing
+  runs; *nothing* leaves them black.
 * Nothing renders while the displays sleep, and the hidden pre-started saver renders nothing
   until a saver is up (see the exception under "No wasted energy").
 * Video-call apps that keep the display awake also keep any screen saver from starting; that is

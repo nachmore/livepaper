@@ -87,6 +87,22 @@ extension SelfTests {
                 try expect(gallery.contains("`\(id)`"), "docs/SCENES.md doesn't list \(id)")
             }
         },
+        TestCase(name: "scenes.builtin.span") {
+            // "Span across displays": which built-ins stretch across displays (docs/SCENES.md), and the
+            // static rules for those that do (runtime.e2e.spanCrops renders them).
+            let gallery = try String(contentsOf: BuiltinScenes.repo.appendingPathComponent("docs/SCENES.md"), encoding: .utf8)
+            for pkg in try BuiltinScenes.packages() {
+                let id = pkg.deletingPathExtension().lastPathComponent
+                let m = try SceneManifest.load(package: pkg)
+                try expect(m.span == BuiltinScenes.spanning.contains(id), "\(id): span is \(m.span.map(String.init) ?? "absent"), docs/SCENES.md says otherwise")
+                guard m.spans else { continue }
+                let js = try String(contentsOf: pkg.appendingPathComponent("scene.js"), encoding: .utf8)
+                try expect(js.range(of: #"\bupdate\s*(\(|:)"#, options: .regularExpression) == nil, "\(id): span scenes have no update()")
+                let findings = SceneChecker.spanSourceFindings(js)
+                try expect(findings.problems.isEmpty, "\(id): \(findings.problems)")
+                try expect(gallery.contains("`\(id)`") && gallery.contains("Spans displays"), "docs/SCENES.md: span status of \(id)")
+            }
+        },
         TestCase(name: "scenes.builtin.timeContinuity", run: BuiltinScenes.timeContinuity),
     ] }
 }
@@ -151,6 +167,8 @@ private enum BuiltinScenes {
     static let directory = repo.appendingPathComponent("Scenes")
     static let minimumCount = 5
     static let allowedEntries: Set<String> = ["scene.json", "scene.js", "thumbnail.jpg", "history.jsonl", "assets"]
+    /// Built-ins that declare `"span": true` (they passed runtime.e2e.spanCrops and spanCost; docs/SCENES.md).
+    static let spanning: Set<String> = ["abyssal-lanterns", "ink-and-ember", "liquid-glass", "rain-on-the-river", "ringed-giant"]
 
     static func packages() throws -> [URL] {
         try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles])

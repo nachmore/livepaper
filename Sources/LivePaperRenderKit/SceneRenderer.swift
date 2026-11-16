@@ -75,10 +75,11 @@ final class SceneRenderer {
         let html = try Self.readHTML(r)
         let clock = r.clock ?? true
         // debug: JS errors are also printed on the frame, so whoever looks at the PNG sees them.
-        let config: [String: Any] = ["still": true, "t": r.t ?? 8, "clock": clock, "debug": true,
-                                     "dprMax": max(2, dpr), "seed": 1]
+        let config = try Self.config(["still": true, "t": r.t ?? 8, "clock": clock, "debug": true,
+                                  "dprMax": max(2, dpr), "seed": 1], for: r)
         return try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, info in
-            let rect = Self.clockRect(info)
+            // A span slice's clock rect is in canvas coordinates (and usually on another slice).
+            let rect = r.span == nil ? Self.clockRect(info) : nil
             try await page.nextFrames(deadline: deadline)
             // Luminance is measured on the scene alone: the clock overlay is hidden for that frame,
             // because the question is whether the *background* lets the white clock stay readable.
@@ -96,6 +97,7 @@ final class SceneRenderer {
                 final = measured
             }
             var resp = RenderResponse(ok: true, ready: true, errors: page.errors)
+            Self.echo(info, into: &resp)
             resp.meanLuma = measured.meanLuma().map(Self.round1)
             if let rect {
                 let px = CGRect(x: rect.minX * dpr, y: rect.minY * dpr, width: rect.width * dpr, height: rect.height * dpr)
@@ -113,12 +115,13 @@ final class SceneRenderer {
         let (size, dpr) = try Self.geometry(r)
         let html = try Self.readHTML(r)
         let frames = min(max(r.frames ?? 120, 1), 5000)
-        let config: [String: Any] = ["bench": frames, "t": r.t ?? 0, "clock": false, "dprMax": max(2, dpr), "seed": 1]
+        let config = try Self.config(["bench": frames, "t": r.t ?? 0, "clock": false, "dprMax": max(2, dpr), "seed": 1], for: r)
         return try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, info in
             guard let ms = (info["bench"] as? NSNumber)?.doubleValue else {
                 throw PageFailure(message: "the page did not report a bench result", ready: true, errors: page.errors)
             }
             var resp = RenderResponse(ok: true, ready: true, errors: page.errors)
+            Self.echo(info, into: &resp)
             resp.benchMs = (ms * 1000).rounded() / 1000
             resp.note = "\(frames) frames at \(Int(size.width))x\(Int(size.height))@\(Self.format(dpr))"
             return resp
@@ -325,6 +328,18 @@ final class SceneRenderer {
         do { return try String(contentsOfFile: path, encoding: .utf8) } catch {
             throw RenderFailure("cannot read \(path): \(error.localizedDescription)")
         }
+    }
+
+    /// The page configuration of a still/bench request: `base` plus the span keys (RenderSpan).
+    static func config(_ base: [String: Any], for r: RenderRequest) throws -> [String: Any] {
+        if let span = r.span, let problem = span.problem { throw RenderFailure(problem) }
+        return RenderSpan.config(base, span: r.span)
+    }
+
+    /// Copies what the page reported about span and update() from its 'ready' message.
+    private static func echo(_ info: [String: Any], into resp: inout RenderResponse) {
+        resp.span = (info["span"] as? NSNumber)?.boolValue
+        resp.hasUpdate = (info["hasUpdate"] as? NSNumber)?.boolValue
     }
 
     /// The runtime's clock region (CSS px, top-left origin) from the 'ready' message.

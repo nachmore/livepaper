@@ -28,10 +28,18 @@ struct SaverContent: Equatable {
     var problems: [String]
     /// The Playlist directory inside the bundle.
     var directory: URL
+    /// Playable scenes published only for displays assigned to them ("Choose per display"); never in
+    /// the deck. Unique by id, and never an id of `entries`.
+    var displayEntries: [LPPlaylistEntry] = []
 
     var isEmpty: Bool { entries.isEmpty }
 
     func fileURL(for entry: LPPlaylistEntry) -> URL { directory.appendingPathComponent(entry.file) }
+
+    /// A playable scene by id: the deck first, then the display-only scenes.
+    func entry(id: String) -> LPPlaylistEntry? {
+        entries.first { $0.id == id } ?? displayEntries.first { $0.id == id }
+    }
 
     static func empty(directory: URL, problem: String? = nil) -> SaverContent {
         SaverContent(playlist: nil, entries: [], problems: problem.map { [$0] } ?? [], directory: directory)
@@ -54,18 +62,23 @@ enum SaverPlaylistLoader {
         } catch {
             return .empty(directory: directory, problem: "\(LPPlaylist.fileName) is unreadable: \(error)")
         }
-        var (entries, problems) = playable(playlist, in: directory, fileExists: fileExists)
+        var seen = Set<String>()
+        var (entries, problems) = playable(playlist.scenes, in: directory, seen: &seen, fileExists: fileExists)
+        // Display-only scenes go through the same checks; one that duplicates a deck id is dropped.
+        let (displayEntries, displayProblems) = playable(playlist.displayScenes, in: directory, seen: &seen, fileExists: fileExists)
+        problems += displayProblems.map { "display scene " + $0 }
         if playlist.schema > LPPlaylist.currentSchema {
             problems.insert("playlist schema \(playlist.schema) is newer than this saver (\(LPPlaylist.currentSchema)); playing what it understands", at: 0)
         }
-        return SaverContent(playlist: playlist, entries: entries, problems: problems, directory: directory)
+        return SaverContent(playlist: playlist, entries: entries, problems: problems, directory: directory, displayEntries: displayEntries)
     }
 
-    /// Filters a playlist down to entries that are safe and present on disk.
-    static func playable(_ playlist: LPPlaylist, in directory: URL,
+    /// Filters entries down to those that are safe and present on disk, unique by id across calls
+    /// sharing `seen`.
+    static func playable(_ list: [LPPlaylistEntry], in directory: URL, seen: inout Set<String>,
                          fileExists: (String) -> Bool) -> (entries: [LPPlaylistEntry], problems: [String]) {
-        var seen = Set<String>(), entries: [LPPlaylistEntry] = [], problems: [String] = []
-        for entry in playlist.scenes {
+        var entries: [LPPlaylistEntry] = [], problems: [String] = []
+        for entry in list {
             guard !entry.id.isEmpty, !seen.contains(entry.id) else {
                 problems.append("skipped duplicate or empty scene id '\(entry.id)'"); continue
             }
@@ -122,21 +135,37 @@ struct SaverSessionRecord: Codable, Equatable {
     /// When the session ended (willstop). Only a session that is still running can be joined, so a
     /// quick unlock → lock starts a NEW session instead of replaying the previous one.
     var endedAt: TimeInterval? = nil
+    /// Display key → the scene that display showed most recently (history, like `recent`): what
+    /// "Different on each display" keeps a display from starting with again. Nil in older records.
+    var shownOn: [String: String]? = nil
+    /// `shownOn` as it was when this session started (frozen, like `startRecent`).
+    var startShownOn: [String: String]? = nil
 
     static let recentCapacity = 12
+    /// `shownOn` keeps at most this many displays.
+    static let shownOnCapacity = 16
 
     /// The session as every display of it plays it. Built only from the fields fixed at its start, so
     /// `noteShown` and `endedAt` never change it.
     var session: SaverSession {
-        SaverSession(epoch: epoch, startedAt: Date(timeIntervalSince1970: startedAt), avoid: avoid, recent: startRecent ?? [])
+        SaverSession(epoch: epoch, startedAt: Date(timeIntervalSince1970: startedAt), avoid: avoid, recent: startRecent ?? [],
+                     shownOn: startShownOn ?? [:])
     }
 
-    /// Records `id` as on screen now (history only; the session is unchanged).
-    mutating func noteShown(_ id: String) {
-        lastShown = id
+    /// Records `id` as on screen now (history only; the session is unchanged): as the scene shown
+    /// last (unless `updatesLastShown` is false: in "Different on each display" only the lead display,
+    /// the last one in layout order, writes it), in `recent`, and as what `display` shows.
+    mutating func noteShown(_ id: String, display: String? = nil, updatesLastShown: Bool = true) {
+        if updatesLastShown { lastShown = id }
         var list = (recent ?? []).filter { $0 != id }
         list.insert(id, at: 0)
         recent = Array(list.prefix(Self.recentCapacity))
+        if let display {
+            var map = shownOn ?? [:]
+            map[display] = id
+            while map.count > Self.shownOnCapacity, let drop = map.keys.filter({ $0 != display }).min() { map.removeValue(forKey: drop) }
+            shownOn = map
+        }
     }
 }
 
@@ -147,6 +176,8 @@ struct SaverSession: Equatable {
     var avoid: String?
     /// Recently shown scenes when the session started, most recent first (see `SaverDeck.recent`).
     var recent: [String] = []
+    /// What each display (by key) showed last when the session started (see `SaverDeck.previous`).
+    var shownOn: [String: String] = [:]
 
     /// Seed for the scene shuffle (identical on every display of the session).
     var shuffleSeed: UInt64 { UInt64(bitPattern: Int64(epoch)) }
@@ -182,7 +213,8 @@ enum SaverSessionPlanner {
         let start = t >= TimeInterval(epoch) * epochLength ? TimeInterval(epoch) * epochLength : t
         let recent = stored?.recent ?? (stored?.lastShown.map { [$0] } ?? [])
         let record = SaverSessionRecord(epoch: epoch, startedAt: start, avoid: stored?.lastShown, lastShown: nil,
-                                        recent: recent, startRecent: recent, endedAt: nil)
+                                        recent: recent, startRecent: recent, endedAt: nil,
+                                        shownOn: stored?.shownOn, startShownOn: stored?.shownOn)
         return (record.session, record, false)
     }
 
@@ -193,12 +225,20 @@ enum SaverSessionPlanner {
     /// the session a late display (> `joinWindow`, however much later) started after. Only an older
     /// record — the previous session, when this display's session has just begun — or an implausible
     /// one is replaced by `own`.
-    static func recordShown(_ id: String, own: SaverSessionRecord, stored: SaverSessionRecord?, now: Date) -> SaverSessionRecord? {
+    ///
+    /// `display` (the display's key) also records what that display shows (`shownOn`), and
+    /// `updatesLastShown: false` leaves `lastShown` alone (displays other than the lead in "Different
+    /// on each display"). Without a display the record is unchanged when it already shows `id` last.
+    static func recordShown(_ id: String, own: SaverSessionRecord, stored: SaverSessionRecord?, now: Date,
+                            display: String? = nil, updatesLastShown: Bool = true) -> SaverSessionRecord? {
         var record = own
         if let stored, stored.session == own.session || isSession(stored, newerThan: own, at: now) { record = stored }
-        guard record.lastShown != id else { return nil }
-        record.noteShown(id)
-        return record
+        if display == nil && updatesLastShown {
+            guard record.lastShown != id else { return nil }
+        }
+        let before = record
+        record.noteShown(id, display: display, updatesLastShown: updatesLastShown)
+        return record == before ? nil : record
     }
 
     /// Whether `record` is a session that began after `other`'s, judged at `now`: `plan` gives every
@@ -277,8 +317,14 @@ struct SaverRandom {
     mutating func next(below n: Int) -> Int { Int(next() % UInt64(max(1, n))) }
 }
 
-/// The order scenes play in. Deterministic for a given (ids, mode, seed, avoid, recent), so every display of
-/// a session computes the same scene for the same step without talking to each other.
+/// The order scenes play in. Deterministic for a given (ids, mode, seed, avoid, recent, spread,
+/// previous), so every display of a session computes the same scene for the same step without talking
+/// to each other.
+///
+/// "Different on each display" plays display k (layout order) at step s + k, with `spread` = the number
+/// of displays: then any `spread` consecutive steps are distinct (across reshuffles too), the first
+/// `spread` positions avoid what was on screen recently, and no display starts with the scene it showed
+/// last (`previous`). With `spread` 1 every rule reduces exactly to the single-display deck.
 struct SaverDeck: Equatable {
     let ids: [String]
     let mode: LPPlaylistMode
@@ -289,22 +335,32 @@ struct SaverDeck: Equatable {
     /// session with one of the newest ⌊n/2⌋ of them (or `avoid`), so locking repeatedly walks through
     /// the deck instead of repeating.
     var recent: [String] = []
+    /// How many displays play consecutive steps ("Different on each display"; 1 otherwise).
+    var spread: Int = 1
+    /// For display index k (layout order): the scene it showed last, if known.
+    var previous: [String?] = []
 
-    init(ids: [String], mode: LPPlaylistMode, seed: UInt64, avoid: String?, recent: [String] = []) {
+    init(ids: [String], mode: LPPlaylistMode, seed: UInt64, avoid: String?, recent: [String] = [],
+         spread: Int = 1, previous: [String?] = []) {
         self.ids = ids; self.mode = mode; self.seed = seed; self.avoid = avoid; self.recent = recent
+        self.spread = max(1, spread); self.previous = previous
     }
 
     /// The deck every display of `session` plays.
-    init(ids: [String], mode: LPPlaylistMode, session: SaverSession) {
-        self.init(ids: ids, mode: mode, seed: session.shuffleSeed, avoid: session.avoid, recent: session.recent)
+    init(ids: [String], mode: LPPlaylistMode, session: SaverSession, spread: Int = 1, previous: [String?] = []) {
+        self.init(ids: ids, mode: mode, seed: session.shuffleSeed, avoid: session.avoid, recent: session.recent,
+                  spread: spread, previous: previous)
     }
 
-    /// The ids the first scene of a session must not be (empty for one-scene decks).
+    /// The ids the first scenes of a session (the first `spread` positions) must not be: the newest
+    /// ⌊n/2⌋ of `[avoid] + recent`, fewer when `spread` displays need room (empty for one-scene decks).
     var startAvoidSet: Set<String> {
-        guard ids.count > 1 else { return [] }
+        let n = ids.count
+        guard n > 1 else { return [] }
         var list = recent
         if let avoid, !list.contains(avoid) { list.insert(avoid, at: 0) }
-        return Set(list.filter { ids.contains($0) }.prefix(max(1, ids.count / 2)))
+        let size = spread <= 1 ? max(1, n / 2) : max(0, min(max(1, n / 2), n - spread))
+        return Set(list.filter { ids.contains($0) }.prefix(size))
     }
 
     var count: Int { ids.count }
@@ -317,20 +373,35 @@ struct SaverDeck: Equatable {
         case .single:
             return 0
         case .sequence:
-            // Continue where the previous session left off.
-            let start = avoid.flatMap { ids.firstIndex(of: $0) }.map { ($0 + 1) % n } ?? 0
-            return (start + s) % n
+            return (sequenceStart + s) % n
         case .shuffle:
             return shuffledRound(s / n)[s % n]
         }
     }
 
-    /// The permutation for one pass through the deck. Each pass is reshuffled; its first scene never
-    /// repeats the scene just before it (the previous pass's last, or `avoid` for the first pass).
+    /// Sequence: continue after the scene shown last; with several displays, the first start from
+    /// there at which no display gets the scene it showed last.
+    var sequenceStart: Int {
+        let n = ids.count
+        let base = avoid.flatMap { ids.firstIndex(of: $0) }.map { ($0 + 1) % n } ?? 0
+        guard spread > 1, !previous.isEmpty, n > 1 else { return base }
+        let k = min(spread, previous.count)
+        for shift in 0..<n {
+            let b = (base + shift) % n
+            if !(0..<k).contains(where: { previous[$0] == ids[(b + $0) % n] }) { return b }
+        }
+        return base
+    }
+
+    /// The permutation for one pass through the deck. Each pass is reshuffled. The first pass starts
+    /// clear of the avoid set (its first `spread` positions) and of each display's previous scene; a
+    /// later pass doesn't repeat any of the previous pass's last scenes within `spread` steps (for one
+    /// display: its first scene isn't the previous pass's last).
     func shuffledRound(_ round: Int) -> [Int] {
         let n = ids.count
         guard n > 1 else { return Array(0..<n) }
-        var previous = avoid.flatMap { ids.firstIndex(of: $0) }
+        let w = min(max(2, spread), n)
+        var prevOrder: [Int] = []
         var order: [Int] = []
         for r in 0...max(0, round) {
             var rng = SaverRandom(seed: seed &+ UInt64(r) &* 0xD1B5_4A32_D192_ED03)
@@ -338,11 +409,21 @@ struct SaverDeck: Equatable {
             for i in stride(from: n - 1, to: 0, by: -1) { order.swapAt(i, rng.next(below: i + 1)) }
             if r == 0 {
                 let avoidSet = startAvoidSet
-                if let k = order.firstIndex(where: { !avoidSet.contains(ids[$0]) }), k > 0 { order.swapAt(0, k) }
-            } else if let previous, order[0] == previous {
-                order.swapAt(0, 1)
+                for i in 0..<min(spread, n) where avoidSet.contains(ids[order[i]]) {
+                    if let j = ((i + 1)..<n).first(where: { !avoidSet.contains(ids[order[$0]]) }) { order.swapAt(i, j) }
+                }
+                let m = min(spread, n)
+                if m >= 2 {
+                    for i in 0..<m where i < previous.count && previous[i] == ids[order[i]] { order.swapAt(i, (i + 1) % m) }
+                }
+            } else {
+                for i in 0..<(w - 1) {
+                    let forbidden = Set(prevOrder.suffix(w - 1 - i))
+                    guard forbidden.contains(order[i]) else { continue }
+                    if let j = ((i + 1)..<n).first(where: { !forbidden.contains(order[$0]) }) { order.swapAt(i, j) }
+                }
             }
-            previous = order[n - 1]
+            prevOrder = order
         }
         return order
     }
@@ -370,6 +451,181 @@ struct SaverSchedule: Equatable {
     func nextChange(after date: Date) -> Date? {
         guard let cycle else { return nil }
         return startedAt.addingTimeInterval(TimeInterval(step(at: date) + 1) * cycle)
+    }
+
+    /// When `step` began (the session start when scenes never change).
+    func start(ofStep step: Int) -> Date {
+        guard let cycle else { return startedAt }
+        return startedAt.addingTimeInterval(TimeInterval(max(0, step)) * cycle)
+    }
+}
+
+// MARK: - Multiple displays
+
+/// What a display shows of its scene: the live scene, one still frame (nothing runs), or nothing.
+enum SaverDisplayLiveness: String, Equatable {
+    case live, still, off
+
+    init(_ battery: LPBatteryDisplays) {
+        switch battery {
+        case .live: self = .live
+        case .still: self = .still
+        case .off: self = .off
+        }
+    }
+}
+
+/// What one display needs to draw its slice of a scene that spans all displays.
+struct SaverSpan: Equatable {
+    /// The virtual canvas (the union of all displays), points.
+    var canvasWidth: Double
+    var canvasHeight: Double
+    /// This display's part of the canvas (canvas coordinates, points, top-left).
+    var viewport: LPRect
+    /// The main display's part: the clock is placed inside it (and shown only there).
+    var clockViewport: LPRect
+    /// Scene time 0 for every display: when the step began (wall clock), so slices line up.
+    var timeOrigin: Date
+    var isMain: Bool
+}
+
+/// A display's scene for one step: the entry, and its slice when the step spans the displays.
+struct SaverResolvedScene: Equatable {
+    var entry: LPPlaylistEntry
+    var span: SaverSpan?
+}
+
+/// How one display takes part in the playlist, decided from the display settings, the arrangement of
+/// all displays, this display's key and the power state (ARCHITECTURE §6, "Multiple displays").
+/// Pure: every display computes every other display's plan the same way.
+struct SaverDisplayPlan: Equatable {
+    enum Source: Equatable {
+        /// The deck, `offset` steps ahead ("Different on each display": the display's index).
+        case deck(offset: Int)
+        /// The scene assigned to this display ("Choose per display").
+        case assigned(String)
+    }
+
+    /// Effective mode (previews, a single display or an unknown display: `.same`).
+    var mode: LPDisplayMode
+    var layout: LPDisplayLayout
+    /// This display's key, normalised (nil when unknown).
+    var key: String?
+    /// Position in the layout (0 when the display is unknown).
+    var index: Int
+    var isMain: Bool
+    var source: Source
+    /// Displays playing consecutive steps: the display count in "Different", else 1.
+    var spread: Int
+    var liveness: SaverDisplayLiveness
+    /// Writes `lastShown` (what the next session continues after): every display, except in
+    /// "Different", where only the last display in layout order that shows anything does.
+    var isLead: Bool
+    /// Steps whose scene supports it span all displays.
+    var spanAllowed: Bool
+
+    /// Whether this display's scenes go into the history (assigned scenes and black displays don't).
+    var recordsHistory: Bool {
+        if case .deck = source { return liveness != .off }
+        return false
+    }
+
+    var isAssigned: Bool {
+        if case .assigned = source { return true }
+        return false
+    }
+
+    /// The plan of a preview, or of a display whose key or arrangement is unknown: today's single-display
+    /// behaviour (never black on uncertainty).
+    static func standard(layout: LPDisplayLayout = LPDisplayLayout([]), key: String? = nil) -> SaverDisplayPlan {
+        SaverDisplayPlan(mode: .same, layout: layout, key: key, index: 0, isMain: true, source: .deck(offset: 0), spread: 1,
+                         liveness: .live, isLead: true, spanAllowed: false)
+    }
+
+    static func make(settings: LPDisplaySettings, layout: LPDisplayLayout, key rawKey: String?, content: SaverContent,
+                     power: SaverPowerState, preview: Bool) -> SaverDisplayPlan {
+        let key = rawKey.map(LPDisplay.normalizedID)
+        guard !preview, let key, let index = layout.index(of: key) else { return standard(layout: layout, key: key) }
+        let mode = settings.effectiveMode(displayCount: layout.count)
+        let mainID = layout.main?.id
+        let saving = power.prefersBatterySaver
+        func liveness(_ id: String) -> SaverDisplayLiveness { id != mainID && saving ? SaverDisplayLiveness(settings.onBattery) : .live }
+        var source = Source.deck(offset: 0)
+        switch mode {
+        case .choose:
+            if let id = settings.assignments[key], content.entry(id: id) != nil { source = .assigned(id) }
+        case .different:
+            source = .deck(offset: index)
+        case .same, .span:
+            break
+        }
+        var isLead = true
+        if mode == .different {
+            let lead = layout.displays.indices.last { liveness(layout.displays[$0].id) != .off } ?? 0
+            isLead = index == lead
+        }
+        return SaverDisplayPlan(mode: mode, layout: layout, key: key, index: index, isMain: key == mainID, source: source,
+                                spread: mode == .different ? layout.count : 1, liveness: liveness(key), isLead: isLead,
+                                spanAllowed: mode == .span && !(saving && settings.onBattery == .off))
+    }
+
+    /// For each display index (layout order) in "Different": the scene it showed last in the history
+    /// the session froze at its start. Empty in other modes.
+    func previous(for session: SaverSession) -> [String?] {
+        guard mode == .different else { return [] }
+        return layout.displays.map { session.shownOn[$0.id] }
+    }
+
+    /// The scene this display shows at `step`. `skipOffset` counts scenes recovery skipped after
+    /// failures: an assigned scene that keeps failing gives way to the playlist. Nil when there is
+    /// nothing to play.
+    func resolve(step: Int, skipOffset: Int, deck: SaverDeck, content: SaverContent, session: SaverSession,
+                 schedule: SaverSchedule) -> SaverResolvedScene? {
+        var offset = 0, skip = skipOffset
+        switch source {
+        case .assigned(let id):
+            if skip == 0, let entry = content.entry(id: id) { return SaverResolvedScene(entry: entry, span: nil) }
+            skip = max(0, skip - 1)
+        case .deck(let o):
+            offset = o
+        }
+        guard !content.entries.isEmpty else { return nil }
+        let index = deck.entryIndex(atStep: step + skip + offset)
+        guard content.entries.indices.contains(index) else { return nil }
+        let entry = content.entries[index]
+        var span: SaverSpan?
+        if spanAllowed, entry.span == true, let key, let viewport = layout.viewport(of: key) {
+            let canvas = layout.canvas
+            let clock = layout.main.flatMap { layout.viewport(of: $0.id) } ?? viewport
+            span = SaverSpan(canvasWidth: canvas.width, canvasHeight: canvas.height, viewport: viewport, clockViewport: clock,
+                             timeOrigin: schedule.start(ofStep: step), isMain: isMain)
+        }
+        return SaverResolvedScene(entry: entry, span: span)
+    }
+
+    /// One line for the log: "display 2/3 main=0 mode=different liveness=still key=37D8832A".
+    var summary: String {
+        "display \(index + 1)/\(max(1, layout.count)) main=\(isMain ? 1 : 0) mode=\(mode.rawValue) liveness=\(liveness.rawValue) "
+            + "lead=\(isLead ? 1 : 0) key=\(key.map { String($0.prefix(8)) } ?? "?")"
+            + (isAssigned ? " assigned" : "")
+    }
+}
+
+/// Geometry of a spanning video: the player layer covers the whole canvas, offset so this display's
+/// viewport is what shows (the host view clips to its bounds).
+enum SaverSpanGeometry {
+    /// The player layer's frame in a bottom-left-origin host view of height `vh` (AppKit layers).
+    static func layerFrame(span: SaverSpan, viewHeight vh: Double) -> SaverRect {
+        SaverRect(x: -span.viewport.x, y: vh - span.canvasHeight + span.viewport.y, width: span.canvasWidth, height: span.canvasHeight)
+    }
+
+    /// The clock layout of a span step: placed by the scene's clock position inside the main
+    /// display's viewport, in this display's own (top-left) coordinates. Nil without a clock.
+    static func clockRect(span: SaverSpan, position: LPClockPosition) -> SaverRect? {
+        guard let layout = SaverClockLayout.make(width: span.clockViewport.width, height: span.clockViewport.height, position: position) else { return nil }
+        let r = layout.rect
+        return SaverRect(x: r.x + span.clockViewport.x - span.viewport.x, y: r.y + span.clockViewport.y - span.viewport.y,
+                         width: r.width, height: r.height)
     }
 }
 
@@ -418,6 +674,8 @@ enum SaverSystemEvent: String {
     case previewHostActivated, previewHostDeactivated
     /// The view's window was ordered in/out, (de)miniaturised, closed or changed occlusion/screen.
     case windowChanged
+    /// Displays were connected, disconnected or rearranged (NSApplication.didChangeScreenParameters).
+    case screensChanged
 
     /// Names of NSWorkspace's display-sleep notifications (`NSWorkspace.screensDid…Notification.rawValue`).
     static let screensDidSleepName = "NSWorkspaceScreensDidSleepNotification"
@@ -429,6 +687,7 @@ enum SaverSystemEvent: String {
     static let previewHostActivatedName = "LivePaperPreviewHostActivated"
     static let previewHostDeactivatedName = "LivePaperPreviewHostDeactivated"
     static let windowChangedName = "LivePaperWindowChanged"
+    static let screensChangedName = "LivePaperScreensChanged"
 
     init?(notificationName name: String) {
         // `lockUIShowing` is an alias of `lockUIShown` on current macOS; both mean "hide our clock".
@@ -448,6 +707,7 @@ enum SaverSystemEvent: String {
         case Self.previewHostActivatedName: self = .previewHostActivated
         case Self.previewHostDeactivatedName: self = .previewHostDeactivated
         case Self.windowChangedName: self = .windowChanged
+        case Self.screensChangedName: self = .screensChanged
         default: return nil
         }
     }
@@ -626,7 +886,7 @@ struct SaverRunGate: Equatable {
         case .engineTerminated: engineRunning = false
         case .previewHostActivated: previewHostActive = true
         case .previewHostDeactivated: previewHostActive = false
-        case .lockUIShown, .lockUIHidden, .published, .windowChanged: break
+        case .lockUIShown, .lockUIHidden, .published, .windowChanged, .screensChanged: break
         }
     }
 }
@@ -712,8 +972,23 @@ struct SaverWebConfig: Codable, Equatable {
     /// "ac" | "battery" (becomes `lp.env.power`).
     var power: String
     var lowPower: Bool
+    /// Span steps only (absent otherwise, so the JSON is unchanged): the virtual canvas and this
+    /// page's viewport in it (CSS px), the main display's viewport (the clock box), and scene time 0
+    /// (ms since 1970) shared by every display.
+    var spanW: Double? = nil
+    var spanH: Double? = nil
+    var spanX: Double? = nil
+    var spanY: Double? = nil
+    var spanClockX: Double? = nil
+    var spanClockY: Double? = nil
+    var spanClockW: Double? = nil
+    var spanClockH: Double? = nil
+    var timeOrigin: Double? = nil
+    /// Start paused (one frame, no frame loop): still displays. Only written when true.
+    var paused: Bool? = nil
 
-    init(showClock: Bool, clockPosition: LPClockPosition, profile: LPPerformanceProfile.Resolved, seed: Int, power: SaverPowerState) {
+    init(showClock: Bool, clockPosition: LPClockPosition, profile: LPPerformanceProfile.Resolved, seed: Int, power: SaverPowerState,
+         span: SaverSpan? = nil, paused: Bool = false) {
         clock = showClock
         self.clockPosition = clockPosition.rawValue
         fps = profile.fps
@@ -721,6 +996,14 @@ struct SaverWebConfig: Codable, Equatable {
         self.seed = seed
         self.power = power.onBattery ? "battery" : "ac"
         lowPower = power.lowPowerMode
+        if let span {
+            spanW = span.canvasWidth; spanH = span.canvasHeight
+            spanX = span.viewport.x; spanY = span.viewport.y
+            spanClockX = span.clockViewport.x; spanClockY = span.clockViewport.y
+            spanClockW = span.clockViewport.width; spanClockH = span.clockViewport.height
+            timeOrigin = (span.timeOrigin.timeIntervalSince1970 * 1000).rounded()
+        }
+        self.paused = paused ? true : nil
     }
 
     var json: String { saverJSON(self) }
@@ -855,6 +1138,8 @@ struct SaverSummary: Equatable {
     /// Scene names (nil when nothing is published).
     var scenes: String?
     var footnote: String
+    /// Multiple displays, when not the standard settings ("Different on each display · …").
+    var displays: String? = nil
 
     static func make(content: SaverContent, version: String) -> SaverSummary {
         guard let playlist = content.playlist, !content.entries.isEmpty else {
@@ -882,7 +1167,28 @@ struct SaverSummary: Equatable {
         let scenes = names.count > 4 ? "\(shown) and \(names.count - 4) more" : shown
         return SaverSummary(playlist: parts.joined(separator: " · "), clock: playlist.showClock ? "Shown" : "Hidden",
                             performance: performanceText(playlist.performance), scenes: scenes,
-                            footnote: "Scenes and settings are managed in the LivePaper app. Version \(version), publish \(playlist.generation).")
+                            footnote: "Scenes and settings are managed in the LivePaper app. Version \(version), publish \(playlist.generation).",
+                            displays: displaysText(playlist.displays))
+    }
+
+    /// "Different on each display · on battery, other displays show a still"; nil for the standard settings.
+    static func displaysText(_ d: LPDisplaySettings) -> String? {
+        guard d != .standard else { return nil }
+        var parts: [String]
+        switch d.mode {
+        case .same: parts = ["Same on every display"]
+        case .different: parts = ["Different on each display"]
+        case .choose:
+            let n = d.assignments.count
+            parts = ["Chosen per display" + (n == 0 ? "" : " (\(n) display\(n == 1 ? "" : "s") assigned)")]
+        case .span: parts = ["Spans all displays"]
+        }
+        switch d.onBattery {
+        case .live: break
+        case .still: parts.append("on battery, other displays show a still")
+        case .off: parts.append("on battery, other displays are black")
+        }
+        return parts.joined(separator: " · ")
     }
 
     static func performanceText(_ profile: LPPerformanceProfile) -> String {

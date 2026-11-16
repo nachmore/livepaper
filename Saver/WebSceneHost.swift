@@ -46,6 +46,12 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
     private let webView: PassiveWebView
     private var paused: Bool
     private var lockUIShowing: Bool
+    /// `.still`: the page stays paused on its first frame with its clock hidden (a frozen clock would
+    /// show the wrong time) — as if the lock UI were up.
+    private var liveness: SaverDisplayLiveness
+    private let span: SaverSpan?
+    private var effectivePaused: Bool { paused || liveness == .still }
+    private var effectiveLockUI: Bool { lockUIShowing || liveness == .still }
     private var profile: LPPerformanceProfile.Resolved
     private var power: SaverPowerState
     /// The power state baked into LIVEPAPER_CONFIG (re-sent on ready if it changed while loading).
@@ -61,10 +67,14 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
         self.fileURL = fileURL
         paused = context.paused
         lockUIShowing = context.lockUIShowing
+        liveness = context.liveness == .still ? .still : .live
+        span = context.span
         profile = context.profile
         power = context.power
         initialPower = context.power
         initialProfile = context.profile
+        let startsPaused = context.paused || liveness == .still
+        let startsLockUI = context.lockUIShowing || liveness == .still
 
         let config = WKWebViewConfiguration()
         // Nothing a scene does may persist (no cookies, storage or caches on disk).
@@ -72,9 +82,9 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
         config.suppressesIncrementalRendering = true
         config.mediaTypesRequiringUserActionForPlayback = .all
         let webConfig = SaverWebConfig(showClock: context.showClock, clockPosition: context.clockPosition, profile: context.profile,
-                                       seed: context.seed, power: context.power)
+                                       seed: context.seed, power: context.power, span: context.span, paused: startsPaused)
         config.userContentController.addUserScript(
-            WKUserScript(source: webConfig.userScript + "window.LIVEPAPER_CONFIG.lockUI = \(context.lockUIShowing);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
+            WKUserScript(source: webConfig.userScript + "window.LIVEPAPER_CONFIG.lockUI = \(startsLockUI);", injectionTime: .atDocumentStart, forMainFrameOnly: true))
         let proxy = WeakMessageProxy()
         config.userContentController.add(proxy, name: Self.messageHandlerName)
 
@@ -126,15 +136,31 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
     }
 
     func setPaused(_ paused: Bool) {
-        guard paused != self.paused else { return }
+        let before = effectivePaused
         self.paused = paused
-        if isReady { run(paused ? SaverJS.pause : SaverJS.resume) }
+        applyPause(was: before)
     }
 
     func setLockUIShowing(_ showing: Bool, animated: Bool) {
         lockUIShowing = showing
         // Harmless before the runtime exists; re-applied on ready. The runtime fades its own clock.
-        run(SaverJS.lockUI(showing))
+        run(SaverJS.lockUI(effectiveLockUI))
+    }
+
+    func setLiveness(_ liveness: SaverDisplayLiveness) {
+        let target: SaverDisplayLiveness = liveness == .still ? .still : .live
+        guard target != self.liveness else { return }
+        let before = effectivePaused
+        self.liveness = target
+        // The clock goes with lockUI, not the `clock` config key: that would move lp.clockRect and
+        // make the scene lay itself out again.
+        run(SaverJS.lockUI(effectiveLockUI))
+        applyPause(was: before)
+    }
+
+    private func applyPause(was before: Bool) {
+        guard effectivePaused != before, isReady else { return }
+        run(effectivePaused ? SaverJS.pause : SaverJS.resume)
     }
 
     func powerDidChange(profile: LPPerformanceProfile.Resolved, power: SaverPowerState) {
@@ -157,8 +183,11 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
     }
 
     var diagnostics: [String: Any] {
-        ["kind": kind, "id": entryID, "ready": isReady, "paused": paused, "lockUIShowing": lockUIShowing,
-         "errors": errorCount, "fps": profile.fps, "scale": profile.scale, "power": power.onBattery ? "battery" : "ac"]
+        var d: [String: Any] = ["kind": kind, "id": entryID, "ready": isReady, "paused": paused, "lockUIShowing": lockUIShowing,
+                                "errors": errorCount, "fps": profile.fps, "scale": profile.scale, "power": power.onBattery ? "battery" : "ac",
+                                "liveness": liveness.rawValue, "span": span != nil]
+        if let span { d["viewport"] = [span.viewport.x, span.viewport.y, span.viewport.width, span.viewport.height] }
+        return d
     }
 
     // MARK: Page → host
@@ -193,8 +222,9 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
         isReady = true
         // Apply whatever changed while the page was loading (the config the page started with
         // only knows the state at creation time).
-        run(SaverJS.lockUI(lockUIShowing))
-        if paused { run(SaverJS.pause) }
+        run(SaverJS.lockUI(effectiveLockUI))
+        // The page may have started paused (LIVEPAPER_CONFIG.paused) and the gate opened since.
+        run(effectivePaused ? SaverJS.pause : SaverJS.resume)
         if power != initialPower || profile != initialProfile {
             run(SaverJS.power(SaverPowerUpdate(power: power, profile: profile)))
         }

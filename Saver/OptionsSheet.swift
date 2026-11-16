@@ -30,6 +30,7 @@ final class OptionsSheetController: NSObject {
             [label("Performance:"), value(summary.performance)],
         ]
         if let scenes = summary.scenes { rows.insert([label("Scenes:"), value(scenes)], at: 1) }
+        if let displays = summary.displays { rows.append([label("Displays:"), value(displays)]) }
         let grid = NSGridView(views: rows)
         grid.rowSpacing = 8
         grid.columnSpacing = 10

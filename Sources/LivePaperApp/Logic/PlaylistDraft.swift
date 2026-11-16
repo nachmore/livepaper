@@ -1,5 +1,5 @@
-// PlaylistDraft — editing rules for the screen-saver playlist (Foundation-only; also compiled into
-// LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
+// PlaylistDraft — editing rules for the screen-saver playlist and its multiple-display settings
+// (Foundation-only; also compiled into LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
 //
 // `PlaylistSettings.sceneIDs` empty means "all scenes" (new scenes join automatically); a non-empty
 // list is an explicit, ordered selection.
@@ -99,15 +99,158 @@ struct PlaylistDraft: Equatable, Sendable {
         return out
     }
 
-    /// "Shuffle · 4 scenes · every 5 minutes" / "Aurora Lake".
-    static func summary(_ s: PlaylistSettings, available: [String], names: [String: String]) -> String {
+    /// "Shuffle · 4 scenes · every 5 minutes" / "Aurora Lake", plus the display mode when it changes
+    /// what plays ("… · different on each display"). `displays`: the connected displays (nil =
+    /// unknown: the mode is named whenever it applies with two or more).
+    static func summary(_ s: PlaylistSettings, available: [String], names: [String: String],
+                        displays: LPDisplayLayout? = nil) -> String {
         let ids = PlaylistDraft(s).effectiveSceneIDs(available: available)
         guard !ids.isEmpty else { return "No scenes yet" }
-        if s.mode == .single || ids.count == 1 { return names[ids[0]] ?? ids[0] }
+        let suffix = displaySuffix(s, sceneCount: ids.count, available: available, displays: displays)
+        if s.mode == .single || ids.count == 1 { return (names[ids[0]] ?? ids[0]) + suffix }
         let mode = s.mode == .shuffle ? "Shuffle" : "In order"
         let count = s.sceneIDs.isEmpty ? "all \(ids.count) scenes" : "\(ids.count) scenes"
         let cycle = s.cycleMinutes > 0 ? LPFormat.cycle(minutes: s.cycleMinutes).lowercased() : "one per session"
-        return "\(mode) \u{00B7} \(count) \u{00B7} \(cycle)"
+        return "\(mode) \u{00B7} \(count) \u{00B7} \(cycle)" + suffix
+    }
+
+    /// " · different on each display" and so on, or "" when every display plays the same: "Same";
+    /// "Different" and "Span" with one display (they need two, as in the saver); "Different" with one
+    /// scene; "Choose" without an assignment that applies to a connected display.
+    private static func displaySuffix(_ s: PlaylistSettings, sceneCount: Int, available: [String],
+                                      displays: LPDisplayLayout?) -> String {
+        switch s.displays.effectiveMode(displayCount: displays?.count ?? 2) {
+        case .same:
+            return ""
+        case .different:
+            return sceneCount > 1 ? " \u{00B7} different on each display" : ""
+        case .choose:
+            var assigned = Set(PlaylistDraft(s).effectiveAssignments(available: available).keys)
+            if let displays { assigned.formIntersection(displays.displays.map(\.id)) }
+            return assigned.isEmpty ? "" : " \u{00B7} chosen per display"
+        case .span:
+            return " \u{00B7} spanning all displays"
+        }
+    }
+}
+
+// MARK: - Multiple displays
+
+/// A display with a scene assigned ("Choose per display") that isn't connected right now.
+struct RememberedDisplay: Equatable, Sendable, Identifiable {
+    /// Display key (`LPDisplay.normalizedID`).
+    var id: String
+    /// The name it had when its scene was assigned, or a short fallback ("Display 37D8832A").
+    var name: String
+    var sceneID: String
+}
+
+extension PlaylistDraft {
+    /// The scene assigned to a display (any letter case); nil = it plays the playlist.
+    func assignment(for displayID: String) -> String? {
+        settings.displays.assignments[LPDisplay.normalizedID(displayID)]
+    }
+
+    /// Assigns a scene to a display (nil: back to the playlist). The display's name is remembered
+    /// for while it isn't connected; names are kept only for displays that have an assignment.
+    mutating func assign(_ sceneID: String?, to display: LPDisplay) {
+        let key = LPDisplay.normalizedID(display.id)
+        guard !key.isEmpty else { return }
+        let scene = sceneID?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if scene.isEmpty {
+            settings.displays.assignments[key] = nil
+        } else {
+            settings.displays.assignments[key] = scene
+            let name = display.name.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !name.isEmpty { settings.displayNames[key] = name }
+        }
+        pruneDisplayNames()
+    }
+
+    /// Drops a display's assignment and remembered name ("Forget" on a display that isn't connected).
+    mutating func forgetDisplay(_ displayID: String) {
+        let key = LPDisplay.normalizedID(displayID)
+        settings.displays.assignments[key] = nil
+        settings.displayNames[key] = nil
+        pruneDisplayNames()
+    }
+
+    /// Names only for displays with an assignment, keyed like the assignments (normalised).
+    private mutating func pruneDisplayNames() {
+        let assigned = Set(settings.displays.assignments.keys)
+        var names: [String: String] = [:]
+        for (key, name) in settings.displayNames.sorted(by: { $0.key < $1.key }) {
+            let k = LPDisplay.normalizedID(key)
+            if assigned.contains(k), names[k] == nil { names[k] = name }
+        }
+        if names != settings.displayNames { settings.displayNames = names }
+    }
+
+    /// The name to show for a display that may not be connected.
+    func displayName(for displayID: String) -> String {
+        let key = LPDisplay.normalizedID(displayID)
+        if let name = settings.displayNames[key], !name.isEmpty { return name }
+        return Self.fallbackDisplayName(key)
+    }
+
+    /// "Display 37D8832A" (the start of its UUID); "Display 5" for "DISPLAY-5".
+    static func fallbackDisplayName(_ displayID: String) -> String {
+        let key = LPDisplay.normalizedID(displayID)
+        let prefix = String(LPDisplay.fallbackID(0).dropLast())   // "DISPLAY-"
+        if key.hasPrefix(prefix), key.count > prefix.count { return "Display " + key.dropFirst(prefix.count) }
+        return "Display " + key.prefix(8)
+    }
+
+    /// Displays with an assignment that aren't among `connected`, by name.
+    func rememberedDisplays(connected: [LPDisplay]) -> [RememberedDisplay] {
+        let here = Set(connected.map { LPDisplay.normalizedID($0.id) })
+        return settings.displays.assignments
+            .filter { !here.contains($0.key) }
+            .map { RememberedDisplay(id: $0.key, name: displayName(for: $0.key), sceneID: $0.value) }
+            .sorted { a, b in
+                let order = a.name.localizedStandardCompare(b.name)
+                return order == .orderedSame ? a.id < b.id : order == .orderedAscending
+            }
+    }
+
+    /// The assignments the saver gets: in "Choose per display" only, and only for scenes that still
+    /// exist (a display whose scene was deleted plays the playlist). Mirrors PublishService.
+    func effectiveAssignments(available: [String]) -> [String: String] {
+        guard settings.displays.mode == .choose else { return [:] }
+        let existing = Set(available)
+        return settings.displays.assignments.filter { existing.contains($0.value) }
+    }
+
+    /// Which of these scenes stretch across the displays in "Span across displays"
+    /// (`SceneManifest.spans`: videos unless they opt out, web scenes that declare `"span": true`);
+    /// the others show on every display. Ids without a manifest are left out; the order is kept.
+    static func spanSupport(ids: [String], manifests: [String: SceneManifest]) -> (spanning: [String], notSpanning: [String]) {
+        var spanning: [String] = [], notSpanning: [String] = []
+        for id in ids {
+            guard let m = manifests[id] else { continue }
+            if m.spans { spanning.append(id) } else { notSpanning.append(id) }
+        }
+        return (spanning, notSpanning)
+    }
+
+    /// "Different on each display" with fewer scenes than displays: some displays share a scene
+    /// (display k shows what display k + n shows). nil when every display can differ.
+    static func differentNote(sceneCount: Int, displayCount: Int) -> String? {
+        guard displayCount >= 2, sceneCount > 0, sceneCount < displayCount else { return nil }
+        return sceneCount == 1
+            ? "The playlist has one scene, so every display shows it."
+            : "The playlist has \(sceneCount) scenes for \(displayCount) displays, so some displays show the same scene."
+    }
+
+    /// "3 of 5 scenes can span; the others show on every display." ("" without scenes.)
+    static func spanSupportSummary(spanning: Int, total: Int) -> String {
+        guard total > 0 else { return "" }
+        if spanning >= total { return total == 1 ? "This scene can span." : "All \(total) scenes can span." }
+        if spanning <= 0 {
+            return total == 1 ? "This scene can\u{2019}t span, so it shows on every display."
+                              : "None of these scenes can span, so they show on every display."
+        }
+        return "\(spanning) of \(total) scenes can span; the others show on every display."
     }
 }
 
@@ -138,6 +281,38 @@ extension LPPerformanceProfile {
         case .best: return "60 fps at full resolution, always."
         case .balanced: return "60 fps at 75 % resolution."
         case .battery: return "30 fps at 75 % resolution, always. Lowest energy use."
+        }
+    }
+}
+
+extension LPDisplayMode {
+    var uiTitle: String {
+        switch self {
+        case .same: return "Same on every display"
+        case .different: return "Different on each display"
+        case .choose: return "Choose per display"
+        case .span: return "Span across displays"
+        }
+    }
+
+    var uiExplanation: String {
+        switch self {
+        case .same: return "Every display shows the same scene."
+        case .different: return "Each display shows a different scene from the playlist, when it has enough scenes."
+        case .choose: return "Pick a scene for each display. Displays without a choice play the playlist."
+        case .span:
+            return "One scene stretches across all displays, as they\u{2019}re arranged in System Settings \u{203A} Displays. "
+                + "Scenes that can\u{2019}t span show on every display."
+        }
+    }
+}
+
+extension LPBatteryDisplays {
+    var uiTitle: String {
+        switch self {
+        case .live: return "The scene"
+        case .still: return "A still picture"
+        case .off: return "Nothing (black)"
         }
     }
 }

@@ -346,6 +346,78 @@ extension SelfTests {
             r = try sb.run(["publish", "--scenes", "all", "--json"])
             try expectEqual(try CLITestSupport.jsonObject(r.out)["scenes"] as? [String], ["aurora-lake", "starter"])
         },
+        cliTest("cli.publish.displays") { sb in
+            _ = try sb.run(["new", "aurora-lake"])
+            _ = try sb.run(["new", "ember"])
+            try sb.installFakeSaver()
+            let a = "00000000-0000-4000-8000-0000000000a1", b = "00000000-0000-4000-8000-0000000000A2"
+            var r = try sb.run(["publish", "--scenes", "aurora-lake,starter", "--displays", "choose", "--battery-displays", "still",
+                                "--display", "\(a)=ember", "--display", "\(b)=starter", "--json"])
+            try expectEqual(r.status, 0)
+            var summary = try CLITestSupport.jsonObject(r.out)
+            var displays = summary["displays"] as? [String: Any]
+            try expectEqual(displays?["mode"] as? String, "choose")
+            try expectEqual(displays?["onBattery"] as? String, "still")
+            // UUIDs are stored uppercase; a scene outside the playlist is published for its display only.
+            try expectEqual(displays?["assignments"] as? [String: String], [a.uppercased(): "ember", b: "starter"])
+            try expectEqual(summary["displayScenes"] as? [String], ["ember"])
+            try expectEqual(summary["scenes"] as? [String], ["aurora-lake", "starter"])
+            try expectEqual(summary["spanScenes"] as? [String], [])
+            let dir = sb.saver.appendingPathComponent("Contents/Resources/Playlist")
+            var playlist = try LPPlaylist.load(from: dir)
+            try expectEqual(playlist.displays, LPDisplaySettings(mode: .choose, assignments: [a.uppercased(): "ember", b: "starter"], onBattery: .still))
+            try expectEqual(playlist.displayScenes.map(\.file), ["ember.html"])
+            try expect(FileManager.default.fileExists(atPath: dir.appendingPathComponent("ember.html").path))
+            let settings = try JSONDecoder().decode(PlaylistSettings.self, from: Data(contentsOf: sb.support.appendingPathComponent("playlist-settings.json")))
+            try expectEqual(settings.displays.assignments, [a.uppercased(): "ember", b: "starter"])
+            // Human output names the display mode and the assignments.
+            r = try sb.run(["publish"])
+            try expect(r.out.contains("chosen per display") && r.out.contains("other displays still on battery"), r.out)
+            try expect(r.out.contains("display \(b): starter"), r.out)
+            // =playlist removes one, all=playlist every one.
+            r = try sb.run(["publish", "--display", "\(a)=playlist", "--json"])
+            try expectEqual((try CLITestSupport.jsonObject(r.out)["displays"] as? [String: Any])?["assignments"] as? [String: String], [b: "starter"])
+            r = try sb.run(["publish", "--display", "all=playlist", "--json"])
+            try expectEqual((try CLITestSupport.jsonObject(r.out)["displays"] as? [String: Any])?["assignments"] as? [String: String], [:])
+            // Assignments outside "choose" are kept in the settings but not published, with a note.
+            r = try sb.run(["publish", "--displays", "span", "--display", "\(a)=ember", "--json"])
+            try expectEqual(r.status, 0)
+            try expect(r.err.contains("note: per-display scenes apply with --displays choose"), r.err)
+            summary = try CLITestSupport.jsonObject(r.out)
+            displays = summary["displays"] as? [String: Any]
+            try expectEqual(displays?["mode"] as? String, "span")
+            try expectEqual(displays?["assignments"] as? [String: String], [:])
+            try expectEqual(summary["displayScenes"] as? [String], [])
+            playlist = try LPPlaylist.load(from: dir)
+            try expectEqual(playlist.displays.assignments, [:])
+            try expectEqual(try JSONDecoder().decode(PlaylistSettings.self, from: Data(contentsOf: sb.support.appendingPathComponent("playlist-settings.json")))
+                .displays.assignments, [a.uppercased(): "ember"])
+            r = try sb.run(["publish"])
+            try expect(r.out.contains("spans displays") && r.out.contains("spanning displays: none"), r.out)
+            // Invalid values exit 2 with the usage sentence.
+            for (args, message) in [(["--displays", "mirror"], "--displays must be same, different, choose or span"),
+                                    (["--battery-displays", "dim"], "--battery-displays must be live, still or off"),
+                                    (["--display", "ember"], "--display needs <display-uuid>=<scene-id>"),
+                                    (["--display", "\(a)="], "--display needs"),
+                                    (["--display", "all=ember"], "--display needs"),
+                                    (["--display", "not-a-uuid=ember"], "is not a display UUID"),
+                                    (["--display", "\(a)=nope"], "unknown scene id: nope")] {
+                r = try sb.run(["publish"] + args)
+                try expectEqual(r.status, 2)
+                try expect(r.err.contains(message), "\(args): \(r.err)")
+            }
+            // Displays without a UUID go by "display-<n>".
+            r = try sb.run(["publish", "--displays", "choose", "--display", "display-5=ember", "--json"])
+            try expectEqual((try CLITestSupport.jsonObject(r.out)["displays"] as? [String: Any])?["assignments"] as? [String: String],
+                            [a.uppercased(): "ember", "DISPLAY-5": "ember"])
+            // Back to the defaults: nothing about displays in the human summary.
+            r = try sb.run(["publish", "--displays", "same", "--battery-displays", "live", "--display", "all=playlist"])
+            try expectEqual(r.status, 0)
+            try expect(!r.out.contains("display") && !r.out.contains("on battery"), r.out)
+            let usage = try sb.run(["help", "publish"]).out
+            try expect(usage.contains("--displays same|different|choose|span") && usage.contains("--display <display-uuid>=<scene-id>|playlist]…")
+                       && usage.contains("--battery-displays live|still|off"), usage)
+        },
         cliTest("cli.doctor") { sb in
             var r = try sb.run(["doctor", "--no-ai", "--json"])
             try expectEqual(r.status, 1)

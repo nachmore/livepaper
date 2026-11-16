@@ -22,8 +22,10 @@ enum MockSampleData {
         }
         func web(_ id: String, _ name: String, _ desc: String, tags: [String], perf p: SceneManifest.Performance?,
                  created: Double, author: String, parent: String? = nil, clock: LPClockPosition = .top) -> SceneManifest {
+            // Like the real built-ins, the sample built-ins may stretch across displays.
             SceneManifest(id: id, name: name, description: desc, kind: .web, clock: .init(position: clock), author: author,
-                          created: days(created), updated: days(max(0, created - 1)), parent: parent, tags: tags, performance: p)
+                          created: days(created), updated: days(max(0, created - 1)), parent: parent, tags: tags, performance: p,
+                          span: author == "LivePaper" ? true : nil)
         }
         func video(_ id: String, _ name: String, _ desc: String, tags: [String], created: Double) -> SceneManifest {
             SceneManifest(id: id, name: name, description: desc, kind: .video, video: .init(file: "video.mov"), author: "you",
@@ -81,6 +83,20 @@ enum MockSampleData {
                    style: .ink, builtin: false),
         ]
     }
+
+    /// The displays mock mode and the snapshots pretend are connected (AppEnvironment.connectedDisplays):
+    /// by default a laptop with the menu bar and a larger display to its right, vertically centred.
+    /// The ids are made up (never a real display's).
+    @MainActor static var displays: [LPDisplay] = defaultDisplays
+
+    static let builtinDisplayID = "00000000-0000-4000-8000-0000000000A1"
+    static let externalDisplayID = "00000000-0000-4000-8000-0000000000A2"
+
+    static let defaultDisplays: [LPDisplay] = [
+        LPDisplay(id: builtinDisplayID, name: "Built-in Retina Display", frame: LPRect(x: 0, y: 0, width: 1512, height: 982),
+                  scale: 2, isBuiltin: true, isMenuBar: true),
+        LPDisplay(id: externalDisplayID, name: "Studio Display", frame: LPRect(x: 1512, y: -229, width: 2560, height: 1440), scale: 2),
+    ]
 
     /// The tiny placeholder scene code written into mock web packages.
     static let sceneJS = """

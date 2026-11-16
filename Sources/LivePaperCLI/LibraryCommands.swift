@@ -13,7 +13,9 @@ enum LibraryCommands {
                        summary: "add a video (as a video scene) or a scene package to the library", run: importItem),
             CLICommand(name: "publish",
                        synopsis: "[--scenes <id,id,…>|all] [--mode shuffle|sequence|single] [--cycle <minutes>] " +
-                                 "[--performance automatic|best|balanced|battery] [--clock|--no-clock] [--json]",
+                                 "[--performance automatic|best|balanced|battery] [--clock|--no-clock] " +
+                                 "[--displays same|different|choose|span] [--display <display-uuid>=<scene-id>|playlist]… " +
+                                 "[--battery-displays live|still|off] [--json]",
                        summary: "update the playlist settings (optional) and publish the scenes into the installed screen saver",
                        run: publish),
         ]
@@ -157,6 +159,11 @@ enum LibraryCommands {
     // MARK: - publish
 
     struct PublishSummary: Encodable {
+        struct Displays: Encodable {
+            var mode: String
+            var onBattery: String
+            var assignments: [String: String]
+        }
         var generation: Int
         var mode: String
         var cycleMinutes: Int
@@ -165,10 +172,21 @@ enum LibraryCommands {
         var scenes: [String]
         var skipped: [String: String]
         var saver: String
+        /// Multiple displays as published (assignments only in "choose" mode, and only to published scenes).
+        var displays: Displays
+        /// Scenes published only for displays assigned to them.
+        var displayScenes: [String]
+        /// Scenes that stretch across displays in "span" mode (the others show on every display).
+        var spanScenes: [String]
     }
 
+    static let displaysUsage = "--displays must be same, different, choose or span"
+    static let batteryDisplaysUsage = "--battery-displays must be live, still or off"
+    static let displayUsage = "--display needs <display-uuid>=<scene-id> (or <display-uuid>=playlist, all=playlist)"
+
     static func publish(_ argv: [String]) async throws -> Int32 {
-        let args = try Arguments(argv, flags: ["clock", "no-clock", "json"], options: ["scenes", "mode", "cycle", "performance"])
+        let args = try Arguments(argv, flags: ["clock", "no-clock", "json"],
+                                 options: ["scenes", "mode", "cycle", "performance", "displays", "display", "battery-displays"])
         guard args.positional.isEmpty else { throw UsageError("publish takes no positional arguments") }
         let services = CLIServices.live
         var settings = services.publish.loadSettings()
@@ -193,7 +211,25 @@ enum LibraryCommands {
         if let list = args.string("scenes") {
             settings.sceneIDs = try sceneSelection(list, library: services.library)
         }
+        if let mode = args.string("displays") {
+            guard let m = LPDisplayMode(rawValue: mode) else { throw UsageError(displaysUsage) }
+            settings.displays.mode = m
+        }
+        if let battery = args.string("battery-displays") {
+            guard let b = LPBatteryDisplays(rawValue: battery) else { throw UsageError(batteryDisplaysUsage) }
+            settings.displays.onBattery = b
+        }
+        let displayArguments = args.strings("display")
+        if !displayArguments.isEmpty {
+            settings.displays.assignments = try displayAssignments(displayArguments, current: settings.displays.assignments,
+                                                                   library: services.library)
+            // The app remembers names only for displays that have a scene.
+            settings.displayNames = settings.displayNames.filter { settings.displays.assignments[$0.key] != nil }
+        }
         if settings != before { try services.publish.saveSettings(settings) }
+        if !settings.displays.assignments.isEmpty && settings.displays.mode != .choose && (!displayArguments.isEmpty || args.string("displays") != nil) {
+            stderr("note: per-display scenes apply with --displays choose")
+        }
 
         let playlist: LPPlaylist, skipped: [String: String]
         if let concrete = services.publish as? PublishService {
@@ -203,14 +239,25 @@ enum LibraryCommands {
             playlist = try services.publish.publish(); skipped = [:]
         }
         if args.flag("json") {
+            let d = playlist.displays
             printJSONObject(PublishSummary(generation: playlist.generation, mode: playlist.mode.rawValue, cycleMinutes: playlist.cycleMinutes,
                                            showClock: playlist.showClock, performance: playlist.performance.rawValue,
-                                           scenes: playlist.scenes.map(\.id), skipped: skipped, saver: LPPaths.installedSaver.path))
+                                           scenes: playlist.scenes.map(\.id), skipped: skipped, saver: LPPaths.installedSaver.path,
+                                           displays: .init(mode: d.mode.rawValue, onBattery: d.onBattery.rawValue, assignments: d.assignments),
+                                           displayScenes: playlist.displayScenes.map(\.id),
+                                           spanScenes: (playlist.scenes + playlist.displayScenes).filter { $0.span == true }.map(\.id)))
         } else {
             let n = playlist.scenes.count
             print("published \(n) scene\(n == 1 ? "" : "s") into \(displayPath(LPPaths.installedSaver)) (generation \(playlist.generation))")
             print("  \(describe(playlist))")
             print("  scenes: " + playlist.scenes.map(\.id).joined(separator: ", "))
+            for (display, scene) in playlist.displays.assignments.sorted(by: { $0.key < $1.key }) {
+                print("  display \(display): \(scene)")
+            }
+            if playlist.displays.mode == .span {
+                let spanning = playlist.scenes.filter { $0.span == true }.map(\.id)
+                print("  spanning displays: " + (spanning.isEmpty ? "none (every scene shows on every display)" : spanning.joined(separator: ", ")))
+            }
             for (id, why) in skipped.sorted(by: { $0.key < $1.key }) { print("  skipped \(id): \(why)") }
             print("The screen saver picks it up the next time it starts.")
         }
@@ -231,11 +278,55 @@ enum LibraryCommands {
         return ids.filter { seen.insert($0).inserted }
     }
 
-    /// "shuffle · a new scene every 5 min · clock on · automatic performance"
+    /// `--display` values applied to `current`: `<uuid>=<scene>` assigns, `<uuid>=playlist` removes,
+    /// `all=playlist` clears. Display ids are UUIDs (as `livepaper doctor` and the app show them) or
+    /// "display-<n>" for displays without one; scene ids must exist.
+    static func displayAssignments(_ values: [String], current: [String: String], library: LibraryServicing) throws -> [String: String] {
+        var assignments = current
+        var known: Set<String>?
+        for value in values {
+            guard let eq = value.firstIndex(of: "=") else { throw UsageError(displayUsage) }
+            let display = value[..<eq].trimmingCharacters(in: .whitespaces)
+            let scene = value[value.index(after: eq)...].trimmingCharacters(in: .whitespaces)
+            guard !display.isEmpty, !scene.isEmpty else { throw UsageError(displayUsage) }
+            if display.lowercased() == "all" {
+                guard scene == "playlist" else { throw UsageError(displayUsage) }
+                assignments = [:]
+                continue
+            }
+            let isFallback = display.lowercased().hasPrefix("display-") && Int(display.dropFirst(8)) != nil
+            guard UUID(uuidString: display) != nil || isFallback else {
+                throw UsageError("--display: \"\(display)\" is not a display UUID (like 37D8832A-2D66-02CA-B9F7-8F30A301B230). " + displayUsage)
+            }
+            let key = LPDisplay.normalizedID(display)
+            if scene == "playlist" {
+                assignments.removeValue(forKey: key)
+                continue
+            }
+            if known == nil { known = Set(try library.scenes().map(\.id)) }
+            guard known?.contains(scene) == true else { throw UsageError("unknown scene id: \(scene) (see `livepaper list`)") }
+            assignments[key] = scene
+        }
+        return LPDisplaySettings.normalized(assignments)
+    }
+
+    /// "shuffle · a new scene every 5 min · clock on · automatic performance" (+ the display mode and
+    /// the battery behaviour when they aren't the defaults).
     static func describe(_ p: LPPlaylist) -> String {
         let cycle = p.cycleMinutes == 0 ? "one scene per run" : "a new scene every \(p.cycleMinutes) min"
-        return [p.mode.rawValue, cycle, p.showClock ? "clock on" : "clock off", "\(p.performance.rawValue) performance"]
-            .joined(separator: " · ")
+        var parts = [p.mode.rawValue, cycle, p.showClock ? "clock on" : "clock off", "\(p.performance.rawValue) performance"]
+        switch p.displays.mode {
+        case .same: break
+        case .different: parts.append("different on each display")
+        case .choose: parts.append("chosen per display")
+        case .span: parts.append("spans displays")
+        }
+        switch p.displays.onBattery {
+        case .live: break
+        case .still: parts.append("other displays still on battery")
+        case .off: parts.append("other displays off on battery")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 

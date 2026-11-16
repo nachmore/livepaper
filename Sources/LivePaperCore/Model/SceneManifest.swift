@@ -47,16 +47,26 @@ public struct SceneManifest: Codable, Sendable, Equatable, Identifiable {
     public var parent: String?
     public var tags: [String]
     public var performance: Performance?
+    /// "Span across displays": `true` declares that this web scene is a pure function of lp.t, the
+    /// seed and the canvas size, so it may stretch across all displays (SCENE_API.md "Spanning
+    /// several displays"; `livepaper check` verifies it). Videos span unless this is `false`.
+    public var span: Bool?
 
     public init(id: String, name: String, description: String = "", kind: Kind, runtime: Int? = 1,
                 clock: Clock = .init(), video: Video? = nil, author: String? = nil, created: Date? = Date(),
-                updated: Date? = Date(), parent: String? = nil, tags: [String] = [], performance: Performance? = nil) {
+                updated: Date? = Date(), parent: String? = nil, tags: [String] = [], performance: Performance? = nil,
+                span: Bool? = nil) {
         self.schema = SceneManifest.currentSchema
         self.id = id; self.name = name; self.description = description; self.kind = kind
         self.runtime = kind == .web ? (runtime ?? 1) : nil
         self.clock = clock; self.video = video; self.author = author; self.created = created; self.updated = updated
-        self.parent = parent; self.tags = tags; self.performance = performance
+        self.parent = parent; self.tags = tags; self.performance = performance; self.span = span
     }
+
+    /// Whether the scene stretches across displays in "Span across displays": videos by default (one
+    /// shared player shows every display its crop, exact by construction), web scenes only when they
+    /// declare `"span": true`.
+    public var spans: Bool { kind == .video ? (span ?? true) : (span == true) }
 
     // Tolerant decoding: AI agents write this file, so missing optional fields must not fail.
     public init(from decoder: Decoder) throws {
@@ -75,6 +85,7 @@ public struct SceneManifest: Codable, Sendable, Equatable, Identifiable {
         parent = try c.decodeIfPresent(String.self, forKey: .parent)
         tags = try c.decodeIfPresent([String].self, forKey: .tags) ?? []
         performance = try? c.decodeIfPresent(Performance.self, forKey: .performance)
+        span = (try? c.decodeIfPresent(Bool.self, forKey: .span)).flatMap { $0 }
     }
 
     public static func decoder() -> JSONDecoder {

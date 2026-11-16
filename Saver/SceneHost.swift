@@ -17,9 +17,17 @@ struct SceneContext {
     var power: SaverPowerState
     /// Session seed handed to web scenes (identical on every display).
     var seed: Int
+    /// Live, or one still frame (battery: displays other than the main one). Black displays get no host.
+    var liveness: SaverDisplayLiveness = .live
+    /// This display's slice when the scene spans all displays.
+    var span: SaverSpan? = nil
+    /// False on the displays other than the main one while a scene spans (one clock in all).
+    var clockOnThisDisplay = true
+    /// Publish generation (shared video players are per file and publish).
+    var generation = 0
 
     /// Whether a native (CATextLayer) clock should exist at all for this scene.
-    var wantsNativeClock: Bool { showClock && clockPosition != .none }
+    var wantsNativeClock: Bool { showClock && clockPosition != .none && clockOnThisDisplay }
 }
 
 protocol SceneHostDelegate: AnyObject {
@@ -48,6 +56,9 @@ protocol SceneHost: AnyObject {
     func setLockUIShowing(_ showing: Bool, animated: Bool)
     /// The performance profile changed (AC ⇄ battery, Low Power Mode).
     func powerDidChange(profile: LPPerformanceProfile.Resolved, power: SaverPowerState)
+    /// Live ⇄ still (one frame, no clock, nothing running). `.off` never reaches a host: the view
+    /// removes it instead.
+    func setLiveness(_ liveness: SaverDisplayLiveness)
     /// Releases everything and removes the view. The host is unusable afterwards.
     func tearDown()
     /// State for logs and the dev host.

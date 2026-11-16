@@ -8,6 +8,9 @@
  *   - deterministic capture modes: still (#still=1&t=12), bench (#bench=120&t=26), manual
  *   - the Apple-style lock-screen clock overlay and the clock hand-off with the system lock UI
  *   - the performance governor (fps + render scale from the host's profile, adaptive step-down)
+ *   - spanning several displays: the page shows its viewport of a virtual canvas (lp.w/h = the
+ *     canvas, lp.viewport = this page's part) with the 2D transform / WebGL viewport offset for it,
+ *     a shared wall-clock time base and one clock on the main display (SCENE_API.md §16)
  *   - error/ready/stats reporting to the native host (webkit.messageHandlers.livepaper)
  *
  * Configuration, lowest to highest precedence:
@@ -33,14 +36,21 @@
     clock: 'bool', clockPosition: 'str', hour12: 'bool?', clockTime: 'str',
     fps: 'num', scale: 'num', dprMax: 'num', performance: 'str',
     power: 'str', lowPower: 'bool', reducedMotion: 'bool', preview: 'bool', lockUI: 'bool',
-    seed: 'num', debug: 'bool', governor: 'bool', budgetMs: 'num', statsEvery: 'num'
+    seed: 'num', debug: 'bool', governor: 'bool', budgetMs: 'num', statsEvery: 'num',
+    // Spanning displays (all CSS px; span is on when spanW and spanH are > 0), the shared time base
+    // (ms since 1970) and starting paused (one frame, no frame loop).
+    spanW: 'num', spanH: 'num', spanX: 'num', spanY: 'num',
+    spanClockX: 'num', spanClockY: 'num', spanClockW: 'num', spanClockH: 'num',
+    timeOrigin: 'num', paused: 'bool'
   };
   var cfg = {
     still: false, t: 0, bench: 0, manual: false,
     clock: true, clockPosition: null, hour12: null, clockTime: null,
     fps: null, scale: null, dprMax: 2, performance: 'automatic',
     power: 'ac', lowPower: false, reducedMotion: false, preview: false, lockUI: false,
-    seed: 1, debug: false, governor: true, budgetMs: 0, statsEvery: 0
+    seed: 1, debug: false, governor: true, budgetMs: 0, statsEvery: 0,
+    spanW: 0, spanH: 0, spanX: 0, spanY: 0, spanClockX: 0, spanClockY: 0, spanClockW: 0, spanClockH: 0,
+    timeOrigin: 0, paused: false
   };
   function coerce(type, v) {
     if (type === 'num') { var n = Number(v); return isFinite(n) ? n : undefined; }
@@ -66,6 +76,14 @@
 
   var MODE = cfg.bench > 0 ? 'bench' : cfg.still ? 'still' : cfg.manual ? 'manual' : 'live';
   var CAPTURE = MODE !== 'live';
+  // Spanning: this page shows the viewport (spanX, spanY, innerWidth × innerHeight) of a virtual
+  // canvas spanW × spanH (CSS px) that stretches across several displays.
+  function spanOn() { return cfg.spanW > 0 && cfg.spanH > 0; }
+  var SPAN = spanOn();
+  // Live scenes with a time origin run on the wall clock, so pages on different displays agree.
+  function timeBaseOn() { return MODE === 'live' && cfg.timeOrigin > 0; }
+  var TIMEBASE = timeBaseOn();
+  function wallT(now) { return (performance.timeOrigin + now - cfg.timeOrigin) / 1000; }
 
   // Environment the scene can adapt to (lp.env). The host keeps it current via LivePaper.host.power().
   var reducedMotionQuery = null;
@@ -211,8 +229,12 @@
 
   // ---------------------------------------------------------------------------------- drawing
   // Offscreen canvas for pre-rendered layers, sized in CSS px and pre-scaled by dpr.
+  // While spanning, layers the size of the virtual canvas are capped at 16 MP (64 MB): a pure function
+  // of the layer size, so every display (and a full-canvas render) caps alike.
+  var LAYER_MAX_PIXELS = 16777216;
   function layer(cssW, cssH, dpr) {
     var d = dpr || 1;
+    if (SPAN && cssW > 0 && cssH > 0) d = Math.min(d, Math.max(0.25, Math.sqrt(LAYER_MAX_PIXELS / (cssW * cssH))));
     var c = document.createElement('canvas');
     c.width = Math.max(1, Math.round(cssW * d));
     c.height = Math.max(1, Math.round(cssH * d));
@@ -385,7 +407,7 @@
   (document.head || document.documentElement).appendChild(styleEl);
 
   var scene = null, lp = null, booted = false;
-  var raf = 0, running = false, hostPaused = false, lastFrame = 0, lastRaf = 0, vsyncMs = 1000 / 60;
+  var raf = 0, running = false, hostPaused = !!cfg.paused, lastFrame = 0, lastRaf = 0, vsyncMs = 1000 / 60;
   // cfg.lockUI: the host loads us while the lock UI is already up (start with the clock hidden).
   var clockTimer = 0, clockText = '', lockUIShowing = !!cfg.lockUI, overlayForcedHidden = false;
   var fade = { from: 1, to: 1, start: 0 };
@@ -411,28 +433,89 @@
     if (position === 'bottom-right') return { x: w - pad - bw, y: h - pad - bh, w: bw, h: bh };
     return { x: w / 2 - bw / 2, y: h * 0.07, w: bw, h: bh };
   }
+  // The box the clock is laid out in (canvas coordinates): the main display's viewport while
+  // spanning (so the clock shows once, on that display), otherwise the whole page.
+  function clockBox() {
+    if (SPAN) {
+      var bw = cfg.spanClockW > 0 ? cfg.spanClockW : cfg.spanW, bh = cfg.spanClockH > 0 ? cfg.spanClockH : cfg.spanH;
+      var bx = cfg.spanClockW > 0 ? cfg.spanClockX : 0, by = cfg.spanClockH > 0 ? cfg.spanClockY : 0;
+      return { x: bx, y: by, w: bw, h: bh };
+    }
+    return { x: 0, y: 0, w: lp ? lp.w : 0, h: lp ? lp.h : 0 };
+  }
+  function boxRect(position, box) {
+    var r = rectFor(position, box.w, box.h);
+    return { x: r.x + box.x, y: r.y + box.y, w: r.w, h: r.h };
+  }
   function runtimeClockRect() {
     var p = clockPosition();
-    return !cfg.clock || p === 'none' || !lp ? null : rectFor(p, lp.w, lp.h);
+    return !cfg.clock || p === 'none' || !lp ? null : boxRect(p, clockBox());
   }
 
+  // Device-pixel offset of this page's viewport in the virtual canvas: top-left (2D) and GL's
+  // bottom-left convention. Zero without span.
+  var spanOX = 0, spanOY = 0, spanOYTop = 0, glMaxDims = null;
   function measure() {
-    var w = Math.max(1, window.innerWidth), h = Math.max(1, window.innerHeight);
+    var vw = Math.max(1, window.innerWidth), vh = Math.max(1, window.innerHeight);
+    var w = SPAN ? cfg.spanW : vw, h = SPAN ? cfg.spanH : vh;
     var sysDpr = Math.min(cfg.dprMax || 2, window.devicePixelRatio || 1);
     var dpr = sysDpr * governor.scale();
+    // A WebGL viewport can't exceed MAX_VIEWPORT_DIMS: a very wide canvas renders at a lower density.
+    if (SPAN && glMaxDims) dpr = Math.min(dpr, glMaxDims[0] / w, glMaxDims[1] / h);
     lp.w = w; lp.h = h; lp.dpr = dpr; lp.scale = governor.scale();
     lp.pw = Math.max(1, Math.round(w * dpr)); lp.ph = Math.max(1, Math.round(h * dpr));
     lp.cx = w / 2; lp.cy = h / 2;
     lp.min = Math.min(w, h); lp.max = Math.max(w, h); lp.aspect = w / h;
-    if (stage.width !== lp.pw) stage.width = lp.pw;
-    if (stage.height !== lp.ph) stage.height = lp.ph;
-    var ow = Math.round(w * sysDpr), oh = Math.round(h * sysDpr);
+    var sw = SPAN ? Math.max(1, Math.round(vw * dpr)) : lp.pw, sh = SPAN ? Math.max(1, Math.round(vh * dpr)) : lp.ph;
+    if (stage.width !== sw) stage.width = sw;
+    if (stage.height !== sh) stage.height = sh;
+    spanOX = SPAN ? Math.round(cfg.spanX * dpr) : 0;
+    spanOYTop = SPAN ? Math.round(cfg.spanY * dpr) : 0;
+    spanOY = SPAN ? lp.ph - spanOYTop - sh : 0;
+    lp.span = SPAN;
+    lp.viewport = { x: SPAN ? cfg.spanX : 0, y: SPAN ? cfg.spanY : 0, w: vw, h: vh };
+    lp.fragOffset = [spanOX, spanOY];
+    var box = clockBox();
+    lp.clockBox = { x: box.x, y: box.y, w: box.w, h: box.h };
+    if (SPAN) wrapForSpan();
+    var ow = Math.round(vw * sysDpr), oh = Math.round(vh * sysDpr);
     if (overlay.width !== ow || overlay.height !== oh) { overlay.width = ow; overlay.height = oh; }
     lp.clockRect = runtimeClockRect();
     overlayDpr = sysDpr;
     clockText = '';
   }
   var overlayDpr = 1;
+
+  // While spanning, the stage covers only this page's viewport of the virtual canvas. The stage
+  // context's absolute transforms (2D) and the default framebuffer's viewport/scissor (WebGL) are
+  // offset by the viewport's position, so a scene drawing the whole canvas draws its slice here.
+  var spanWrapped = false;
+  function wrapForSpan() {
+    if (spanWrapped || !lp) return;
+    if (lp.ctx) {
+      var c = lp.ctx, setT = c.setTransform, getT = c.getTransform;
+      c.setTransform = function (a, b, cc, d, e, f) {
+        if (!spanOX && !spanOYTop) return setT.apply(c, arguments);
+        if (arguments.length <= 1) {
+          var m = a ? DOMMatrix.fromMatrix(a) : new DOMMatrix();
+          return setT.call(c, m.a, m.b, m.c, m.d, m.e - spanOX, m.f - spanOYTop);
+        }
+        return setT.call(c, a, b, cc, d, e - spanOX, f - spanOYTop);
+      };
+      c.resetTransform = function () { return setT.call(c, 1, 0, 0, 1, -spanOX, -spanOYTop); };
+      if (getT) c.getTransform = function () { var m = getT.call(c); m.e += spanOX; m.f += spanOYTop; return m; };
+    } else if (lp.gl) {
+      var gl = lp.gl, bind = gl.bindFramebuffer, vp = gl.viewport, sc = gl.scissor, drawFB = null;
+      var DRAW = gl.DRAW_FRAMEBUFFER;
+      gl.bindFramebuffer = function (target, fb) {
+        if (target === gl.FRAMEBUFFER || (DRAW && target === DRAW)) drawFB = fb || null;
+        return bind.call(gl, target, fb);
+      };
+      gl.viewport = function (x, y, w, h) { return drawFB ? vp.call(gl, x, y, w, h) : vp.call(gl, x - spanOX, y - spanOY, w, h); };
+      gl.scissor = function (x, y, w, h) { return drawFB ? sc.call(gl, x, y, w, h) : sc.call(gl, x - spanOX, y - spanOY, w, h); };
+    }
+    spanWrapped = true;
+  }
 
   function drawClock(force) {
     var r = lp && lp.clockRect;
@@ -444,8 +527,12 @@
     o.setTransform(1, 0, 0, 1, 0, 0);
     o.clearRect(0, 0, overlay.width, overlay.height);
     if (!r) return;
-    o.setTransform(overlayDpr, 0, 0, overlayDpr, 0, 0);
-    var s = clockSizes(lp.w, lp.h), pos = clockPosition();
+    // Spanning: the clock is laid out in canvas coordinates; only the page whose viewport holds it
+    // (the main display's) draws it.
+    var vpt = lp.viewport;
+    if (SPAN && !(r.x < vpt.x + vpt.w && vpt.x < r.x + r.w && r.y < vpt.y + vpt.h && vpt.y < r.y + r.h)) return;
+    o.setTransform(overlayDpr, 0, 0, overlayDpr, -vpt.x * overlayDpr, -vpt.y * overlayDpr);
+    var box = clockBox(), s = clockSizes(box.w, box.h), pos = clockPosition();
     var align = pos === 'bottom-left' ? 'left' : pos === 'bottom-right' ? 'right' : 'center';
     var x = align === 'left' ? r.x : align === 'right' ? r.x + r.w : r.x + r.w / 2;
     var fam = '-apple-system, "SF Pro Display", system-ui, "Helvetica Neue", Helvetica, Arial, sans-serif';
@@ -492,7 +579,8 @@
   var governor = (function () {
     var MAX_LEVEL = 4, WINDOW_MS = 500, DOWN_WINDOWS = 4;
     var level = 0, acc = 0, n = 0, winStart = 0, over = 0, under = 0, upWindows = 16, lastUp = -1e9, quietUntil = 0;
-    function active() { return MODE === 'live' && cfg.governor; }
+    // Off while spanning: every display must draw the same scene at the same quality and scale.
+    function active() { return MODE === 'live' && cfg.governor && !SPAN; }
     function scaleFor(l) {
       var base = targets.scale;
       return Math.max(Math.min(0.6, base), base * Math.pow(0.85, l));
@@ -536,9 +624,9 @@
   function round2(x) { return Math.round(x * 100) / 100; }
 
   // ---------------------------------------------------------------------------------- frame loop
-  function step(dt) {
+  function step(dt, absT) {
     lp.dt = dt;
-    lp.t += dt;
+    lp.t = absT != null ? absT : lp.t + dt;
     lp.frame++;
     lp.clockAlpha = clockAlphaAt(performance.now());
     if (scene.update) guarded('update', function () { scene.update(lp, dt); });
@@ -553,9 +641,9 @@
     }
     guarded('draw', function () { scene.draw(lp); });
   }
-  function frame(dt) {
+  function frame(dt, absT) {
     var t0 = performance.now();
-    step(dt);
+    step(dt, absT);
     render();
     var t1 = performance.now(), ms = t1 - t0;
     stats.frameMs = stats.frameMs ? stats.frameMs + (ms - stats.frameMs) * 0.05 : ms;
@@ -580,7 +668,13 @@
     // 120 Hz displays run a 60 fps cap at exactly every other refresh, and a 30 fps cap every 4th.
     if (elapsed < 1000 / targets.fps - vsyncMs * 0.5) return;
     lastFrame = now;
-    frame(Math.min(0.1, elapsed / 1000));
+    if (TIMEBASE) {
+      // Wall-clock time base (spanning): every display's page computes the same t (monotonic).
+      var target = Math.max(lp.t, wallT(now));
+      frame(Math.min(0.1, target - lp.t), target);
+    } else {
+      frame(Math.min(0.1, elapsed / 1000));
+    }
   }
   function shouldRun() { return booted && MODE === 'live' && !hostPaused && !document.hidden; }
   function sync() {
@@ -619,7 +713,7 @@
     var r = lp.clockRect, kind = 'runtime';
     // Scenes that draw their own clock (or have the clock off) still get the macOS lock UI clock at
     // top centre when the user wakes the screen, so that is the region that must stay calm.
-    if (!r) { r = rectFor('top', lp.w, lp.h); kind = 'system'; }
+    if (!r) { r = boxRect('top', clockBox()); kind = 'system'; }
     return { x: r.x, y: r.y, w: r.w, h: r.h, kind: kind, position: clockPosition() };
   }
   function statsMessage(reason) {
@@ -632,7 +726,9 @@
   }
   function markReady(extra) {
     document.documentElement.setAttribute('data-livepaper', 'ready');
-    var msg = { type: 'ready', mode: MODE, scene: SCENE_META.id || null, t: lp ? lp.t : 0, errors: errorTotal, clockRect: debugClockRect() };
+    var msg = { type: 'ready', mode: MODE, scene: SCENE_META.id || null, t: lp ? lp.t : 0, errors: errorTotal, clockRect: debugClockRect(),
+      viewport: lp && lp.viewport ? { x: lp.viewport.x, y: lp.viewport.y, w: lp.viewport.w, h: lp.viewport.h } : null,
+      span: SPAN, hasUpdate: !!(scene && scene.update) };
     if (extra) Object.keys(extra).forEach(function (k) { msg[k] = extra[k]; });
     post(msg);
   }
@@ -652,6 +748,7 @@
       t: 0, dt: 0, frame: 0, mode: MODE,
       rand: mulberry32(cfg.seed || 1), quality: 1,
       clockRect: null, clockVisible: clockWanted(), clockAlpha: clockWanted() ? 1 : 0,
+      viewport: { x: 0, y: 0, w: 0, h: 0 }, span: false, fragOffset: [0, 0], clockBox: { x: 0, y: 0, w: 0, h: 0 },
       env: env, cfg: cfg, util: util
     };
     var kind = scene.context || '2d';
@@ -662,6 +759,7 @@
     if (!ctx) { reportError('setup', 'could not create a ' + kind + ' context'); markReady({ failed: true }); return; }
     lp.context = kind;
     if (kind === '2d') lp.ctx = ctx; else lp.gl = ctx;
+    if (lp.gl) { try { glMaxDims = lp.gl.getParameter(lp.gl.MAX_VIEWPORT_DIMS); } catch (e) { glMaxDims = null; } }
     measure();
     applyClockVisibility(false);
     if (scene.setup) guarded('setup', function () { scene.setup(lp); });
@@ -690,11 +788,13 @@
       markReady();
       return;
     }
-    lp.t = start;
+    lp.t = TIMEBASE ? Math.max(0, wallT(performance.now())) : start;
     document.addEventListener('visibilitychange', sync);
     if (reducedMotionQuery && reducedMotionQuery.addEventListener) reducedMotionQuery.addEventListener('change', refreshEnv);
     render();
     sync();
+    // Loaded paused (a still display, or the host's gate is closed): the one frame keeps its clock.
+    if (!running) drawClock(true);
     markReady();
   }
 
@@ -724,15 +824,20 @@
     config: function (obj) {
       var o = {};
       Object.keys(obj || {}).forEach(function (k) { if (k !== 'still' && k !== 'bench' && k !== 'manual' && k !== 't') o[k] = obj[k]; });
+      var spanBefore = JSON.stringify([cfg.spanW, cfg.spanH, cfg.spanX, cfg.spanY, cfg.spanClockX, cfg.spanClockY, cfg.spanClockW, cfg.spanClockH]);
       applyConfig(o);
       if ('hour12' in o) TIME_FMT = null;
       if ('lockUI' in o) lockUIShowing = !!cfg.lockUI;
+      SPAN = spanOn();
+      TIMEBASE = timeBaseOn();
       refreshEnv();
       retarget();
+      if ('paused' in o) { hostPaused = !!cfg.paused; sync(); }
       if (!lp) return;
+      var spanChanged = JSON.stringify([cfg.spanW, cfg.spanH, cfg.spanX, cfg.spanY, cfg.spanClockX, cfg.spanClockY, cfg.spanClockW, cfg.spanClockH]) !== spanBefore;
       var before = JSON.stringify(lp.clockRect);
       lp.clockRect = runtimeClockRect();
-      if (JSON.stringify(lp.clockRect) !== before) resizeAll(); // scenes lay out around the clock
+      if (spanChanged || JSON.stringify(lp.clockRect) !== before) resizeAll(); // scenes lay out around the clock
       applyClockVisibility(true);
       drawClock(true);
     },

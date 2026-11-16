@@ -82,6 +82,13 @@ enum SystemActions {
 
     static func open(_ url: URL) { NSWorkspace.shared.open(url) }
 
+    /// Puts plain text on the general pasteboard ("Copy Display ID").
+    static func copyToPasteboard(_ string: String) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(string, forType: .string)
+    }
+
     /// Final uninstall step: move the app bundle to the Trash and quit.
     static func moveAppToTrashAndQuit(_ model: AppModel) {
         guard let path = model.environment.appBundlePath else {

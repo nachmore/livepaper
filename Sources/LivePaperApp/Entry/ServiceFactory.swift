@@ -86,7 +86,9 @@ enum ServiceFactory {
                               openLoginItemsSettings: mock ? {} : { SystemActions.openLoginItemsSettings() },
                               observeUnlock: mock ? { _ in {} } : { SessionUnlockObserver.observe($0) },
                               diskWatchRoot: diskWatchRoot,
-                              isSessionLocked: isSessionLocked)
+                              isSessionLocked: isSessionLocked,
+                              connectedDisplays: mock ? { MockSampleData.displays } : { DisplayProbe.current() },
+                              observeDisplays: mock ? { _ in {} } : { DisplayProbe.observe($0) })
     }
 }
 

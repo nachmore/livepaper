@@ -87,7 +87,7 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
             throw PublishError.saverNotInstalled(saverURL.path)
         }
         let settings = loadSettings()
-        let chosen = try resolveScenes(settings)
+        let (chosen, all) = try resolveScenes(settings)
         let fm = FileManager.default
         let live = playlistDirectory
         let staging = live.deletingLastPathComponent().appendingPathComponent(Self.stagingName)
@@ -105,9 +105,12 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
             guard !entries.isEmpty else {
                 throw PublishError.nothingPublishable(skipped.sorted { $0.key < $1.key }.map { "\($0.key): \($0.value)" })
             }
+            let (displays, displayScenes) = stageDisplayScenes(settings.displays, deck: entries, library: all,
+                                                               into: staging, skipped: &skipped)
             let previous = (try? LPPlaylist.load(from: live))?.generation ?? 0
             let playlist = LPPlaylist(generation: previous + 1, mode: settings.mode, cycleMinutes: max(0, settings.cycleMinutes),
-                                      showClock: settings.showClock, performance: settings.performance, scenes: entries)
+                                      showClock: settings.showClock, performance: settings.performance, scenes: entries,
+                                      displays: displays, displayScenes: displayScenes)
             try playlist.write(to: staging)
             try FileOps.installReplacing(live, with: staging)
             log.info("published generation \(playlist.generation) with \(entries.count) scene(s)")
@@ -121,15 +124,54 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
 
     /// The playlist's scenes in order; an empty selection means every scene. If none of the
     /// selected ids still exist the playlist falls back to every scene rather than going blank.
-    private func resolveScenes(_ settings: PlaylistSettings) throws -> [SceneItem] {
+    /// Also returns the whole library (display assignments may name scenes outside the playlist).
+    private func resolveScenes(_ settings: PlaylistSettings) throws -> (chosen: [SceneItem], all: [SceneItem]) {
         let all = try library.scenes()
         guard !all.isEmpty else { throw PublishError.noScenes }
-        guard !settings.sceneIDs.isEmpty else { return all }
+        guard !settings.sceneIDs.isEmpty else { return (all, all) }
         let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         var seen = Set<String>()
         let chosen = settings.sceneIDs.compactMap { id -> SceneItem? in seen.insert(id).inserted ? byID[id] : nil }
         if chosen.isEmpty { log.notice("none of the playlist's scenes exist any more; publishing all scenes") }
-        return chosen.isEmpty ? all : chosen
+        return (chosen.isEmpty ? all : chosen, all)
+    }
+
+    /// The display settings to publish, and the scenes staged only for displays assigned to them
+    /// ("Choose per display", ARCHITECTURE §4.3). Mode and battery behaviour are always published.
+    /// Assignments are published only in `choose` mode and only when their scene made it into the
+    /// playlist: a deck scene, or a library scene staged here once (into `displayScenes`). An unknown
+    /// scene is dropped with a log line (the app shows it as deleted); one that fails to stage is
+    /// reported in `skipped` like a deck scene and its displays play the playlist.
+    private func stageDisplayScenes(_ requested: LPDisplaySettings, deck: [LPPlaylistEntry], library all: [SceneItem],
+                                    into staging: URL, skipped: inout [String: String]) -> (LPDisplaySettings, [LPPlaylistEntry]) {
+        var published = LPDisplaySettings(mode: requested.mode, assignments: [:], onBattery: requested.onBattery)
+        guard requested.mode == .choose else { return (published, []) }
+        let deckIDs = Set(deck.map(\.id))
+        let byID = Dictionary(all.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        var extras: [LPPlaylistEntry] = [], staged: [String: Bool] = [:]
+        for (display, id) in LPDisplaySettings.normalized(requested.assignments).sorted(by: { $0.key < $1.key }) {
+            if deckIDs.contains(id) { published.assignments[display] = id; continue }
+            if let ok = staged[id] {
+                if ok { published.assignments[display] = id }
+                continue
+            }
+            // A playlist scene that failed above is already reported; don't stage it twice.
+            guard skipped[id] == nil, let scene = byID[id] else {
+                if skipped[id] == nil { log.notice("display \(display, privacy: .public) is assigned \(id, privacy: .public), which isn't in the library; it plays the playlist") }
+                staged[id] = false
+                continue
+            }
+            do {
+                extras.append(try stage(scene, into: staging))
+                staged[id] = true
+                published.assignments[display] = id
+            } catch {
+                staged[id] = false
+                skipped[id] = error.localizedDescription
+                log.error("skipping \(id, privacy: .public) (assigned to a display): \(error.localizedDescription, privacy: .public)")
+            }
+        }
+        return (published, extras)
     }
 
     private func stage(_ scene: SceneItem, into staging: URL) throws -> LPPlaylistEntry {
@@ -142,7 +184,7 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
             guard let size = (try? output.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size > 0 else {
                 throw LibraryError.invalid("compiling \(scene.id) produced no output.")
             }
-            return LPPlaylistEntry(id: scene.id, name: m.name, kind: .web, file: file, clock: m.clock.position)
+            return LPPlaylistEntry(id: scene.id, name: m.name, kind: .web, file: file, clock: m.clock.position, span: m.spans)
         case .video:
             // scene.json is untrusted input: the video must be a plain file inside the package.
             guard let video = m.video, LibraryService.isPlainFileName(video.file) else {
@@ -157,7 +199,8 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
             }
             let file = "\(scene.id).\(ext)"
             try FileOps.hardLinkOrCopy(from: source, to: staging.appendingPathComponent(file))
-            return LPPlaylistEntry(id: scene.id, name: m.name, kind: .video, file: file, clock: m.clock.position, fit: video.fit)
+            return LPPlaylistEntry(id: scene.id, name: m.name, kind: .video, file: file, clock: m.clock.position, fit: video.fit,
+                                   span: m.spans)
         }
     }
 }

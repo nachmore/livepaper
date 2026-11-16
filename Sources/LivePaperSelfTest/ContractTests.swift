@@ -62,13 +62,17 @@ extension SelfTests {
                 throw TestFailure(description: "TYPES not found in runtime.js")
             }
             let known = Set(runtime[start.upperBound..<end.lowerBound].matches(of: #/([A-Za-z0-9]+)\s*:/#).map { String($0.output.1) })
+            // (With every optional key: a spanning, still display's page.)
+            let span = SaverSpan(canvasWidth: 4072, canvasHeight: 1440, viewport: LPRect(x: 1512, y: 0, width: 2560, height: 1440),
+                                 clockViewport: LPRect(x: 0, y: 458, width: 1512, height: 982), timeOrigin: Date(), isMain: false)
             let saver = SaverWebConfig(showClock: true, clockPosition: .top, profile: .init(fps: 60, scale: 1), seed: 1,
-                                       power: SaverPowerState(onBattery: false, lowPowerMode: false))
+                                       power: SaverPowerState(onBattery: false, lowPowerMode: false), span: span, paused: true)
             let saverKeys = (try JSONSerialization.jsonObject(with: Data(saver.json.utf8)) as? [String: Any])?.keys.map { $0 } ?? []
             let hosts: [String: [String]] = [
                 "saver": saverKeys + ["lockUI"],                                                        // + WebSceneHost's lockUI
                 "app preview": ["performance", "power", "lowPower", "clock", "reducedMotion", "preview", "fps", "scale"],
-                "render server": ["still", "t", "bench", "clock", "debug", "dprMax", "seed", "fps", "scale"],
+                "render server": ["still", "t", "bench", "clock", "debug", "dprMax", "seed", "fps", "scale"]
+                    + RenderSpan(canvasW: 1, canvasH: 1, x: 0, y: 0, clockX: 0, clockY: 0, clockW: 1, clockH: 1).configKeys.keys,
             ]
             for (host, keys) in hosts {
                 let unknown = Set(keys).subtracting(known)
