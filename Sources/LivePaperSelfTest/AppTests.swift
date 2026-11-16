@@ -1279,6 +1279,130 @@ extension SelfTests {
                 }
             }
         },
+        TestCase(name: "app.model.helper-repair-banners") {
+            // The repair's banners go once a status read shows the helper running: the user allowed
+            // it in Login Items, or a later attempt worked.
+            let broken = InstallStatus(helperLoginItem: .enabled, helperProblem: .cannotStart("spawn failed, last exit code 78: EX_CONFIG"))
+            try withInstallModel("helper-banners-approval", status: broken, locked: false,
+                                 prepare: { $0.recoveryBehaviour = .needsApproval }) { model, install, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                try expect(model.banners.banners.contains { $0.title.contains("Allow") })
+                try awaitMain { await model.refreshInstallStatus() }
+                try expect(model.banners.banners.contains { $0.title.contains("Allow") }, "still waiting for approval")
+                try install.registerHelper()   // the user allowed it; the helper runs
+                try awaitMain { await model.refreshInstallStatus() }
+                try expect(model.banners.banners.isEmpty, "\(model.banners.banners.map(\.title))")
+            }
+            try withInstallModel("helper-banners-error", status: broken, locked: false,
+                                 prepare: { $0.recoveryBehaviour = .fails("spawn failed") }) { model, install, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                try expect(model.banners.banners.contains { $0.style == .error })
+                try install.registerHelper()
+                try awaitMain { await model.refreshInstallStatus() }
+                try expect(model.banners.banners.isEmpty, "\(model.banners.banners.map(\.title))")
+            }
+            // Another copy's helper runs: reported only; no repair is attempted (and none used up).
+            try withInstallModel("helper-other-copy", status: InstallStatus(helperRunning: true, helperLoginItem: .enabled,
+                                                                            helperProblem: .otherCopy("/Users/me/Downloads/LivePaper.app")),
+                                 locked: false) { model, install, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                try expect(install.recoverCalls == 0 && !model.helperRepairAttempted)
+            }
+        },
+        TestCase(name: "app.model.helper-repair-before-uninstall") {
+            // Uninstall waits for an automatic repair that is still running (it would register the
+            // helper again), and no repair runs after it.
+            try withScratchPaths("repair-uninstall") { root in
+                let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let base = MockInstallService(status: InstallStatus(helperLoginItem: .enabled, helperProblem: .cannotStart("spawn failed")))
+                let gated = GatedInstall(base: base)
+                gated.holdsRepairs = true
+                let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: gated,
+                                                 render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    Task { @MainActor in await model.start() }
+                    try awaitMain(until: { gated.isRepairing })
+                    try expect(model.isInstallBusy, "the repair counts as install work")
+                    let reports = WatchLog<UninstallReport>()
+                    Task { @MainActor in reports.append(await model.uninstall(keepScenes: true)) }
+                    pumpMain(0.3)
+                    try expectEqual(gated.events, ["recover"])
+                    gated.releaseRepair()
+                    try awaitMain(until: { !reports.values.isEmpty })
+                    try expectEqual(gated.events, ["recover", "recovered", "uninstall"])
+                    // A status read that shows a problem after the uninstall starts nothing.
+                    base.simulateHelperCannotStart()
+                    try awaitMain { await model.refreshInstallStatus() }
+                    try awaitMain { await model.awaitHelperRepair() }
+                    try expectEqual(gated.events, ["recover", "recovered", "uninstall"])
+                    try expectEqual(base.registerCalls, 0)
+                    try expect(!model.isInstallBusy)
+                }
+            }
+        },
+        TestCase(name: "app.model.helper-repair-after-install-work") {
+            // A helper problem that shows while other install work runs (here the launch-time saver
+            // update) is repaired as soon as that work ends, not at some later status read.
+            try withScratchPaths("repair-after-update") { root in
+                let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let base = MockInstallService(status: InstallStatus(saverInstalled: true, saverUpToDate: false, helperRunning: true,
+                                                                    helperLoginItem: .enabled))
+                let gated = GatedInstall(base: base)
+                let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: gated,
+                                                 render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    let started = WatchLog<Bool>()
+                    Task { @MainActor in await model.start(); started.append(true) }
+                    try awaitMain(until: { gated.isHolding })
+                    base.simulateHelperCannotStart()
+                    try awaitMain { await model.refreshInstallStatus() }
+                    try expect(model.installStatus.helperProblem != nil)
+                    try expect(base.recoverCalls == 0 && !model.helperRepairAttempted, "held back while the update runs")
+                    gated.release()
+                    try awaitMain(until: { !started.values.isEmpty && base.recoverCalls == 1 && !model.isInstallBusy })
+                    try expectEqual(gated.events, ["update", "updated", "recover", "recovered"])
+                    try expect(model.installStatus.helperRunning && model.installStatus.helperProblem == nil, "\(model.installStatus)")
+                }
+            }
+        },
+        TestCase(name: "app.model.saver-update-unlock-uninstall") {
+            // Uninstall right after an unlock: the update the unlock sets off (once it has re-read the
+            // status, which takes a moment) must neither run alongside the uninstall nor after it.
+            try withScratchPaths("unlock-uninstall") { root in
+                let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let base = MockInstallService(status: InstallStatus(saverInstalled: true, saverUpToDate: false))
+                let gated = GatedInstall(base: base)
+                let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: gated,
+                                                 render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                let unlock = UnlockSource()
+                let lock = LockFlag(true)
+                defer { for _ in 0..<3 { gated.release() } }   // never leave an update thread waiting
+                try MainActor.assumeIsolated {
+                    var env = testEnvironment(root: root, saved: SavedStates())
+                    env.isSessionLocked = { lock.isLocked }
+                    env.observeUnlock = { unlock.observe($0) }
+                    let model = AppModel(services: services, environment: env)
+                    try awaitMain { await model.start() }
+                    try expect(model.isSaverUpdateWaitingForUnlock)
+                    lock.isLocked = false
+                    gated.holdStatusReads()
+                    unlock.fire()
+                    try awaitMain(until: { gated.isHoldingStatusRead })
+                    let reports = WatchLog<UninstallReport>()
+                    Task { @MainActor in reports.append(await model.uninstall(keepScenes: true)) }
+                    pumpMain(0.3)
+                    try expect(reports.values.isEmpty && !gated.events.contains("uninstall"), "uninstall waits for what the unlock started")
+                    gated.releaseStatus()
+                    try awaitMain(until: { !reports.values.isEmpty })
+                    pumpMain(0.2)
+                    try expectEqual(gated.events, ["uninstall"])
+                    try expectEqual(base.updateCalls, 0)
+                    try expect(!model.isInstallBusy && !model.isSaverUpdateWaitingForUnlock)
+                }
+            }
+        },
         TestCase(name: "app.model.saver-update-before-uninstall") {
             // Uninstall (and setup) wait for a launch-time update that is still running: it would
             // otherwise put back what uninstall removes.
@@ -1871,15 +1995,22 @@ extension SelfTests {
         }
     }
 
-    /// Forwards to a MockInstallService, but holds every saver update until `release()`, and logs
-    /// the order of updates and uninstalls, and what the caller's lock probe answered once released.
+    /// Forwards to a MockInstallService, but holds every saver update until `release()` (and, on
+    /// request, every helper repair until `releaseRepair()`, and status reads until
+    /// `releaseStatus()`), and logs the order of updates, repairs and uninstalls, and what the
+    /// caller's lock probe answered once released.
     final class GatedInstall: InstallServicing, @unchecked Sendable {
         let base: MockInstallService
         private let lock = NSLock()
         private let gate = DispatchSemaphore(value: 0)
+        private let repairGate = DispatchSemaphore(value: 0)
         private var log: [String] = []
         private var probes: [Bool] = []
         private var holding = false
+        private var repairing = false
+        private var holdingRepairs = false
+        private var holdingStatus = false
+        private var statusWaiters = 0
 
         init(base: MockInstallService) { self.base = base }
 
@@ -1887,11 +2018,30 @@ extension SelfTests {
         var lockProbes: [Bool] { lock.lock(); defer { lock.unlock() }; return probes }
         var isHolding: Bool { lock.lock(); defer { lock.unlock() }; return holding }
         func release() { gate.signal() }
+        /// Holds every recoverHelper until releaseRepair().
+        var holdsRepairs: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return holdingRepairs }
+            set { lock.lock(); holdingRepairs = newValue; lock.unlock() }
+        }
+        var isRepairing: Bool { lock.lock(); defer { lock.unlock() }; return repairing }
+        func releaseRepair() { repairGate.signal() }
+        /// From now on status() reads the state, then waits for releaseStatus() before answering
+        /// (sysadminctl and launchctl being slow).
+        func holdStatusReads() { lock.lock(); holdingStatus = true; lock.unlock() }
+        var isHoldingStatusRead: Bool { lock.lock(); defer { lock.unlock() }; return statusWaiters > 0 }
+        func releaseStatus() { lock.lock(); holdingStatus = false; lock.unlock() }
         private func note(_ event: String, holding: Bool? = nil) {
             lock.lock(); log.append(event); if let holding { self.holding = holding }; lock.unlock()
         }
 
-        func status() -> InstallStatus { base.status() }
+        func status() -> InstallStatus {
+            let read = base.status()
+            lock.lock(); let hold = holdingStatus; if hold { statusWaiters += 1 }; lock.unlock()
+            guard hold else { return read }
+            while (lock.withLock { holdingStatus }) { usleep(5_000) }
+            lock.lock(); statusWaiters -= 1; lock.unlock()
+            return read
+        }
         func installSaver() throws -> PublishResult? { note("install"); return try base.installSaver() }
         func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome {
             note("update", holding: true)
@@ -1903,7 +2053,16 @@ extension SelfTests {
         }
         func selectSaver() throws -> Bool { try base.selectSaver() }
         func registerHelper() throws { try base.registerHelper() }
-        func recoverHelper() throws -> HelperRecoveryOutcome { try base.recoverHelper() }
+        func recoverHelper() throws -> HelperRecoveryOutcome {
+            note("recover")
+            if holdsRepairs {
+                lock.lock(); repairing = true; lock.unlock()
+                repairGate.wait()
+                lock.lock(); repairing = false; lock.unlock()
+            }
+            defer { note("recovered") }
+            return try base.recoverHelper()
+        }
         func unregisterHelper() throws { try base.unregisterHelper() }
         func setLockKeysShowScene(_ on: Bool) throws { try base.setLockKeysShowScene(on) }
         func openScreenSaverSettings() { base.openScreenSaverSettings() }
