@@ -29,9 +29,11 @@ desktop picture. LivePaper builds on exactly that:
 * **The saver.** LivePaper installs `LivePaper.saver` into `~/Library/Screen Savers` and, when you
   click *Make LivePaper my screen saver*, selects it for you: it edits only the screen-saver slots of
   macOS's wallpaper store (your desktop picture is never touched), restarts WallpaperAgent (about a
-  second of blank desktop) and verifies the result. If that isn't possible (System Settings is open,
-  the setting is managed by your organisation, …) it falls back to a one-click guided step in
-  System Settings › Wallpaper › Screen Saver. The saver runs sandboxed and can only read
+  second of blank desktop) and verifies that every display uses it. If that isn't possible (System
+  Settings is open, the setting is managed by your organisation, …) it falls back to a one-click
+  guided step in System Settings › Wallpaper › Screen Saver. A display that later shows macOS's
+  default instead (one connected after something reset the default) gets LivePaper back by itself;
+  a screen saver you pick yourself is never overridden. The saver runs sandboxed and can only read
   its own bundle, so "publishing" compiles your playlist's scenes *into* the installed saver.
 * **Idle timeout — unchanged.** macOS starts the screen saver after your usual idle time (System
   Settings › Lock Screen). LivePaper never changes it (on managed Macs it may be set by your
@@ -151,6 +153,7 @@ is limited to editing the scene and running those commands (details in
 | `ai create [...] --ref <image\|folder>… [--animate <image>]` | the same with reference images (up to 10; `--ref` is repeatable and folders expand) and at most one picture to animate exactly; the prompt may be left out when images are given (also for `ai modify`) |
 | `ai harnesses` | the AI command-line tools LivePaper found |
 | `doctor [--no-ai] [--json]` | saver, helper, lock settings, render server, library and AI tools; exits 1 when something needs fixing |
+| `select` | make LivePaper the screen saver on every display (only the screen-saver choice changes; the previous one is backed up and uninstall puts it back) — what `doctor` suggests when some displays show another screen saver |
 | `uninstall [--yes] [--keep-scenes] [--dry-run]` | undo everything LivePaper changed (see below) |
 | `server status\|start\|stop` | the render server |
 

@@ -58,10 +58,41 @@ public struct UnavailableWallpaperSystem: WallpaperSystem {
     public func restartWallpaperAgent() throws { throw WallpaperStoreError.unavailable(reason) }
 }
 
+/// For a store that isn't WallpaperAgent's (the CLI's self-tests, which redirect it with
+/// LIVEPAPER_WALLPAPER_STORE): the session is unlocked, nothing conflicts, the format is version 10,
+/// and "restarting the agent" re-encodes the store with WallpaperAgent's model, as a freshly
+/// launched agent rewrites it. It refuses the store the real agent reads, so it can never stand in
+/// for it there, and nothing outside the store file is touched.
+public struct ScratchWallpaperSystem: WallpaperSystem {
+    public let storeURL: URL
+    public init(storeURL: URL) { self.storeURL = storeURL }
+
+    public func unavailability(forStoreAt url: URL) -> String? {
+        let agent = LiveWallpaperSystem.agentStoreURL
+        if LiveWallpaperSystem.samePath(url, agent) || LiveWallpaperSystem.samePath(storeURL, agent) {
+            return "\(url.path) is the store WallpaperAgent reads"
+        }
+        return LiveWallpaperSystem.samePath(url, storeURL) ? nil : "\(url.path) isn't the scratch store"
+    }
+
+    public var sessionState: WallpaperSessionState { .unlocked }
+    public func conflictingProcesses() -> [String] { [] }
+    public var screenSaverModuleForced: Bool { false }
+    public var wallpaperChangesDisabled: Bool { false }
+    public var storeMigrationVersion: Int? { WallpaperApplyOptions.supportedStoreVersion }
+
+    public func restartWallpaperAgent() throws {
+        if let why = unavailability(forStoreAt: storeURL) { throw WallpaperStoreError.unavailable(why) }
+        let model = try WallpaperStoreSchema.decode(Data(contentsOf: storeURL))
+        try WallpaperStoreSchema.encode(model).write(to: storeURL, options: .atomic)
+    }
+}
+
 // MARK: - Live
 
 /// The real Mac. LIVE PATH: `restartWallpaperAgent()` runs `/usr/bin/killall WallpaperAgent`
-/// (through `runner`). It is only ever reached from an explicit user action (select, uninstall),
+/// (through `runner`). It is only ever reached from an explicit user action (select, uninstall) or
+/// the app's quiet re-apply (InstallService.reapplySelectionIfNeeded, never while locked),
 /// and refuses unless `storeURL` is the store WallpaperAgent itself reads — so tests and any
 /// redirected store (LIVEPAPER_WALLPAPER_STORE) can never restart the agent.
 public struct LiveWallpaperSystem: WallpaperSystem {

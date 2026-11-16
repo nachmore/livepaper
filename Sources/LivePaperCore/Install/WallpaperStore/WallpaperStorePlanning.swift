@@ -2,10 +2,17 @@
 // edit plans, the backup manifest, and the invariants every edited store must satisfy. No I/O
 // beyond what callers pass in; WallpaperStoreApplier runs these against the live file.
 //
-// Rules (docs/RESEARCH.md §5, matching what System Settings does):
+// Rules (docs/RESEARCH.md §5):
 // * Select = SystemDefault.Idle plus every other Idle slot that holds an explicit choice (anything
-//   but the `default` placeholder, which falls through to SystemDefault). Desktop slots, record
-//   types, and placeholder Idle slots are never touched.
+//   but the `default` placeholder, which falls through to the next record up), as System Settings
+//   does — plus the placeholder Idle slot of every display record: WallpaperAgent doesn't keep a
+//   SystemDefault written into the file while the displays in use hold the placeholder (§5.5).
+//   Desktop slots, record types and the placeholders of Space Defaults are never touched; every
+//   original, placeholders included, goes into the backup manifest.
+// * The quiet re-apply = only the placeholders of display records that fall back to macOS's default
+//   screen saver (and SystemDefault's placeholder with them): never a slot with an explicit choice.
+// * Selected = every display record resolves to LivePaper (Space and display, then Space, then
+//   display, then SystemDefault).
 // * Restore = only Idle slots that *still* point at LivePaper get their recorded original back;
 //   slots without a record (e.g. a display that appeared later, copied from SystemDefault, or a
 //   selection made by hand in System Settings) get the placeholder, and SystemDefault /
@@ -16,7 +23,20 @@ import Foundation
 
 // MARK: - Detection
 
-/// Which Idle slots of a store choose LivePaper.
+/// What a record shows when the Mac idles or locks: the first Idle slot along its fallback chain
+/// (`WallpaperRecordPath.fallbackChain`) that isn't the placeholder.
+public enum WallpaperResolution: Sendable, Equatable {
+    /// LivePaper.saver, chosen in the Idle slot of `at`.
+    case livePaper(at: WallpaperRecordPath)
+    /// Something else chosen explicitly (another screen saver, an aerial, …) in the Idle slot of `at`.
+    case other(at: WallpaperRecordPath)
+    /// Nothing but placeholders up to SystemDefault: macOS's own default screen saver.
+    case systemDefault
+
+    public var isLivePaper: Bool { if case .livePaper = self { return true }; return false }
+}
+
+/// Which Idle slots of a store choose LivePaper, and what every display resolves to.
 public struct WallpaperSelection: Sendable, Equatable {
     /// Slots whose choice is the LivePaper saver.
     public var livePaper: [WallpaperRecordPath]
@@ -24,18 +44,57 @@ public struct WallpaperSelection: Sendable, Equatable {
     public var other: [WallpaperRecordPath]
     /// Placeholder slots that use the next record up.
     public var inheriting: [WallpaperRecordPath]
+    /// What each display record (`Displays/*`, `Spaces/*/Displays/*`) resolves to.
+    public var displays: [WallpaperRecordPath: WallpaperResolution]
+    /// What each record displays fall back to — SystemDefault, every Space's Default and a set
+    /// AllSpacesAndDisplays — resolves to. A display that appears later starts from a copy of
+    /// SystemDefault (docs/RESEARCH.md §5.4).
+    public var defaults: [WallpaperRecordPath: WallpaperResolution]
+    /// Display records that show macOS's default screen saver only because their own Idle slot,
+    /// and every slot they fall back to, holds the placeholder (no explicit choice anywhere on the
+    /// way): what the quiet re-apply fills (`WallpaperSelectScope.placeholdersOnly`).
+    public var displaysOnSystemDefault: [WallpaperRecordPath]
 
-    public init(livePaper: [WallpaperRecordPath] = [], other: [WallpaperRecordPath] = [], inheriting: [WallpaperRecordPath] = []) {
+    public init(livePaper: [WallpaperRecordPath] = [], other: [WallpaperRecordPath] = [], inheriting: [WallpaperRecordPath] = [],
+                displays: [WallpaperRecordPath: WallpaperResolution] = [:], defaults: [WallpaperRecordPath: WallpaperResolution] = [:],
+                displaysOnSystemDefault: [WallpaperRecordPath] = []) {
         self.livePaper = livePaper; self.other = other; self.inheriting = inheriting
+        self.displays = displays; self.defaults = defaults; self.displaysOnSystemDefault = displaysOnSystemDefault
     }
 
-    /// LivePaper is chosen for at least one display or Space.
+    /// LivePaper is chosen in at least one Idle slot (what uninstall has to undo).
     public var isSelected: Bool { !livePaper.isEmpty }
 
-    /// LivePaper is what every display and Space resolves to: SystemDefault chooses it and no
-    /// explicit choice of anything else is left (the state both System Settings and
-    /// `planSelect` produce).
-    public var isSelectedEverywhere: Bool { livePaper.contains(.systemDefault) && other.isEmpty }
+    /// The displays the store has records for (sorted ids).
+    public var displayIDs: [String] { Set(displays.keys.compactMap(\.displayID)).sorted() }
+
+    /// Displays with a record that resolves to LivePaper (sorted ids).
+    public var displaysWithLivePaper: [String] {
+        Set(displays.filter { $0.value.isLivePaper }.keys.compactMap(\.displayID)).sorted()
+    }
+
+    /// Displays with a record (in some Space) that resolves to something else (sorted ids).
+    public var displaysWithoutLivePaper: [String] {
+        Set(displays.filter { !$0.value.isLivePaper }.keys.compactMap(\.displayID)).sorted()
+    }
+
+    /// LivePaper is what every display shows: every display record resolves to it — or, while the
+    /// store has no display record yet, SystemDefault does. What "selected" means
+    /// (InstallStatus.saverSelected).
+    public var isSelectedOnEveryDisplay: Bool {
+        guard !displays.isEmpty else { return defaults[.systemDefault]?.isLivePaper == true }
+        return displays.values.allSatisfy(\.isLivePaper)
+    }
+
+    /// Every record resolves to LivePaper, SystemDefault and the Spaces' Defaults included: the
+    /// store `planSelect` writes (WallpaperAgent may then write its own choice into those defaults,
+    /// `WallpaperStoreVerifier.Confirmation.confirmedDefaultsRewritten`).
+    public var isSelectedEverywhere: Bool {
+        isSelectedOnEveryDisplay && defaults[.systemDefault]?.isLivePaper == true && defaults.values.allSatisfy(\.isLivePaper)
+    }
+
+    /// LivePaper is what some displays show, but not every display (InstallStatus's "partly").
+    public var isPartlySelected: Bool { !displaysWithLivePaper.isEmpty && !isSelectedOnEveryDisplay }
 }
 
 // MARK: - Plans
@@ -71,17 +130,69 @@ public struct WallpaperStorePlan: Sendable, Equatable {
     }
 }
 
+/// Which Idle slots a selection writes.
+public enum WallpaperSelectScope: Sendable, Equatable {
+    /// The user's "Make LivePaper my screen saver" and `livepaper select`: SystemDefault, every
+    /// explicit Idle slot (another saver's too, as System Settings does), and the placeholder Idle
+    /// slot of every display record. WallpaperAgent doesn't keep a SystemDefault written into the
+    /// file while the displays in use hold the placeholder, but keeps display slots and copies them
+    /// into SystemDefault and the Defaults of the Spaces in use itself (docs/RESEARCH.md §5.5, seen
+    /// on macOS 26.7) — so the displays get LivePaper themselves. Space Defaults that hold the
+    /// placeholder are left alone: a display record is tried before its Space's Default, and every
+    /// display record gets LivePaper.
+    case everyDisplay
+    /// The app's quiet re-apply: only the placeholder Idle slots of display records that fall back
+    /// to macOS's default screen saver (`WallpaperSelection.displaysOnSystemDefault`), plus
+    /// SystemDefault while it holds the placeholder too. Never a slot with an explicit choice, so
+    /// never a screen saver the user picked, nor what a display inherits from one. Empty while no
+    /// display needs it.
+    case placeholdersOnly
+}
+
 extension WallpaperStoreDocument {
-    /// Classifies every Idle slot.
+    /// Classifies every Idle slot, and resolves every display record and every record displays fall
+    /// back to.
     public func selection(of module: WallpaperSaverModule) -> WallpaperSelection {
         var result = WallpaperSelection()
         for record in records {
-            guard let idle = record.idle else { continue }
-            if module.isChosen(in: idle) { result.livePaper.append(record.path) }
-            else if WallpaperSlot.isInherit(idle) { result.inheriting.append(record.path) }
-            else { result.other.append(record.path) }
+            if let idle = record.idle {
+                if module.isChosen(in: idle) { result.livePaper.append(record.path) }
+                else if WallpaperSlot.isInherit(idle) { result.inheriting.append(record.path) }
+                else { result.other.append(record.path) }
+            }
+            let resolved = resolution(of: record.path, module: module)
+            if record.path.displayID != nil {
+                result.displays[record.path] = resolved
+                if resolved == .systemDefault, record.idle != nil { result.displaysOnSystemDefault.append(record.path) }
+            } else {
+                result.defaults[record.path] = resolved
+            }
         }
         return result
+    }
+
+    /// Every display record resolves to `module` at its own location (with no display record yet:
+    /// SystemDefault does) — System Settings' own selection, say, or one whose SystemDefault the agent
+    /// kept: a user's selection has nothing to change then. A choice of LivePaper.saver elsewhere
+    /// doesn't count (it gets rewritten).
+    public func isCurrentChoiceOnEveryDisplay(_ module: WallpaperSaverModule) -> Bool {
+        let displays = records.map(\.path).filter { $0.displayID != nil }
+        return (displays.isEmpty ? [.systemDefault] : displays).allSatisfy { path in
+            guard case .livePaper(let at) = resolution(of: path, module: module),
+                  let slot = record(at: at).flatMap({ $0.idle ?? $0.linked }) else { return false }
+            return module.isCurrentChoice(in: slot)
+        }
+    }
+
+    /// What the record at `path` shows when the Mac idles or locks: the first Idle slot along
+    /// `path.fallbackChain` that isn't the placeholder (records that don't exist, or have no Idle
+    /// slot, are passed over).
+    public func resolution(of path: WallpaperRecordPath, module: WallpaperSaverModule) -> WallpaperResolution {
+        for link in path.fallbackChain {
+            guard let record = record(at: link), let slot = record.idle ?? record.linked, !WallpaperSlot.isInherit(slot) else { continue }
+            return module.isChosen(in: slot) ? .livePaper(at: link) : .other(at: link)
+        }
+        return .systemDefault
     }
 
     /// Throws `.unsupportedShape` for layouts LivePaper doesn't edit: any `linked` record (Desktop
@@ -96,23 +207,35 @@ extension WallpaperStoreDocument {
         if record(at: .systemDefault)?.idle == nil { throw WallpaperStoreError.unsupportedShape("SystemDefault has no Idle slot") }
     }
 
-    /// The edits that make `module` the screen saver everywhere. Empty when it already is.
+    /// The edits that make `module` the screen saver of every display (`scope`). Empty when there is
+    /// nothing to change.
     ///
     /// - Parameter moduleExists: whether a screen-saver bundle exists. A choice of LivePaper.saver at
     ///   another location that exists (e.g. /Library/Screen Savers) is recorded as the original, so
     ///   uninstall puts that location back; one at a location that no longer exists is not.
-    public func planSelect(_ module: WallpaperSaverModule, at date: Date,
+    public func planSelect(_ module: WallpaperSaverModule, at date: Date, scope: WallpaperSelectScope = .everyDisplay,
                            moduleExists: (URL) -> Bool = { FileManager.default.fileExists(atPath: $0.path) }) throws -> WallpaperStorePlan {
         try checkEditable()
         let slot = try module.slot(at: date)
         var changes: [WallpaperSlotChange] = []
-        for record in records {
-            guard let idle = record.idle else { continue }   // Desktop-only records inherit Idle
-            let explicit = record.path == .systemDefault || !WallpaperSlot.isInherit(idle)
-            guard explicit, !module.isCurrentChoice(in: idle) else { continue }
-            let original = !module.isChosen(in: idle)
-                || WallpaperSlot.moduleURLs(idle).contains { module.isOtherExistingCopy($0, moduleExists: moduleExists) }
-            changes.append(WallpaperSlotChange(path: record.path, before: idle, after: slot, recordsOriginal: original))
+        switch scope {
+        case .everyDisplay:
+            for record in records {
+                guard let idle = record.idle else { continue }   // Desktop-only records inherit Idle
+                let wanted = record.path == .systemDefault || record.path.displayID != nil || !WallpaperSlot.isInherit(idle)
+                guard wanted, !module.isCurrentChoice(in: idle) else { continue }
+                // A placeholder is recorded too: uninstall puts exactly it back.
+                let original = !module.isChosen(in: idle)
+                    || WallpaperSlot.moduleURLs(idle).contains { module.isOtherExistingCopy($0, moduleExists: moduleExists) }
+                changes.append(WallpaperSlotChange(path: record.path, before: idle, after: slot, recordsOriginal: original))
+            }
+        case .placeholdersOnly:
+            let fill = Set(selection(of: module).displaysOnSystemDefault)
+            guard !fill.isEmpty else { return WallpaperStorePlan() }
+            for record in records {
+                guard let idle = record.idle, WallpaperSlot.isInherit(idle), fill.contains(record.path) || record.path == .systemDefault else { continue }
+                changes.append(WallpaperSlotChange(path: record.path, before: idle, after: slot, recordsOriginal: true))
+            }
         }
         return WallpaperStorePlan(changes: changes)
     }
@@ -242,6 +365,11 @@ public enum WallpaperStoreVerifier {
     /// The outcome of re-reading the store after WallpaperAgent restarted.
     public enum Confirmation: Sendable, Equatable {
         case confirmed
+        /// A select plan's display slots were kept and every display record resolves to the selected
+        /// module, but the agent wrote its own choice into these planned records that displays only
+        /// fall back to (SystemDefault, a Space's Default): it derives those from the displays it
+        /// shows (docs/RESEARCH.md §5.5). What is shown is what was asked for: accepted.
+        case confirmedDefaultsRewritten([WallpaperRecordPath])
         /// The agent's rewrite doesn't have these planned Idle slots (it wrote from memory between
         /// LivePaper's rename and the restart): worth retrying.
         case changeLost([WallpaperRecordPath])
@@ -255,7 +383,13 @@ public enum WallpaperStoreVerifier {
     /// kept when it makes the planned choice (`WallpaperSlot.sameChoices`): the agent may normalise
     /// option values or timestamps of a slot it loaded, which changes nothing that is shown. An
     /// empty plan checks only the Desktop slots.
-    public static func confirm(current: WallpaperStoreDocument, original: WallpaperStoreDocument, plan: WallpaperStorePlan) -> Confirmation {
+    ///
+    /// - Parameter selecting: the module a select plan chooses. Planned SystemDefault and Space
+    ///   Default slots the agent replaced then count as kept as long as every display record of
+    ///   `current` resolves to it (`.confirmedDefaultsRewritten`). nil (restore, rollback): every
+    ///   planned slot must be kept.
+    public static func confirm(current: WallpaperStoreDocument, original: WallpaperStoreDocument, plan: WallpaperStorePlan,
+                               selecting module: WallpaperSaverModule? = nil) -> Confirmation {
         var desktop: [WallpaperRecordPath] = []
         for record in original.records {
             guard let before = record.desktop else { continue }
@@ -267,7 +401,12 @@ public enum WallpaperStoreVerifier {
             guard let slot = current.idleSlot(at: change.path) else { return true }
             return !WallpaperSlot.sameChoices(slot, change.after)
         }.map(\.path)
-        return lost.isEmpty ? .confirmed : .changeLost(lost)
+        if lost.isEmpty { return .confirmed }
+        if let module, lost.allSatisfy({ $0.displayID == nil && $0 != .allSpacesAndDisplays }),
+           current.selection(of: module).isSelectedOnEveryDisplay {
+            return .confirmedDefaultsRewritten(lost)
+        }
+        return .changeLost(lost)
     }
 }
 

@@ -348,8 +348,36 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard current.saverInstalled else { throw LibraryError.invalid("install the screen saver first") }
         selectAttempts += 1
-        if selectAttempts > 1 { current.saverSelected = true }
+        // A display that fell back to macOS's default isn't the guided step's business: selecting
+        // works at once then.
+        if selectAttempts > 1 || current.saverPartlySelected { current.saverSelected = true; current.selectionReapplyNeeded = false }
         return current.saverSelected
+    }
+
+    /// Test hook: how often the quiet re-apply was asked.
+    var reapplyCalls: Int { lock.lock(); defer { lock.unlock() }; return reapplyRequests }
+    private var reapplyRequests = 0
+    /// Test hook: what the next re-apply runs into (nil: it works).
+    var reapplyRefusal: String?
+
+    /// InstallService's rules, minus the store: only when the status says a display fell back to
+    /// macOS's default while LivePaper owns the selection; then every display uses LivePaper.
+    func reapplySelectionIfNeeded() throws -> SelectionReapplyOutcome {
+        lock.lock(); defer { lock.unlock() }
+        reapplyRequests += 1
+        guard current.saverInstalled, current.selectionReapplyNeeded else { return .notNeeded("no display fell back to macOS\u{2019}s default") }
+        if let reapplyRefusal { return .refused(reapplyRefusal) }
+        let missing: Int
+        if case .partly(let m, _) = current.saverSelection { missing = m } else { missing = 1 }
+        current.saverSelection = .everyDisplay
+        current.selectionReapplyNeeded = false
+        return .reapplied(displays: missing)
+    }
+
+    /// Snapshot/test hook: `missing` of `displays` fell back to macOS's default screen saver (say
+    /// something reset SystemDefault and a display was connected since).
+    func simulateDisplaysOnDefault(missing: Int, of displays: Int) {
+        mutate { $0.saverSelection = .partly(missing: missing, displays: displays); $0.selectionReapplyNeeded = true }
     }
 
     func registerHelper() throws {
@@ -402,7 +430,7 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
             $0.helperProblem = .cannotStart("spawn failed, last exit code 78: EX_CONFIG, needs LWCR update")
         }
     }
-    func openScreenSaverSettings() { mutate { $0.saverSelected = $0.saverInstalled } }
+    func openScreenSaverSettings() { mutate { $0.saverSelected = $0.saverInstalled; $0.selectionReapplyNeeded = false } }
     /// Test hook: "Require password after screen saver begins" isn't Immediately.
     func simulatePasswordDelay() { mutate { $0.passwordImmediately = false } }
     /// Snapshot/test hook: the helper is registered but macOS waits for approval in Login Items.
@@ -440,8 +468,8 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
         step("Unregister the helper login item", needed: current.helperRunning, skipReason: "not registered") {
             current.helperRunning = false; current.helperLoginItem = .notRegistered
         }
-        step("Restore the previous screen saver choice", needed: current.saverSelected, skipReason: "LivePaper didn't change it") {
-            current.saverSelected = false
+        step("Restore the previous screen saver choice", needed: current.saverSelection != .none, skipReason: "LivePaper didn't change it") {
+            current.saverSelected = false; current.selectionReapplyNeeded = false
         }
         step(InstallService.restoreLockKeysTitle, needed: current.lockKeysChangedByLivePaper, skipReason: "not changed by LivePaper") {
             current.lockKeysShowScene = lockKeysBefore; current.lockKeysChangedByLivePaper = false

@@ -2182,6 +2182,11 @@ extension SelfTests {
             return try base.updateSaver(isSessionLocked: isSessionLocked)
         }
         func selectSaver() throws -> Bool { try base.selectSaver() }
+        func reapplySelectionIfNeeded() throws -> SelectionReapplyOutcome {
+            note("reapply")
+            defer { note("reapplied") }
+            return try base.reapplySelectionIfNeeded()
+        }
         func registerHelper() throws { try base.registerHelper() }
         func recoverHelper() throws -> HelperRecoveryOutcome {
             note("recover")

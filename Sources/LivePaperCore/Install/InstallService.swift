@@ -258,7 +258,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             saverInstalled: installed,
             saverUpToDate: upToDate,
             saverNewerInstalled: installed && !upToDate && Self.isNewerBuild(installedVersion, than: templateVersion),
-            saverSelected: store.isSelected(),
+            saverSelection: store.selectionState(),
+            selectionReapplyNeeded: selectionReapplyBlocker() == nil,
             helperRunning: helperRunning,
             helperLoginItem: loginItemStatus,
             helperProblem: helperAssessment(loginItem: loginItemStatus, loginJob: loginJob, fallbackJob: fallbackJob)?.problem,
@@ -387,8 +388,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     }
 
     /// Makes LivePaper the screen saver for every display and Space by editing the wallpaper store
-    /// and restarting WallpaperAgent (WallpaperStoreApplier; only ever on an explicit user action).
-    /// The original of every replaced Idle slot is recorded in backups/ first.
+    /// and restarting WallpaperAgent (WallpaperStoreApplier; only ever on an explicit user action —
+    /// the app's quiet re-apply is `reapplySelectionIfNeeded`, which only fills placeholders):
+    /// SystemDefault, every explicit Idle slot and the placeholder Idle slot of every display record
+    /// (`WallpaperSelectScope.everyDisplay`). The original of every replaced Idle slot is recorded in
+    /// backups/ first. A SystemDefault the restarted agent wrote its own choice into is accepted while
+    /// every display resolves to LivePaper.
     ///
     /// - Returns: true only when the selection is in place and confirmed after the agent restarted
     ///   (or already was). false when LivePaper refused to touch the store — locked, System
@@ -397,9 +402,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// - Throws: when the store was written but the change couldn't be confirmed or was rolled back.
     public func selectSaver() throws -> Bool {
         let title = "Select LivePaper as the screen saver"
-        // Nothing to change (also when it was picked by hand in System Settings). A selection of
-        // LivePaper.saver at another location still gets rewritten to the installed one.
-        if let document = try? store.read(), (try? document.planSelect(store.module, at: Date()))?.isEmpty == true {
+        // Nothing to change: every display already shows this LivePaper.saver (also when it was
+        // picked by hand in System Settings, whose placeholders the agent keeps; later resets are
+        // the quiet re-apply's). A selection of LivePaper.saver at another location still gets
+        // rewritten to the installed one.
+        if let document = try? store.read(),
+           document.isCurrentChoiceOnEveryDisplay(store.module) || (try? document.planSelect(store.module, at: Date()))?.isEmpty == true {
             if !dryRun { recordSelectionOwnership() }
             record(title, .skipped("already selected"))
             return true
@@ -410,6 +418,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
                                                      rawBackupURL: paths.wallpaperStoreBackup)
             if report.outcome == .applied {
                 log.notice("selected LivePaper in \(report.changed.count, privacy: .public) Idle slot(s) after \(report.attempts, privacy: .public) attempt(s)")
+                if !report.rewrittenByAgent.isEmpty {
+                    log.notice("WallpaperAgent kept its own choice in \(report.rewrittenByAgent.map(\.description).joined(separator: ", "), privacy: .public); every display uses LivePaper")
+                }
                 record(title, .done)
             } else {
                 recordSelectionOwnership()
@@ -423,6 +434,47 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             record(title, .failed(error.localizedDescription))
             throw error
         }
+    }
+
+    public static let reapplySelectionTitle = "Select LivePaper for the displays that fell back to macOS\u{2019}s default screen saver"
+
+    /// The app's quiet re-apply (InstallServicing.reapplySelectionIfNeeded): only while LivePaper owns
+    /// the selection — its manifest exists (LivePaper made the selection, or found itself selected
+    /// and recorded that) — the saver is installed and LivePaper wasn't uninstalled; then only the
+    /// placeholder Idle slots of display records that fall back to macOS's default screen saver, and
+    /// SystemDefault's placeholder with them (`WallpaperSelectScope.placeholdersOnly`), each original
+    /// recorded for uninstall. A refusal (locked, System Settings open, …) is an outcome, not an error.
+    public func reapplySelectionIfNeeded() throws -> SelectionReapplyOutcome {
+        let title = Self.reapplySelectionTitle
+        if let why = selectionReapplyBlocker() { return .notNeeded(why) }
+        if dryRun { record(title, .planned); return .notNeeded("dry run") }
+        do {
+            let report = try wallpaperApplier.select(store.module, manifestURL: paths.wallpaperSelectionBackup,
+                                                     rawBackupURL: paths.wallpaperStoreBackup, scope: .placeholdersOnly)
+            guard report.outcome == .applied else { return .notNeeded("every display already resolves to LivePaper or a screen saver you chose") }
+            let displays = Set(report.changed.compactMap(\.displayID)).count
+            log.notice("re-applied LivePaper on \(displays, privacy: .public) display(s) that fell back to macOS's default screen saver")
+            record(title, .done)
+            return .reapplied(displays: displays)
+        } catch let error as WallpaperStoreError where !error.wroteStore {
+            record(title, .skipped(error.localizedDescription))
+            return .refused(error.localizedDescription)
+        } catch {
+            record(title, .failed(error.localizedDescription))
+            throw error
+        }
+    }
+
+    /// Why the quiet re-apply has nothing to do (nil: some display needs it).
+    private func selectionReapplyBlocker() -> String? {
+        if FileOps.entryExists(paths.uninstallMarker) { return "LivePaper was uninstalled" }
+        guard FileOps.isRegularFile(paths.installedSaver.appendingPathComponent("Contents/Info.plist")) else { return "the screen saver isn't installed" }
+        guard FileOps.entryExists(paths.wallpaperSelectionBackup) else { return "LivePaper didn't make the selection" }
+        guard let document = try? store.read() else { return "the wallpaper settings can't be read" }
+        guard let plan = try? document.planSelect(store.module, at: Date(), scope: .placeholdersOnly), !plan.isEmpty else {
+            return "no display falls back to macOS\u{2019}s default screen saver"
+        }
+        return nil
     }
 
     /// Runs the live store sequence (WallpaperStoreApplier) with this installer's system and timings.

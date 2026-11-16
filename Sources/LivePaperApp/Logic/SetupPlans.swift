@@ -38,6 +38,18 @@ struct SetupState: Equatable, Sendable {
     }
 
     static let useThisCopysHelperTitle = "Use This Copy\u{2019}s Helper"
+
+    /// LivePaper is the screen saver of some displays but not all: the setup button selects it on
+    /// every display (`livepaper select` does the same).
+    var saverPartlySelected: Bool { install.saverPartlySelected }
+
+    /// What the screen-saver button says: "Use LivePaper on Every Display" when only some displays
+    /// use it, otherwise `otherwise` (each screen words the full setup its own way).
+    func selectActionTitle(otherwise: String) -> String {
+        install.saverInstalled && install.saverUpToDate && saverPartlySelected ? Self.everyDisplayActionTitle : otherwise
+    }
+
+    static let everyDisplayActionTitle = "Use LivePaper on Every Display"
 }
 
 /// The onboarding pages. Every page is idempotent: it shows live status and only offers the
@@ -98,10 +110,8 @@ enum SetupChecklist {
                                : s.saverNewerInstalled ? "A newer build from another copy of LivePaper is installed. Installing replaces it with this copy\u{2019}s."
                                : "Installed, but an update is available.",
                            state: s.saverInstalled && s.saverUpToDate ? .done : .needed),
-                SetupCheck(id: .saverSelected, title: "Selected as your screen saver",
-                           detail: s.saverSelected ? "LivePaper plays when your Mac idles or locks."
-                                                   : "Makes LivePaper the screen saver (your current choice is backed up).",
-                           state: s.saverSelected ? .done : .needed),
+                SetupCheck(id: .saverSelected, title: s.saverPartlySelected ? "Selected on every display" : "Selected as your screen saver",
+                           detail: selectionDetail(s.saverSelection), state: s.saverSelected ? .done : .needed),
             ]
         case .lock:
             // "Managed" only when the profile itself forces the password off or a delay; a profile
@@ -142,6 +152,20 @@ enum SetupChecklist {
         }
     }
 
+    /// The "Selected" row's text for each selection state.
+    static func selectionDetail(_ selection: SaverSelection) -> String {
+        switch selection {
+        case .everyDisplay:
+            return "LivePaper plays when your Mac idles or locks."
+        case .partly(let missing, let displays):
+            let which = missing == 1 ? "1 of your \(displays) displays still shows" : "\(missing) of your \(displays) displays still show"
+            return "\(which) another screen saver (macOS\u{2019}s default or one picked in System Settings). " +
+                   "\(SetupState.everyDisplayActionTitle) fixes that; your current choice is backed up."
+        case .none:
+            return "Makes LivePaper the screen saver (your current choice is backed up)."
+        }
+    }
+
     /// True when nothing on the page still needs the user's action.
     static func isComplete(_ step: OnboardingStep, state: SetupState) -> Bool {
         checks(for: step, state: state).allSatisfy { $0.state != .needed }
@@ -155,6 +179,7 @@ enum SetupChecklist {
     /// Short line for the Settings › Screen saver status row.
     static func saverSummary(_ s: InstallStatus) -> String {
         if !s.saverInstalled { return "Not installed" }
+        if case .partly(let missing, let displays) = s.saverSelection { return "Selected on \(displays - missing) of \(displays) displays" }
         if !s.saverSelected { return "Installed, not selected" }
         if s.saverNewerInstalled { return "Selected \u{2014} a newer build is installed" }
         if !s.saverUpToDate { return "Selected \u{2014} update available" }

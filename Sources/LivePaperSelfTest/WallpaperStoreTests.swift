@@ -14,7 +14,7 @@ import LivePaperCore
 
 extension SelfTests {
     static var wallpaper: [TestCase] {
-        wallpaperModel + wallpaperApplier + wallpaperInstall + [realStoreCopy]
+        wallpaperModel + wallpaperApplier + wallpaperInstall + wallpaperEveryDisplay + [realStoreCopy]
     }
 }
 
@@ -90,10 +90,34 @@ enum StoreFixture {
     /// The fixture as WallpaperAgent would write it.
     static func data(saver: String = otherSaverPath) throws -> Data { try Schema.encode(index(saver: saver)) }
 
-    /// Paths of the 6 explicit and 13 placeholder Idle slots.
+    /// Paths of the 6 explicit Idle slots (the other 13 are placeholders).
     static var explicitPaths: [WallpaperRecordPath] {
         [.systemDefault, .display(displays[0]), .display(displays[5]), .spaceDefault(""),
          .spaceDisplay(space: "", display: displays[0]), .spaceDisplay(space: "", display: displays[5])]
+    }
+
+    /// The 10 display records whose Idle slot is the placeholder (the 3 other placeholders are
+    /// Space Defaults).
+    static var placeholderDisplayPaths: [WallpaperRecordPath] {
+        [2, 3, 4, 5].map { .display(displays[$0 - 1]) } + [2, 4, 5].map { .spaceDisplay(space: "", display: displays[$0 - 1]) }
+            + [(1, 2), (2, 3), (3, 4)].map { .spaceDisplay(space: spaces[$0.0], display: displays[$0.1 - 1]) }
+    }
+
+    /// What a selection writes: the explicit slots and every display's placeholder (16), in
+    /// document order.
+    static var selectPaths: [WallpaperRecordPath] { (explicitPaths + placeholderDisplayPaths).sorted() }
+
+    /// Every display record chooses `saver` explicitly too (no placeholder below SystemDefault but
+    /// the 3 Space Defaults): a selection has nothing to add when `saver` is LivePaper.
+    static func allDisplaysExplicit(saver: String) -> Schema.Index {
+        var index = self.index(saver: saver)
+        let explicit = record(.saver(saver))
+        for id in index.displays.keys { index.displays[id] = explicit }
+        for (space, var record) in index.spaces {
+            for id in record.displays.keys { record.displays[id] = explicit }
+            index.spaces[space] = record
+        }
+        return index
     }
 
     static func plist(_ value: PlistValue) -> Data {
@@ -220,7 +244,7 @@ func check(_ cond: @autoclosure () throws -> Bool, _ msg: @autoclosure () -> Str
     if try !cond() { throw TestFailure(description: "\(file):\(line) expectation failed \(msg())") }
 }
 
-private func expectStoreError(_ expected: WallpaperStoreError, file: String = #fileID, line: Int = #line, _ body: () throws -> Void) throws {
+func expectStoreError(_ expected: WallpaperStoreError, file: String = #fileID, line: Int = #line, _ body: () throws -> Void) throws {
     do { try body() } catch let error as WallpaperStoreError {
         guard error == expected else { throw TestFailure(description: "\(file):\(line) threw \(error), expected \(expected)") }
         return
@@ -228,7 +252,7 @@ private func expectStoreError(_ expected: WallpaperStoreError, file: String = #f
     throw TestFailure(description: "\(file):\(line) didn't throw \(expected)")
 }
 
-private func applier(_ sb: StoreSandbox, _ system: FakeWallpaperSystem, _ clock: FakeClock, snapshot: Bool = false) -> WallpaperStoreApplier {
+func applier(_ sb: StoreSandbox, _ system: FakeWallpaperSystem, _ clock: FakeClock, snapshot: Bool = false) -> WallpaperStoreApplier {
     WallpaperStoreApplier(storeURL: sb.store, system: system, clock: clock, lockURL: sb.lock, snapshotURL: snapshot ? sb.snapshot : nil)
 }
 
@@ -236,11 +260,11 @@ private func applier(_ sb: StoreSandbox, _ system: FakeWallpaperSystem, _ clock:
 private func defaultStore() throws -> Data { try WallpaperStoreSchema.encode(.init(systemDefault: StoreFixture.record(.inherit))) }
 
 /// The Idle slots of every record, by path.
-private func idleSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValue] {
+func idleSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValue] {
     Dictionary(uniqueKeysWithValues: doc.records.compactMap { r in r.idle.map { (r.path, $0) } })
 }
 
-private func desktopSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValue] {
+func desktopSlots(_ doc: WallpaperStoreDocument) -> [WallpaperRecordPath: PlistValue] {
     Dictionary(uniqueKeysWithValues: doc.records.compactMap { r in r.desktop.map { (r.path, $0) } })
 }
 
@@ -376,14 +400,14 @@ extension SelfTests {
             let future = try doc.root.setting(.string("kept"), at: ["FutureTopLevel"])
                 .setting(.integer(7), at: ["SystemDefault", "FutureRecordKey"])
                 .setting(.data(Data([9, 9])), at: ["SystemDefault", "Desktop", "FutureSlotKey"])
-                .setting(.bool(false), at: ["Displays", StoreFixture.displays[1], "Idle", "Content", "FutureContentKey"])
+                .setting(.bool(false), at: ["Spaces", StoreFixture.spaces[1], "Default", "Idle", "Content", "FutureContentKey"])
             let futureDoc = try WallpaperStoreDocument(data: future.binaryData())
             let plan = try futureDoc.planSelect(StoreFixture.livePaper, at: Date(timeIntervalSinceReferenceDate: 5))
             let edited = try PlistValue.parse(futureDoc.applying(plan).data())
             try expectEqual(edited["FutureTopLevel"], .string("kept"))
             try expectEqual(edited.value(at: ["SystemDefault", "FutureRecordKey"]), .integer(7))
             try expectEqual(edited.value(at: ["SystemDefault", "Desktop", "FutureSlotKey"]), .data(Data([9, 9])))
-            try expectEqual(edited.value(at: ["Displays", StoreFixture.displays[1], "Idle", "Content", "FutureContentKey"]), .bool(false))
+            try expectEqual(edited.value(at: ["Spaces", StoreFixture.spaces[1], "Default", "Idle", "Content", "FutureContentKey"]), .bool(false))
             // Every difference is inside a planned Idle slot.
             let allowed = Set(plan.paths.map { $0.keyPath + ["Idle"] })
             try expect(future.differences(from: edited).allSatisfy { d in allowed.contains { d.starts(with: $0) } })
@@ -442,8 +466,13 @@ extension SelfTests {
             let date = Date(timeIntervalSinceReferenceDate: 800_000_000.5)
             let doc = try WallpaperStoreDocument(data: StoreFixture.data())
             let plan = try doc.planSelect(module, at: date)
-            try expectEqual(plan.paths, StoreFixture.explicitPaths)
+            // The explicit slots (as System Settings does) and every display's placeholder; the
+            // placeholders' originals are recorded too, so uninstall puts exactly them back.
+            try expectEqual(plan.paths, StoreFixture.selectPaths)
             try expect(plan.changes.allSatisfy { $0.recordsOriginal && $0.after == (try? module.slot(at: date)) })
+            try expect(StoreFixture.placeholderDisplayPaths.allSatisfy { path in
+                plan.changes.first { $0.path == path }.map { WallpaperSlot.isInherit($0.before) } == true
+            })
             let edited = try doc.applying(plan)
             try WallpaperStoreVerifier.verify(edited: edited.data(), original: doc, plan: plan)
             try expectEqual(desktopSlots(edited), desktopSlots(doc))
@@ -451,11 +480,13 @@ extension SelfTests {
             for (path, slot) in before where !plan.paths.contains(path) { try expectEqual(after[path], slot) }
             try expect(edited.selection(of: module).isSelectedEverywhere)
             try check(try edited.planSelect(module, at: date).isEmpty, "idempotent")
-            // A placeholder SystemDefault is still set (nothing to inherit from); placeholders elsewhere aren't.
+            // A placeholder SystemDefault is still set (nothing to inherit from); the placeholders of
+            // Space Defaults aren't (every display of theirs gets LivePaper itself).
             var inheritRoot = StoreFixture.index()
             inheritRoot.systemDefault = StoreFixture.record(.inherit)
             let rootPlan = try WallpaperStoreDocument(data: WallpaperStoreSchema.encode(inheritRoot)).planSelect(module, at: date)
-            try expect(rootPlan.paths.contains(.systemDefault) && rootPlan.paths.count == 6)
+            try expect(rootPlan.paths.contains(.systemDefault) && rootPlan.paths.count == 16)
+            try expect(!rootPlan.paths.contains { if case .spaceDefault(let s) = $0 { return !s.isEmpty }; return false })
             // LivePaper at an old location (gone) is rewritten but never recorded as an original…
             var moved = StoreFixture.index()
             let oldCopy = "/Users/old/Library/Screen Savers/LivePaper.saver"
@@ -474,7 +505,7 @@ extension SelfTests {
             override.allSpacesAndDisplays = StoreFixture.record(.saver(StoreFixture.otherSaverPath))
             override.displays[StoreFixture.displays[2]] = .desktop(StoreFixture.desktop())
             let overridePlan = try WallpaperStoreDocument(data: WallpaperStoreSchema.encode(override)).planSelect(module, at: date)
-            try expect(overridePlan.paths.contains(.allSpacesAndDisplays) && overridePlan.paths.count == 7)
+            try expect(overridePlan.paths.contains(.allSpacesAndDisplays) && overridePlan.paths.count == 16, "\(overridePlan.paths.count)")
             // Layouts LivePaper doesn't edit.
             var linked = StoreFixture.index()
             linked.displays[StoreFixture.displays[3]] = .linked(StoreFixture.desktop())
@@ -500,8 +531,8 @@ extension SelfTests {
                 try expect(failed?.contains(why) == true, "expected '\(why)', got \(failed ?? "success")")
             }
             try fails(good.setting(.date(Date()), at: ["SystemDefault", "Desktop", "LastSet"]), "unexpected change at SystemDefault/Desktop/LastSet")
-            try fails(good.setting(.string("x"), at: ["Displays", StoreFixture.displays[1], "Idle", "Content", "Shuffle"]),
-                      "unexpected change at Displays/\(StoreFixture.displays[1])/Idle")
+            try fails(good.setting(.string("x"), at: ["Spaces", StoreFixture.spaces[1], "Default", "Idle", "Content", "Shuffle"]),
+                      "unexpected change at Spaces/\(StoreFixture.spaces[1])/Default/Idle")
             try fails(good.setting(.string("x"), at: ["NewTopLevel"]), "unexpected change at NewTopLevel")
             try fails(good.setting(.string("idle"), at: ["Displays", StoreFixture.displays[0], "Type"]), "unexpected change")
             try fails(good.setting(.array([.dictionary(["Files": .array([])])]), at: ["SystemDefault", "Idle", "Content", "Choices"]),
@@ -529,14 +560,14 @@ extension SelfTests {
             let original = try WallpaperStoreDocument(data: StoreFixture.data())
             let plan = try original.planSelect(module, at: t0)
             let manifest = try WallpaperSelectionManifest(module: module.moduleURLString, createdAt: t0).recording(plan, module: module, at: t0)
-            try expectEqual(manifest.slots.map(\.record), StoreFixture.explicitPaths)
+            try expectEqual(manifest.slots.map(\.record), StoreFixture.selectPaths)
             try expectEqual(manifest.entry(for: .systemDefault)?.provider, WallpaperSlot.screenSaverProvider)
             try expectEqual(manifest.entry(for: .systemDefault)?.configuration, StoreFixture.moduleConfiguration(StoreFixture.otherSaverPath))
             try expectEqual(try manifest.entry(for: .systemDefault)?.originalSlot(), original.idleSlot(at: .systemDefault))
             let selected = try original.applying(plan)
             // Select then restore = the original store, exactly.
             let restore = try selected.planRestore(manifest, module: module, at: t1, moduleExists: { _ in true })
-            try expectEqual(restore.paths, StoreFixture.explicitPaths)
+            try expectEqual(restore.paths, StoreFixture.selectPaths)
             try expectEqual(try selected.applying(restore), original)
             try WallpaperStoreVerifier.verify(edited: selected.applying(restore).data(), original: selected, plan: restore)
             // The manifest survives JSON (whole-second dates).
@@ -556,12 +587,14 @@ extension SelfTests {
             let later = WallpaperStoreDocument(root: tree)
             let deleted = { (url: URL) in url.lastPathComponent != "Example.saver" }
             let partial = try later.planRestore(manifest, module: module, at: t1, moduleExists: deleted)
-            try expectEqual(Set(partial.paths), Set(StoreFixture.explicitPaths.filter { $0 != .display(StoreFixture.displays[0]) } + [.display(newDisplay)]))
+            try expectEqual(Set(partial.paths), Set(StoreFixture.selectPaths.filter { $0 != .display(StoreFixture.displays[0]) } + [.display(newDisplay)]))
             let after = try later.applying(partial)
             try expectEqual(after.idleSlot(at: .display(StoreFixture.displays[0])), userChoice)
             try expectEqual(after.idleSlot(at: .display(newDisplay)), WallpaperChoicePayload.inheritSlot(at: t1))
             try expectEqual(after.idleSlot(at: .spaceDefault("")), WallpaperChoicePayload.inheritSlot(at: t1))
             try expectEqual(after.idleSlot(at: .systemDefault), original.idleSlot(at: .systemDefault))
+            try expect(StoreFixture.placeholderDisplayPaths.allSatisfy { after.idleSlot(at: $0) == original.idleSlot(at: $0) },
+                       "the placeholders are back exactly")
             try expect(after.selection(of: module).livePaper.isEmpty)
             // Without a recorded original (LivePaper picked by hand in System Settings) no slot may keep
             // pointing at LivePaper: the placeholder below the root; SystemDefault, which can't inherit,
@@ -573,7 +606,7 @@ extension SelfTests {
             let builtin = WallpaperSaverModule(url: WallpaperRestoreFallback.systemSaverURL)
             let unrecorded = try selected.planRestore(empty, module: module, at: t1, fallback: WallpaperRestoreFallback(builtinSaver: builtin),
                                                       moduleExists: { _ in true })
-            try expectEqual(unrecorded.paths, StoreFixture.explicitPaths)
+            try expectEqual(unrecorded.paths, StoreFixture.selectPaths)
             try expectEqual(unrecorded.builtinSaverPaths, [.systemDefault])
             try expectEqual(unrecorded.changes.first?.after, try builtin.slot(at: t1))
             try expect(unrecorded.changes.dropFirst().allSatisfy { $0.after == WallpaperChoicePayload.inheritSlot(at: t1) })
@@ -616,7 +649,7 @@ extension SelfTests {
             try expectEqual(again.paths, [.systemDefault])
             let updated = try manifest.recording(again, module: module, at: t1)
             try expectEqual(try updated.entry(for: .systemDefault)?.originalSlot(), userChoice)
-            try expectEqual(updated.slots.count, 6)
+            try expectEqual(updated.slots.count, 16)
             try expectEqual(try manifest.recording(try selected.planSelect(module, at: t1), module: module, at: t1).slots, manifest.slots)
         },
     ] }
@@ -649,13 +682,13 @@ extension SelfTests {
                 let original = try sb.bytes()
                 let clock = FakeClock(), system = FakeWallpaperSystem(store: sb.store)
                 let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
-                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.explicitPaths, attempts: 1, agentRestarts: 1))
+                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.selectPaths, attempts: 1, agentRestarts: 1))
                 try expect(clock.slept > 1.99, "waited for a quiet store before and after the restart (\(clock.slept) s)")
                 let selected = try sb.document()
                 try expect(selected.selection(of: sb.module).isSelectedEverywhere)
                 try expectEqual(desktopSlots(selected), desktopSlots(try WallpaperStoreDocument(data: original)))
                 try expectEqual(try Data(contentsOf: sb.rawBackup), original)
-                try expectEqual(try WallpaperSelectionManifest.load(from: sb.manifest)?.slots.map(\.record), StoreFixture.explicitPaths)
+                try expectEqual(try WallpaperSelectionManifest.load(from: sb.manifest)?.slots.map(\.record), StoreFixture.selectPaths)
                 try expect(!FileManager.default.fileExists(atPath: sb.store.path + ".tmp"))
                 try expectEqual(try FileManager.default.contentsOfDirectory(atPath: sb.store.deletingLastPathComponent().path), ["Index.plist"])
                 // Again: nothing to do, the agent isn't restarted.
@@ -664,7 +697,7 @@ extension SelfTests {
                 // Restore: the agent's file is byte-identical to before LivePaper.
                 let restored = try applier(sb, system, clock).restore(sb.module, manifestURL: sb.manifest)
                 try expectEqual(restored.outcome, .applied)
-                try expectEqual(restored.changed, StoreFixture.explicitPaths)
+                try expectEqual(restored.changed, StoreFixture.selectPaths)
                 try expectEqual(try sb.bytes(), original)
                 try expect(!sb.exists(sb.manifest), "manifest removed after a restore")
                 try expectEqual(try applier(sb, system, clock).restore(sb.module, manifestURL: sb.manifest).outcome, .unchanged)
@@ -761,11 +794,11 @@ extension SelfTests {
                 let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
                 system.onRestart = { n in if n == 1 { try system.overwrite(with: original) } else { try system.agentRewrite() } }
                 let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
-                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.explicitPaths, attempts: 2, agentRestarts: 2))
+                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.selectPaths, attempts: 2, agentRestarts: 2))
                 try expect(clock.slept > 3.99, "retried at least 2 s later")
                 try check(try sb.document().selection(of: sb.module).isSelectedEverywhere)
                 try expectEqual(try Data(contentsOf: sb.rawBackup), original)
-                try expectEqual(try WallpaperSelectionManifest.load(from: sb.manifest)?.slots.count, 6)
+                try expectEqual(try WallpaperSelectionManifest.load(from: sb.manifest)?.slots.count, 16)
             }
             // Lost every time: three attempts (1 + 2 retries), then an error.
             try StoreSandbox.with("lost-always") { sb in
@@ -929,11 +962,26 @@ extension SelfTests {
                     try tree.binaryData().write(to: sb.store, options: .atomic)
                 }
                 let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
-                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.explicitPaths, attempts: 1, agentRestarts: 1))
+                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.selectPaths, attempts: 1, agentRestarts: 1))
             }
-            // It lets one planned slot inherit instead (LivePaper is still what that display shows):
-            // the re-plan is empty, so the agent's own store is confirmed — no second restart.
+            // It lets a planned Space Default inherit instead (every display still shows LivePaper):
+            // the agent derives those defaults from the displays it shows — confirmed at once.
             try StoreSandbox.with("normalised-inherit") { sb in
+                let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
+                let space = WallpaperRecordPath.spaceDefault("")
+                system.onRestart = { n in
+                    guard n == 1 else { try system.agentRewrite(); return }
+                    let doc = try WallpaperStoreDocument(data: Data(contentsOf: sb.store))
+                    try doc.replacingIdleSlots([space: WallpaperChoicePayload.inheritSlot(at: clock.now())]).data().write(to: sb.store, options: .atomic)
+                }
+                let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
+                try expectEqual(report, WallpaperApplyReport(outcome: .applied, changed: StoreFixture.selectPaths, attempts: 1, agentRestarts: 1,
+                                                             rewrittenByAgent: [space]))
+                try check(try sb.document().selection(of: sb.module).isSelectedOnEveryDisplay)
+            }
+            // A display slot left on the placeholder isn't kept, though (that is what fell back to
+            // macOS's default): planned again, and the next restart keeps it.
+            try StoreSandbox.with("normalised-inherit-display") { sb in
                 let system = FakeWallpaperSystem(store: sb.store), clock = FakeClock()
                 let display = WallpaperRecordPath.display(StoreFixture.displays[0])
                 system.onRestart = { n in
@@ -943,7 +991,7 @@ extension SelfTests {
                 }
                 let report = try applier(sb, system, clock).select(sb.module, manifestURL: sb.manifest, rawBackupURL: sb.rawBackup)
                 try expectEqual(report.outcome, .applied)
-                try expect(report.attempts == 2 && system.restarts == 1, "\(report), \(system.restarts) restarts")
+                try expect(report.attempts == 2 && system.restarts == 2 && report.changed == [display], "\(report), \(system.restarts) restarts")
                 try check(try sb.document().selection(of: sb.module).isSelectedEverywhere)
             }
         },
@@ -1043,7 +1091,7 @@ extension SelfTests {
 // MARK: - InstallService
 
 /// Preferences in memory.
-private final class MemoryPreferences: PreferencesAccessing, @unchecked Sendable {
+final class MemoryPreferences: PreferencesAccessing, @unchecked Sendable {
     var values: [String: Any] = [:]
     func value(domain: String, key: String, currentHost: Bool) -> Any? { values["\(domain)|\(key)|\(currentHost)"] }
     func set(_ value: Any?, domain: String, key: String, currentHost: Bool) -> Bool { values["\(domain)|\(key)|\(currentHost)"] = value; return true }
@@ -1057,7 +1105,7 @@ private struct NoLoginItem: LoginItemRegistering {
 }
 
 /// An InstallService over a StoreSandbox, with every system interaction faked.
-private struct InstallFixture {
+struct InstallFixture {
     let sb: StoreSandbox
     let system: FakeWallpaperSystem
     let clock = FakeClock()
@@ -1087,8 +1135,8 @@ private struct InstallFixture {
     var mutatingCommands: [[String]] { runner.commands.filter { $0.first != "/bin/launchctl" && $0.first != "/usr/sbin/sysadminctl" } }
 }
 
-private let selectTitle = "Select LivePaper as the screen saver"
-private let restoreTitle = "Restore the previous screen saver choice"
+let selectTitle = "Select LivePaper as the screen saver"
+let restoreTitle = "Restore the previous screen saver choice"
 
 extension SelfTests {
     fileprivate static var wallpaperInstall: [TestCase] { [
@@ -1109,7 +1157,7 @@ extension SelfTests {
                 try expect(service.status().saverSelected)
                 try expectEqual(fx.system.restarts, 1)
                 try expectEqual(try Data(contentsOf: fx.paths.wallpaperStoreBackup), original)
-                try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots.count, 6)
+                try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots.count, 16)
                 try check(try service.selectSaver())
                 try expectEqual(service.transcript.last, InstallStep(title: selectTitle, outcome: .skipped("already selected")))
                 try expectEqual(fx.system.restarts, 1)
@@ -1126,9 +1174,12 @@ extension SelfTests {
                 try expectEqual(service.transcript.last, InstallStep(title: selectTitle, outcome: .done))
                 try expectEqual(fx.system.restarts, 1)
                 let moved = try sb.document()
-                try expectEqual(moved.selection(of: sb.module).livePaper, StoreFixture.explicitPaths)
-                try expect(StoreFixture.explicitPaths.allSatisfy { moved.idleSlot(at: $0).map(sb.module.isCurrentChoice) == true })
-                try expectEqual(try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots, [])
+                try expectEqual(moved.selection(of: sb.module).livePaper, StoreFixture.selectPaths)
+                try expect(StoreFixture.selectPaths.allSatisfy { moved.idleSlot(at: $0).map(sb.module.isCurrentChoice) == true })
+                // Only the displays' placeholders are recorded (never the old location).
+                let recorded = try WallpaperSelectionManifest.load(from: fx.paths.wallpaperSelectionBackup)?.slots ?? []
+                try expectEqual(recorded.map(\.record), StoreFixture.placeholderDisplayPaths.sorted())
+                try expect(recorded.allSatisfy { $0.provider == WallpaperSlot.inheritProvider }, "\(recorded)")
                 try check(try service.selectSaver())
                 try expectEqual(service.transcript.last, InstallStep(title: selectTitle, outcome: .skipped("already selected")))
                 // Uninstall has no original for SystemDefault, and the store from before LivePaper's
@@ -1140,7 +1191,7 @@ extension SelfTests {
                 let after = try sb.document()
                 try expect(after.selection(of: sb.module).livePaper.isEmpty, "\(after.selection(of: sb.module))")
                 try expect(WallpaperSaverModule(url: sb.builtinSaver).isCurrentChoice(in: after.idleSlot(at: .systemDefault)!))
-                try expect(StoreFixture.explicitPaths.dropFirst().allSatisfy { after.idleSlot(at: $0).map(WallpaperSlot.isInherit) == true })
+                try expect(StoreFixture.selectPaths.dropFirst().allSatisfy { after.idleSlot(at: $0).map(WallpaperSlot.isInherit) == true })
                 try expect(!sb.exists(sb.saver) && steps.allSatisfy { !$0.isFailure }, "\(steps)")
             }
         },

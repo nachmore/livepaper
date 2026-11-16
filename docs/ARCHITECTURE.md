@@ -146,8 +146,11 @@ directories and inject fakes for commands, preferences and login items.
                                   (forensics only — NEVER restored wholesale; WallpaperAgent rewrites the
                                   file constantly and a stale copy would clobber newer Desktop choices)
     wallpaper-selection.json      per-slot manifest of the Idle slots LivePaper changed (original provider +
-                                  configuration); uninstall restores only slots that still point at LivePaper
-                                  (written without slots when LivePaper finds itself already selected)
+                                  configuration, the placeholder of a display record LivePaper filled
+                                  included); uninstall restores only slots that still point at LivePaper
+                                  (written without slots when LivePaper finds itself already selected). Its
+                                  existence means LivePaper owns the selection: the app's quiet re-apply
+                                  (§11) runs only then
     wallpaper-store-before-last-change.plist   the exact store bytes LivePaper replaced last (select or
                                   restore), saved before each write; named if a rollback can't be confirmed
   wallpaper-store.lock            flock: one wallpaper-store apply at a time
@@ -500,8 +503,15 @@ livepaper ai create ["<prompt>"] [--ref <image|folder>]… [--animate <image>] [
 livepaper ai modify <scene-id> ["<prompt>"] [--ref …]… [--animate <image>] …      (same options)
 livepaper ai harnesses [--json]
 livepaper server status|start|stop
-livepaper new <id> [--from <scene-id>] | list | publish | doctor                (planned)
+livepaper new <id> [--from <scene-id>] | list | publish                (planned)
+livepaper doctor [--no-ai] [--json] | select | uninstall [--yes] [--keep-scenes] [--dry-run]
 ```
+`select` is the installer's own selection (`InstallService.selectSaver`, docs/RESEARCH.md §5.6):
+`SystemDefault`, every explicit Idle slot and the placeholder of every display record, originals
+backed up; nothing is written when every display already resolves to the installed saver; exit 3
+when LivePaper refuses to touch the store (the reason is printed). `doctor`'s
+"selected" row is OK only when every display resolves to LivePaper; "only N of the M displays" (or
+not selected at all) is a problem whose fix it names: `livepaper select`.
 `check` = compile → stills at 1512×982@2 for t = 0, 4, 12, 30, 90, 240, 600, plus 32:9 (2560×720
 @1, t = 12/90/600), 5:4 (1280×1024 @1, t = 12/90) and thumbnail size (320×200 @2, t = 12) →
 JS-error check → motion at 1280×720@0.5 and 1024×820@0.5 (t = 3, 17, 41, 120; gaps 0.5/2/5 s;
@@ -858,10 +868,26 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   what an unlock started, and no saver update starts while either runs.
 * **Helper repair at launch:** see §7 — the app registers the helper's login item again by itself
   (once per launch, only in the copy the helper belongs to) when launchd can't run this build's helper.
-* *Settings* — Screen Saver (status, setup), Lock (**one** toggle "Use ⌃⌘Q and the lock key for
-  LivePaper lock" + the optional extra shortcut recorder + helper status with Start Helper / Repair
-  Helper / Open Login Items, or Use This Copy's Helper while another copy's runs), Performance (profile),
-  AI (default agent, per-agent model, time limit, custom command), About (+ Uninstall).
+* **Selected on every display** (`InstallStatus.saverSelection`, docs/RESEARCH.md §5.8): selected
+  means every display record of the wallpaper store resolves to LivePaper; "partly" (some do) shows
+  as "Selected on N of M displays" in Settings › Screen Saver, the setup page and the sidebar footer
+  ("Not on every display"), and before Lock Now, each with **Use LivePaper on Every Display** (the
+  same `makeLivePaperScreenSaver` as setup; the guided step if macOS doesn't let LivePaper).
+* **Quiet re-apply** (`InstallServicing.reapplySelectionIfNeeded`, docs/RESEARCH.md §5.6): when the
+  status says LivePaper owns the selection and a display falls back to macOS's default only because
+  its Idle slot holds the placeholder (`InstallStatus.selectionReapplyNeeded`; a display connected
+  after something reset `SystemDefault`), the app gives those placeholders LivePaper — never an
+  explicit choice, so never a screen saver the user picked. At launch (after the saver update) and
+  on `NSApplication.didChangeScreenParametersNotification`, once a burst of changes has been quiet
+  for 3 s (`AppEnvironment.screenChangeSettleDelay`): at most once per burst. Not while the Mac is
+  locked (it observes the next unlock, then reads the status again) and not while other install work
+  runs (it runs once that ends); setup and uninstall wait for a running one, and uninstall ends the
+  unlock wait. Quiet: only a change that was written but not confirmed shows a banner.
+* *Settings* — Screen Saver (status — every display, on N of M displays, not selected — and setup),
+  Lock (**one** toggle "Use ⌃⌘Q and the lock key for LivePaper lock" + the optional extra shortcut
+  recorder + helper status with Start Helper / Repair Helper / Open Login Items, or Use This Copy's
+  Helper while another copy's runs), Performance (profile), AI (default agent, per-agent model, time
+  limit, custom command), About (+ Uninstall).
 * **Onboarding** (first launch; re-runnable, every step idempotent and showing live status), 4
   steps: Welcome → Screen saver (install, select — with backup, or a guided one-click step in
   System Settings) → Locking (lock keys toggle, "require password immediately", helper login item,

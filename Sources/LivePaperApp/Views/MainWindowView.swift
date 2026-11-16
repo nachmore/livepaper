@@ -143,17 +143,27 @@ private struct SetupStatusFooter: View {
     var body: some View {
         let status = model.installStatus
         let ready = status.saverInstalled && status.saverSelected
+        // Some displays show another screen saver: one click selects LivePaper on all of them.
+        let partly = status.saverInstalled && status.saverPartlySelected
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle().fill(ready ? Color.green : Color.orange).frame(width: 7, height: 7)
-                Text(ready ? "Screen saver active" : "Setup not finished")
+                Text(ready ? "Screen saver active" : partly ? "Not on every display" : "Setup not finished")
                     .font(.callout.weight(.medium))
             }
-            Text(ready ? model.playlistSummary : "LivePaper isn't your screen saver yet.")
+            Text(ready ? model.playlistSummary : partly ? SetupChecklist.saverSummary(status) + "."
+                       : "LivePaper isn't your screen saver yet.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-            if !ready {
+            if partly {
+                Button(SetupState.everyDisplayActionTitle) {
+                    // The guided step lives in setup, for when macOS doesn't let LivePaper do it.
+                    Task { if !(await model.makeLivePaperScreenSaver()) { model.showOnboarding = true } }
+                }
+                .controlSize(.small)
+                .disabled(model.isInstallBusy)
+            } else if !ready {
                 Button("Finish Setup\u{2026}") { model.showOnboarding = true }
                     .controlSize(.small)
             }

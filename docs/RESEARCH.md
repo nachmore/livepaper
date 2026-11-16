@@ -128,9 +128,12 @@ Choice       { Provider: String, Files: [File], Configuration: Data }
 * A Codable mirror of this model (`WallpaperStoreSchema`) decodes a real store and **re-encodes it
   to identical bytes**. That is strong evidence the mirror is complete for the shapes seen so far.
 * A placeholder slot ("use the next record up") has `Provider = "default"`, an empty
-  `Configuration` and `EncodedOptionValues = {values = {}}`.
+  `Configuration` and `EncodedOptionValues = {values = {}}`. In `SystemDefault`, which has nothing
+  above it, the placeholder means macOS's own default screen saver (an aerial).
 * The order records fall back in is **Inferred** from the resolver's enum names: Space and display,
-  then Space, then display, then `SystemDefault`.
+  then Space, then display, then `SystemDefault`. LivePaper resolves every record this way
+  (`WallpaperStoreDocument.resolution`); an `AllSpacesAndDisplays` override, never seen set, is
+  taken at its name and tried first.
 
 ### 5.3 The payload for a legacy `.saver` (Verified, byte for byte)
 * `Provider = "com.apple.wallpaper.choice.screen-saver"` and `Files = []`.
@@ -169,17 +172,40 @@ Choice       { Provider: String, Files: [File], Configuration: Data }
    * Expect about a second of blank desktop while its extensions rebuild.
    * Never restart it while the screen is locked or a saver is showing: the agent draws the
      lock-screen saver (Inferred).
-5. **No supported route exists.**
+5. **It doesn't keep a `SystemDefault` written into the file while the displays it shows hold the
+   placeholder** (Verified on macOS 26.7, 2026-11-16, on a store with 6 display records, 4 Spaces and
+   20 records):
+   * The state found: `SystemDefault.Idle` was the placeholder, its `LastSet` older than LivePaper's
+     selection (most likely put back by another screen saver's uninstaller from its own old copy).
+     Two display records — displays not connected that day — chose LivePaper explicitly; the four
+     displays in use had the placeholder in every record (per display and per Space), so they fell
+     back to `SystemDefault`: the lock screen showed macOS's default aerial. LivePaper said
+     "selected" because one slot named it.
+   * Writing only `SystemDefault.Idle` = LivePaper and restarting the agent: within 1.5 s the
+     agent had written `SystemDefault.Idle` back to the placeholder, with the old `LastSet`. Every
+     retry ended the same way ("WallpaperAgent overwrote SystemDefault").
+   * Writing LivePaper into the 11 placeholder Idle slots of display records (`Displays/*` and
+     `Spaces/*/Displays/*`) and restarting the agent: the agent kept all of them, and then
+     `SystemDefault.Idle` and the `Default` of the two Spaces in use held LivePaper too, with the
+     `LastSet`/`LastUse` of a display slot in use. The `Default` of the two Spaces not in use kept
+     the placeholder; every display record resolved to LivePaper.
+   * Inferred: the agent derives `SystemDefault` and the `Default` of each Space in use from the
+     slots of the displays it shows, copying whole slots, placeholder included. So a selection made
+     by editing the file must give the displays themselves the choice. (System Settings, which tells
+     the running agent over XPC, leaves display placeholders alone, §5.4.)
+6. **No supported route exists.**
    * Its XPC service accepts any connection, but anything beyond display assertions needs the
      private `com.apple.private.wallpaper` entitlement. That includes the message System Settings
      sends to change the screen saver.
    * No App Intent sets the screen saver.
    * `ScreenSaverNameIntent` reads the legacy `moduleDict` and would report "No Screen Saver".
-6. **MDM:** the agent honours a forced `moduleName` in `com.apple.screensaver` (Verified string).
+7. **MDM:** the agent honours a forced `moduleName` in `com.apple.screensaver` (Verified string).
    Check it with `CFPreferencesAppValueIsForced("moduleName", "com.apple.screensaver")`.
 
 ### 5.6 What LivePaper does (`Sources/LivePaperCore/Install/WallpaperStore/`)
-LivePaper changes the store only on an explicit click, never at login or on a timer.
+LivePaper changes the store on an explicit click ("Make LivePaper my screen saver", "Use LivePaper
+on Every Display", `livepaper select`), and otherwise only for the quiet re-apply below — never on a
+timer.
 
 **It refuses, and points the user to the one-click guided step, when any of these is true:**
 * The store isn't the one the agent reads.
@@ -191,12 +217,22 @@ LivePaper changes the store only on an explicit click, never at login or on a ti
 * Any record is `linked`.
 * The saver isn't installed.
 
+**Nothing is written when every display already resolves to the installed LivePaper.saver** —
+System Settings' own selection (placeholders inheriting `SystemDefault`), or one whose `SystemDefault`
+the agent kept: LivePaper only records that it owns the selection, so the quiet re-apply below covers
+a later reset. A choice of LivePaper.saver at another location is rewritten.
+
 **Otherwise it runs this sequence:**
 1. Hold a lock file, so no other LivePaper process edits the store at the same time, and run the
    checks above again once it has it.
 2. Wait until the file has been unchanged for about 1 s.
 3. Read the store and decode it with the mirror.
-4. Replace only `SystemDefault.Idle` and the explicit (non-placeholder) Idle slots.
+4. Replace `SystemDefault.Idle`, every explicit (non-placeholder) Idle slot — as System Settings
+   does, another saver's too — and the placeholder Idle slot of every display record, per display
+   and per Space per display (§5.5). The placeholders of Space `Default` records are left alone: a
+   display record is tried before its Space's `Default`, every display record gets LivePaper, and
+   after the 2026-11-16 fill the agent set the Defaults of the Spaces in use itself while the
+   others kept the placeholder with every display still resolving to LivePaper.
 5. Check the result before writing:
    * it still decodes;
    * only the planned Idle slots differ;
@@ -207,13 +243,18 @@ LivePaper changes the store only on an explicit click, never at login or on a ti
 7. Back up before writing anything:
    * the exact bytes about to be replaced (every time, select and restore alike);
    * the raw file, the first time only;
-   * a manifest that records, for each Idle slot it replaces, the user's original choice.
+   * a manifest that records, for each Idle slot it replaces, the user's original choice — a
+     placeholder too, so uninstall puts exactly that placeholder back.
 8. Put it in place with a single atomic rename (only if the file hasn't changed since it was read),
    then **immediately** run `killall WallpaperAgent`.
 9. Wait for the restarted agent's own rewrite, re-read the store and confirm the result. A planned
    slot counts as kept when it makes the planned choice; the agent may spell option values and
    timestamps its own way (System Settings itself copies the Desktop's option values into saver
    slots):
+   * If the agent wrote its own choice into a planned `SystemDefault` or Space `Default` (§5.5) but
+     kept the display slots, and every display record resolves to LivePaper, the selection is
+     confirmed as it is: what every display shows is what was asked for. Retrying would only restart
+     the agent to the same result.
    * If an Idle choice was lost (the old agent wrote between the rename and the kill), plan again
      and retry, at most twice, 2 s apart. If the new plan is empty, the agent's own store already
      is right: confirmed without another restart.
@@ -221,6 +262,19 @@ LivePaper changes the store only on an explicit click, never at login or on a ti
      back through the same protected steps (wait until unlocked, rename, restart, confirm, retry at
      most twice). Only a confirmed rollback is reported as "put the previous settings back";
      otherwise LivePaper says it couldn't confirm it and names the saved copy from step 7.
+
+**The quiet re-apply** (the app, at launch and after display changes): a display that appears later
+gets a record copied from `SystemDefault` (§5.4). If that is the placeholder — the agent kept its own
+there, or something reset it — the new display shows macOS's default. So while LivePaper owns the
+selection (its manifest exists: it made the selection, or found itself selected and recorded that),
+the app runs the same sequence with a narrower plan: only the placeholder Idle slots of display
+records that fall back to macOS's default through placeholders alone, plus `SystemDefault`'s
+placeholder with them; each original goes into the manifest. A slot with an explicit choice, and any
+placeholder that inherits one (a screen saver the user picked), is never touched; with nothing to
+fill there is no plan and no agent restart. It runs at most once per burst of
+`NSApplication.didChangeScreenParametersNotification` (3 s after the last), never while the Mac is
+locked (it waits for the unlock) or other install work runs (it waits for that), never after an
+uninstall.
 
 Optional hardening, not used: freezing the agent with SIGSTOP while swapping the file would close
 the race completely. But if LivePaper crashed mid-step, the process that draws the desktop and the
@@ -233,7 +287,8 @@ lock screen would stay frozen.
   doesn't count).
 * Every Idle slot that **still** names LivePaper.saver is changed, whether or not LivePaper made
   the selection itself (it may have been picked by hand in System Settings):
-  * If the manifest has an original for that slot, the original goes back exactly. LivePaper.saver
+  * If the manifest has an original for that slot, the original goes back exactly — the
+    placeholder of a display record LivePaper filled included. LivePaper.saver
     at another location that still exists (say /Library/Screen Savers) is recorded as an original
     too, so that location comes back.
   * A slot with no recorded original gets the placeholder. An example is a display added since
@@ -253,11 +308,18 @@ lock screen would stay frozen.
   uninstall again finishes.
 
 ### 5.8 Detection
-* Reading the store, as in §5.2, is the only reliable signal. "Selected" means that an Idle slot's
+* Reading the store, as in §5.2, is the only reliable signal. An Idle slot chooses LivePaper when its
   screen-saver choice names `LivePaper.saver`.
-* LivePaper reports two levels:
-  * **any:** the status shown in the app;
-  * **everywhere:** `SystemDefault` and every explicit slot point at LivePaper.
+* **Selected** means every display record resolves to LivePaper (Space and display, then Space, then
+  display, then `SystemDefault`; with no display record yet, `SystemDefault` decides). A slot that
+  names LivePaper is not enough: on 2026-11-16 two did while every display in use showed the aerial.
+* LivePaper reports (`InstallStatus.saverSelection`, `livepaper doctor`, the app):
+  * **every display;**
+  * **partly:** some displays resolve to LivePaper, and how many of the displays in the store don't —
+    a problem whose fix is `livepaper select` or the app's "Use LivePaper on Every Display";
+  * **none.**
+  * Uninstall still looks for **any** slot naming LivePaper (that is what it has to undo), and
+    "everywhere" (`SystemDefault` and the Space Defaults too) is what a selection writes.
 * Signals rejected, because they are unreliable or need private entitlements:
   * the legacy `moduleDict`;
   * the `ScreenSaverNameIntent` App Intent;
@@ -271,6 +333,12 @@ lock screen would stay frozen.
   confirm step exists for exactly this reason.
 * What "Show on all Spaces" writes to `AllSpacesAndDisplays`.
 * What the agent does with an Idle choice whose module is missing.
+* Whether a `SystemDefault` holding another explicit saver, written into the file while the displays
+  in use hold the placeholder, survives a restart (§5.5 saw only LivePaper's written back). It matters
+  when uninstall puts back a pre-LivePaper `SystemDefault` that wasn't the placeholder: if the agent
+  replaced it, the restore step says so and running uninstall again finishes.
+* Which display's slot the agent copies into `SystemDefault` when several are in use (seen: the one
+  showing the first Space), and whether the `Default` of a Space not in use is ever read.
 
 ## 6. Login items for an ad-hoc-signed helper
 

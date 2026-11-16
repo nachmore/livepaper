@@ -91,6 +91,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         if !model.environment.isMock { observeLockState(model) }
         observeActivation(model)
+        observeScreens(model)
+    }
+
+    /// Connecting a display gives it a wallpaper-store record copied from SystemDefault; if that is
+    /// macOS's default while LivePaper owns the selection, the model re-applies it (debounced, at
+    /// most once per burst of changes; AppModel.screenParametersDidChange).
+    private func observeScreens(_ model: AppModel) {
+        let center = NotificationCenter.default
+        observers.append((center, center.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil,
+                                                      queue: .main) { _ in
+            MainActor.assumeIsolated { model.screenParametersDidChange() }
+        }))
     }
 
     /// The disk watcher (AppModel.startWatchingDisk) reports changes other processes make; becoming

@@ -13,7 +13,9 @@
 //   WallpaperSystem             the system facts and the agent restart, behind a protocol
 //
 // Reading is always safe (no permission prompt; WallpaperAgent is never involved). Writing happens
-// only through WallpaperStoreApplier, only on an explicit user action.
+// only through WallpaperStoreApplier: on an explicit user action (select, uninstall), and for the
+// app's quiet re-apply, which only fills placeholders of displays that fell back to macOS's
+// default while LivePaper owns the selection (InstallService.reapplySelectionIfNeeded).
 import Foundation
 
 public struct WallpaperStore: Sendable {
@@ -39,7 +41,8 @@ public struct WallpaperStore: Sendable {
         (try? read())?.selection(of: module)
     }
 
-    /// True when any display's (or the default) screen-saver choice is the LivePaper saver.
+    /// True when any Idle slot — a display's, a Space's or the default's — chooses the LivePaper
+    /// saver: what uninstall has to undo. Not what "selected" means for the user (`selectionState()`).
     ///
     /// A store in an unknown format (a future macOS) falls back to a structural scan: any string or
     /// nested plist blob below an "Idle" key that names the saver bundle.
@@ -49,7 +52,17 @@ public struct WallpaperStore: Sendable {
         return Self.mentions(root, needles: [module.url.lastPathComponent, LPPaths.saverBundleID], inIdle: false, depth: 0)
     }
 
-    /// True when every display and Space resolves to LivePaper (WallpaperSelection.isSelectedEverywhere).
+    /// Which displays show LivePaper (InstallStatus.saverSelection): every display record resolves to
+    /// it, some do, or none. A store in an unknown format can't be resolved; whatever its Idle
+    /// subtrees mention (`isSelected()`) counts for every display.
+    public func selectionState() -> SaverSelection {
+        guard let selection = selection() else { return isSelected() ? .everyDisplay : .none }
+        if selection.isSelectedOnEveryDisplay { return .everyDisplay }
+        guard selection.isPartlySelected else { return .none }
+        return .partly(missing: selection.displaysWithoutLivePaper.count, displays: selection.displayIDs.count)
+    }
+
+    /// True when every record, defaults included, resolves to LivePaper (WallpaperSelection.isSelectedEverywhere).
     public func isSelectedEverywhere() -> Bool { selection()?.isSelectedEverywhere ?? false }
 
     /// The applier that writes this store (LIVE PATH with a LiveWallpaperSystem).

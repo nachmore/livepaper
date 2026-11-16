@@ -37,6 +37,31 @@ public enum WallpaperRecordPath: Hashable, Sendable, Comparable, CustomStringCon
     /// True for the records nothing else falls back to (an Idle slot there can't "inherit").
     public var isRoot: Bool { self == .systemDefault || self == .allSpacesAndDisplays }
 
+    /// The display a record belongs to (`Displays/<id>`, `Spaces/<id>/Displays/<id>`): what a screen
+    /// shows. nil for the records displays fall back to (SystemDefault, a Space's Default,
+    /// AllSpacesAndDisplays).
+    public var displayID: String? {
+        switch self {
+        case .display(let d), .spaceDisplay(_, let d): return d
+        case .allSpacesAndDisplays, .systemDefault, .spaceDefault: return nil
+        }
+    }
+
+    /// The records whose Idle slot decides what this record shows, in the order they are tried
+    /// while the slots hold the placeholder (docs/RESEARCH.md §5.2: Space and display, then Space,
+    /// then display, then SystemDefault — Inferred from the resolver's enum names). An
+    /// AllSpacesAndDisplays override, never observed set, is taken at its name and tried first.
+    public var fallbackChain: [WallpaperRecordPath] {
+        switch self {
+        case .allSpacesAndDisplays: return [.allSpacesAndDisplays]
+        case .systemDefault: return [.allSpacesAndDisplays, .systemDefault]
+        case .display(let d): return [.allSpacesAndDisplays, .display(d), .systemDefault]
+        case .spaceDefault(let s): return [.allSpacesAndDisplays, .spaceDefault(s), .systemDefault]
+        case .spaceDisplay(let s, let d):
+            return [.allSpacesAndDisplays, .spaceDisplay(space: s, display: d), .spaceDefault(s), .display(d), .systemDefault]
+        }
+    }
+
     /// e.g. `Spaces/""/Displays/<uuid>` (the first Space's key is the empty string).
     public var description: String { keyPath.map { $0.isEmpty ? "\"\"" : $0 }.joined(separator: "/") }
 
