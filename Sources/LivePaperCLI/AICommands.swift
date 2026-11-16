@@ -357,8 +357,8 @@ final class SessionPrinter {
         }
     }
 
-    /// "◻ 13 stills in scene/.check/: 1512x982@2-t0.png, …" — paths relative to the workspace
-    /// (printed at the start), grouped by directory.
+    /// "◻ 13 stills in scene/.check/: 1512x982@2-t0.png, …" ("13 stills and 2 motion maps" with the
+    /// check's heat maps) — paths relative to the workspace (printed at the start), grouped by directory.
     private func flushStills() {
         guard !pendingStills.isEmpty else { return }
         defer { pendingStills = [] }
@@ -374,7 +374,9 @@ final class SessionPrinter {
         for g in groups {
             let shown = g.names.prefix(Self.stillNamesShown).joined(separator: ", ")
             let more = g.names.count > Self.stillNamesShown ? ", … (+\(g.names.count - Self.stillNamesShown))" : ""
-            let count = g.names.count == 1 ? "1 still" : "\(g.names.count) stills"
+            let maps = g.names.filter { SceneChecker.isMotionMap(URL(fileURLWithPath: $0)) }.count, stills = g.names.count - maps
+            let count = [stills > 0 ? (stills == 1 ? "1 still" : "\(stills) stills") : nil,
+                         maps > 0 ? (maps == 1 ? "1 motion map" : "\(maps) motion maps") : nil].compactMap { $0 }.joined(separator: " and ")
             print("  ◻ \(count) in \(workspaceRelative(g.dir))/: \(shown)\(more)")
         }
     }

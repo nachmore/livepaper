@@ -555,6 +555,7 @@ extension SelfTests {
             #!/bin/sh
             mkdir -p scene/.check
             for t in 0 4 12 30 90 600; do printf 'png' > "scene/.check/1512x982@2-t$t.png"; done
+            for s in 1512x982@2 5120x1440@1; do printf 'png' > "scene/.check/motion-$s.png"; done
             sleep 2
             echo "Looked at the stills."
             echo '// v2' > scene/scene.js
@@ -565,8 +566,9 @@ extension SelfTests {
             try expectEqual(r.status, 1)
             let stillLines = r.out.split(separator: "\n").filter { $0.contains("◻") }
             try expectEqual(stillLines.count, 1)
-            try expect(stillLines.first?.contains("◻ 6 stills in scene/.check/: 1512x982@2-t0.png, 1512x982@2-t12.png") == true &&
-                       stillLines.first?.hasSuffix(", … (+2)") == true, r.out)
+            // The check's motion heat maps are counted apart, as its summary does ("6 PNGs").
+            try expect(stillLines.first?.contains("◻ 6 stills and 2 motion maps in scene/.check/: 1512x982@2-t0.png, 1512x982@2-t12.png") == true &&
+                       stillLines.first?.hasSuffix(", … (+4)") == true, r.out)
 
             r = try sb.run(["ai", "create", "x", "--command", "/nonexistent/agent {prompt_file}"])
             try expectEqual(r.status, 1)

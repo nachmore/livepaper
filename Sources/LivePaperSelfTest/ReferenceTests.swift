@@ -523,7 +523,7 @@ enum ReferenceTests {
                            "| `references/ref-02.png` | reference | 500\u{00D7}400, 5:4 landscape |",
                            "### Reference images: a starting point", "### Animate this exact image: `references/ref-01.jpg`",
                            "Full-resolution copy: `scene/assets/reference.jpg` (1800\u{00D7}1200).", "LivePaper.image('reference.jpg')",
-                           "Math.max(lp.w / img.width, lp.h / img.height)", "Absolute folder: `\(ws.references.path)`",
+                           "Math.max(lp.w / img.width, lp.h / img.height)", "Absolute folder: `\(try SelfTests.unwrap(ReferenceTray.realPath(ws.references.path)))`",
                            "Kiro: read with mode \"Image\" and image_paths", "sdk/SCENE_API.md` \u{00A7}7 \"Animating a still picture\"",
                            "Images attached to this conversation are these files in the table's order (the first attachment is ref-01, " +
                            "the second ref-02, \u{2026}), possibly only the first few; open the others with your image tool",
@@ -533,6 +533,9 @@ enum ReferenceTests {
                            "The request mentions files on the user's Mac that weren't attached; you can't open them."] {
                 try expect(task.contains(needle), "TASK.md lacks: \(needle)\n\(task)")
             }
+            // The folder as the harness's working directory reads it: symlinks resolved (this
+            // sandbox is under /var/folders, which is /private/var/folders there).
+            try expect(task.contains("Absolute folder: `/private/") == ws.references.path.hasPrefix("/var/"), task)
             let agents = text(ws.root.appendingPathComponent("AGENTS.md"))
             try expectEqual(agents, text(ws.root.appendingPathComponent("CLAUDE.md")))
             for needle in ["1. Read `./TASK.md`", "2. This session has 3 reference images in `./references` (TASK.md \u{203A} Reference images says how to " +

@@ -200,6 +200,10 @@ public enum ReferenceWorkspace {
     static func megabytes(_ bytes: Int) -> String { String(format: "%.1f", Double(bytes) / Double(1 << 20)) }
 
     /// "## Reference images" in TASK.md: what was attached, how to look at it and how to use each role.
+    /// The folder's real path (symlinks resolved, as the harness's working directory reads — a home
+    /// under /tmp is /private/tmp there), else as given.
+    static func absolutePath(_ url: URL) -> String { AISessionPolicy.realPath(url.path) ?? url.path }
+
     static func taskSection(_ refs: SessionReferences, workspace: AIWorkspace, unattached: Int) -> String {
         guard !refs.isEmpty else { return "" }
         let n = refs.images.count
@@ -214,7 +218,7 @@ public enum ReferenceWorkspace {
             "Look at every image before you plan. Images attached to this conversation are these files in the table's order " +
                 "(the first attachment is ref-01, the second ref-02, \u{2026}), possibly only the first few; open the others with your " +
                 "image tool (Claude Code: Read; Kiro: read with mode \"Image\" and image_paths; Codex: view_image). Absolute folder: " +
-                "`\(workspace.references.path)`. `\(directoryName)/ref-NN.json` has size, aspect, brightness, dominant palette " +
+                "`\(absolutePath(workspace.references))`. `\(directoryName)/ref-NN.json` has size, aspect, brightness, dominant palette " +
                 "(hex + share) and a coarse colour grid (top row first).",
             "",
             "| Image | Role | Size | Notes |",

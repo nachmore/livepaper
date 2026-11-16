@@ -282,7 +282,8 @@ extension SelfTests {
             s.apply(.stillRendered(png), at: t)
             s.apply(.stillRendered(png), at: t)   // rewritten: one tile, a new revision
             s.apply(.stillRendered(URL(fileURLWithPath: "/tmp/b.png")), at: t)
-            try expectEqual(s.stills.count, 2)
+            s.apply(.stillRendered(URL(fileURLWithPath: "/tmp/motion-1512x982@2.png")), at: t)   // a heat map: shown, not counted
+            try expectEqual(s.stills.count, 3)
             try expectEqual(s.stillRevision(png), 1)
             try expectEqual(s.entries.last?.kind, .stills(3))
             s.apply(.status("Validating with livepaper check\u{2026}"), at: t)

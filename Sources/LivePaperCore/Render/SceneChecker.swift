@@ -228,6 +228,13 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
     /// "motion-1280x720@0.5.png": the heat map of one motion size in .check/.
     public static func motionFileName(_ size: CheckFrame) -> String { "motion-\(size.sizeLabel).png" }
 
+    /// A motion heat map (`motionFileName`), not a still: progress lines count them apart, as the
+    /// check's summary does ("13 PNGs" are the stills).
+    public static func isMotionMap(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        return name.hasPrefix("motion-") && name.lowercased().hasSuffix(".png")
+    }
+
     static func heaviestTime(_ probes: [(frame: CheckFrame, response: RenderResponse)]) -> Double? {
         probes.filter { $0.response.ok && $0.response.benchMs != nil }
             .max { ($0.response.benchMs ?? 0) < ($1.response.benchMs ?? 0) }?.frame.t
