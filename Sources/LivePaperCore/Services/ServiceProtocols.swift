@@ -87,9 +87,34 @@ public struct PlaylistSettings: Codable, Sendable, Equatable {
     public var performance: LPPerformanceProfile
     /// Scenes in the playlist, in order. Empty = all scenes.
     public var sceneIDs: [String]
+    /// Multiple displays: mode, per-display scenes, what other displays show on battery.
+    public var displays: LPDisplaySettings
+    /// Display id → the name it had when last seen, for displays with an assignment (so the app can
+    /// name a disconnected display). App UI only; never published.
+    public var displayNames: [String: String]
+
     public init(mode: LPPlaylistMode = .shuffle, cycleMinutes: Int = 5, showClock: Bool = true,
-                performance: LPPerformanceProfile = .automatic, sceneIDs: [String] = []) {
+                performance: LPPerformanceProfile = .automatic, sceneIDs: [String] = [],
+                displays: LPDisplaySettings = .standard, displayNames: [String: String] = [:]) {
         self.mode = mode; self.cycleMinutes = cycleMinutes; self.showClock = showClock; self.performance = performance; self.sceneIDs = sceneIDs
+        self.displays = displays; self.displayNames = displayNames
+    }
+
+    enum CodingKeys: String, CodingKey { case mode, cycleMinutes, showClock, performance, sceneIDs, displays, displayNames }
+
+    /// Tolerant: every field falls back to its default on its own, so a file from an older LivePaper
+    /// (no `displays`), a newer one (a mode this build doesn't know) or a partly damaged one keeps
+    /// everything that is readable instead of resetting the whole playlist.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        let d = PlaylistSettings()
+        mode = (try? c.decodeIfPresent(LPPlaylistMode.self, forKey: .mode)).flatMap { $0 } ?? d.mode
+        cycleMinutes = (try? c.decodeIfPresent(Int.self, forKey: .cycleMinutes)).flatMap { $0 } ?? d.cycleMinutes
+        showClock = (try? c.decodeIfPresent(Bool.self, forKey: .showClock)).flatMap { $0 } ?? d.showClock
+        performance = (try? c.decodeIfPresent(LPPerformanceProfile.self, forKey: .performance)).flatMap { $0 } ?? d.performance
+        sceneIDs = (try? c.decodeIfPresent([String].self, forKey: .sceneIDs)).flatMap { $0 } ?? d.sceneIDs
+        displays = (try? c.decodeIfPresent(LPDisplaySettings.self, forKey: .displays)).flatMap { $0 } ?? d.displays
+        displayNames = (try? c.decodeIfPresent([String: String].self, forKey: .displayNames)).flatMap { $0 } ?? d.displayNames
     }
 }
 

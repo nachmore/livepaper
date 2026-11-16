@@ -15,7 +15,7 @@ import ImageIO
 import LivePaperCore
 
 extension SelfTests {
-    static var core: [TestCase] { coreLibrary + corePublish + coreAI + coreInstall + coreSmoke }
+    static var core: [TestCase] { coreLibrary + corePublish + coreDisplays + coreAI + coreInstall + coreSmoke }
 }
 
 // MARK: - Recorded launchd output
@@ -1063,6 +1063,60 @@ extension SelfTests {
                 do { try publish.publish(); throw TestFailure(description: "expected nothingPublishable") } catch PublishError.nothingPublishable {}
                 try expectEqual(try LPPlaylist.load(from: playlistDir).generation, 4)
                 try expect(!exists(sb.saver.appendingPathComponent("Contents/Resources/Playlist.new")), "staging removed")
+            }
+        },
+        TestCase(name: "core.publish.displays") {
+            try CoreSandbox.with("publish-displays") { sb in
+                let lib = sb.makeLibrary()
+                let compiler = FakeCompiler()
+                let publish = PublishService(library: lib, compiler: compiler, settingsURL: sb.support.appendingPathComponent("playlist-settings.json"),
+                                             saverURL: sb.saver, lockURL: sb.support.appendingPathComponent("publish.lock"), notify: { _ in })
+                try sb.installFakeSaver()
+                var mine = try lib.createWebScene(name: "Mine", description: "").manifest
+                mine.span = true
+                try lib.update(mine)
+                let (a, b, c, d) = ("00000000-0000-4000-8000-0000000000A1", "00000000-0000-4000-8000-0000000000A2",
+                                    "00000000-0000-4000-8000-0000000000A3", "00000000-0000-4000-8000-0000000000A4")
+                let e = "display-9"
+                compiler.failing = ["waves"]
+                let assignments = [a: "zen", b.lowercased(): "orbit", c: "gone", d: "waves", e: "orbit"]
+                try publish.saveSettings(PlaylistSettings(sceneIDs: ["zen", "clip", "mine"],
+                                                          displays: LPDisplaySettings(mode: .choose, assignments: assignments, onBattery: .still)))
+                let result = try publish.publishReport()
+                let p = result.playlist
+                try expectEqual(p.scenes.map(\.id), ["zen", "clip", "mine"])
+                // A deck scene stays in the deck; a library scene is compiled once into displayScenes;
+                // a deleted scene and one that fails to compile are dropped (the failure is reported).
+                try expectEqual(p.displays.mode, .choose); try expectEqual(p.displays.onBattery, .still)
+                try expectEqual(p.displays.assignments, [a: "zen", b: "orbit", "DISPLAY-9": "orbit"])
+                try expectEqual(p.displayScenes.map(\.id), ["orbit"])
+                try expectEqual(p.displayScenes.first?.file, "orbit.html")
+                try expectEqual(compiler.compiled.filter { $0 == "orbit" }.count, 1)
+                try expectEqual(result.skippedScenes.map(\.id), ["waves"])
+                let dir = sb.saver.appendingPathComponent("Contents/Resources/Playlist")
+                try expectEqual(children(dir), ["clip.mov", "mine.html", "orbit.html", "playlist.json", "zen.html"])
+                try expectEqual(try LPPlaylist.load(from: dir), p)
+                // Span flags: web scenes only when they declare it, videos by default.
+                try expectEqual(p.scenes.map(\.span), [false, true, true])
+                try expectEqual(p.displayScenes.map(\.span), [false])
+
+                // Other modes publish no assignments and no display scenes, but keep mode and battery.
+                compiler.failing = []
+                try publish.saveSettings(PlaylistSettings(sceneIDs: ["zen", "clip"],
+                                                          displays: LPDisplaySettings(mode: .span, assignments: assignments, onBattery: .off)))
+                let span = try publish.publish()
+                try expectEqual(span.displays, LPDisplaySettings(mode: .span, assignments: [:], onBattery: .off))
+                try expectEqual(span.displayScenes, [])
+                try expectEqual(children(dir), ["clip.mov", "playlist.json", "zen.html"])
+                try publish.saveSettings(PlaylistSettings(sceneIDs: ["zen"]))
+                try expectEqual(try publish.publish().displays, .standard)
+                // An assignment to a deck scene that failed is reported once and dropped.
+                compiler.failing = ["zen"]
+                try publish.saveSettings(PlaylistSettings(sceneIDs: ["zen", "clip"],
+                                                          displays: LPDisplaySettings(mode: .choose, assignments: [a: "zen"])))
+                let failed = try publish.publishReport()
+                try expectEqual(failed.playlist.displays.assignments, [:])
+                try expectEqual(failed.skippedScenes.map(\.id), ["zen"])
             }
         },
     ] }
