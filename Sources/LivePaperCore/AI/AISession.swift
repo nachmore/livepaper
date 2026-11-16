@@ -166,9 +166,24 @@ public final class AISession: AISessionTerminating, @unchecked Sendable {
         // it spawns, so either nothing is spawned or the group is already known here.
         let pgid: pid_t? = stopLock.withLock { stopRequested = true; return group }
         queue.async { [self] in stopRequestedOnQueue(terminate: false) }   // ends the stream
-        guard let pgid else { return true }
-        log.info("session \(self.id, privacy: .public): stopping process group \(pgid) now")
-        return Self.stopGroup(pgid, grace: grace)
+        var stopped = true
+        if let pgid {
+            log.info("session \(self.id, privacy: .public): stopping process group \(pgid) now")
+            stopped = Self.stopGroup(pgid, grace: grace)
+        }
+        // The process is about to exit, before the queue gets to record the end: a session stopped on
+        // purpose (quitting, a closed terminal) is never taken for one to recover. One that already
+        // ended keeps its outcome (an unreviewed result is still offered next time).
+        if let records = deps.records {
+            records.update(id) { record in
+                guard record.outcome == nil else { return false }
+                record.outcome = .init(status: .cancelled, message: "Cancelled.")
+                record.finishedAt = Date()
+                return true
+            }
+            if records.load(id)?.outcome?.status == .cancelled { records.removeCopies(for: id) }
+        }
+        return stopped
     }
 
     private var isStopRequested: Bool { stopLock.withLock { stopRequested } }

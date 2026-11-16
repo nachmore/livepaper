@@ -144,6 +144,16 @@ extension SelfTests {
                 let c = try slow.start(.create(prompt: "x"), harness: h3, model: nil)
                 _ = try collect(c) { if $0 == .assistantText("started") { c.cancel() } }
                 try expectEqual(slow.records.load(c.id)?.outcome?.status, .cancelled)
+                // Stopped synchronously as the process exits (quitting, a closed terminal): on record
+                // before terminateNow returns, so it is never mistaken for one to recover — while a
+                // finished, undecided session stays offered.
+                let q = try slow.start(.create(prompt: "x"), harness: h3, model: nil)
+                let quitting = try unwrap(q as? AISessionTerminating)
+                for _ in 0..<500 where slow.records.load(q.id)?.agent == nil { usleep(10_000) }
+                try expect(quitting.terminateNow(grace: 0.3))
+                try expectEqual(slow.records.load(q.id)?.outcome?.status, .cancelled)
+                try expect((handle as? AISessionTerminating)?.terminateNow(grace: 0.3) == true)
+                try expectEqual(ai.records.load(handle.id)?.outcome?.status, .passed)
             }
         },
         TestCase(name: "recovery.decide") {
