@@ -15,6 +15,11 @@ struct PromptTextView: NSViewRepresentable {
     var onImages: (([ReferenceInput], [String]) -> Void)?
     /// An image drag is over the text (the card highlights its drop area).
     var onDropTargeted: ((Bool) -> Void)?
+    /// VoiceOver label of the text view.
+    var label: String = "Prompt"
+    /// Set: Return sends (ReturnKeyRule — the closure returns false when there is nothing to send);
+    /// ⇧Return and ⌥Return add a new line. nil: Return adds a new line, as in any text view.
+    var onReturn: (() -> Bool)?
 
     func makeCoordinator() -> Coordinator { Coordinator(text: $text) }
 
@@ -50,7 +55,8 @@ struct PromptTextView: NSViewRepresentable {
         textView.isAutomaticDataDetectionEnabled = false
         textView.string = text
         textView.delegate = context.coordinator
-        textView.setAccessibilityLabel("Prompt")
+        textView.setAccessibilityLabel(label)
+        context.coordinator.onReturn = onReturn
         textView.setAccessibilityHelp(hint.isEmpty ? nil : hint)
         textView.onImages = onImages
         textView.onDropTargeted = onDropTargeted
@@ -62,6 +68,7 @@ struct PromptTextView: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.text = $text
+        context.coordinator.onReturn = onReturn
         guard let textView = scroll.documentView as? PromptNSTextView else { return }
         // Programmatic changes (an idea chip, clearing after Generate), never while IME composes.
         // Made like an edit, so undo stays consistent (and can bring a cleared prompt back).
@@ -86,6 +93,7 @@ struct PromptTextView: NSViewRepresentable {
 
     final class Coordinator: NSObject, NSTextViewDelegate {
         var text: Binding<String>
+        var onReturn: (() -> Bool)?
         /// Set while updateNSView applies the binding's value (no echo back into it).
         var applying = false
         init(text: Binding<String>) { self.text = text }
@@ -98,6 +106,15 @@ struct PromptTextView: NSViewRepresentable {
         /// Tab and ⇧Tab move to the next control (a prompt never needs a tab character), so the
         /// tray and the buttons below stay reachable from the keyboard.
         func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+            if selector == #selector(NSResponder.insertNewline(_:)), let onReturn {
+                let flags = NSApp.currentEvent?.modifierFlags ?? []
+                switch ReturnKeyRule.action(shift: flags.contains(.shift), option: flags.contains(.option),
+                                            composing: textView.hasMarkedText(), canSend: true) {
+                case .send: _ = onReturn(); return true          // nothing to send: Return does nothing
+                case .asUsual: return false
+                case .nothing: return true
+                }
+            }
             switch selector {
             case #selector(NSResponder.insertTab(_:)): textView.window?.selectNextKeyView(nil); return true
             case #selector(NSResponder.insertBacktab(_:)): textView.window?.selectPreviousKeyView(nil); return true

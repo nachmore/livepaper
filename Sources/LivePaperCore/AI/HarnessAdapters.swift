@@ -74,6 +74,11 @@ public enum HarnessAdapters {
 /// Reference images: Claude Code has no image option; its Read tool returns image files to the
 /// model as images, and `Read(./**)` covers ./references. The copies and the picture to animate
 /// (scene/assets/reference.*) are protected by deny rules, which win over the ./scene allow rule.
+///
+/// Isolation: `--strict-mcp-config` (with no `--mcp-config`) starts none of the user's MCP servers,
+/// and `--disable-slash-commands` loads none of their skills or commands. A session needs neither,
+/// dontAsk would deny their tools anyway, and loading them costs start-up time and context (one
+/// owner's setup brought 5 servers, 9 plugins and 82 skills into every session).
 public struct ClaudeAdapter: HarnessAdapter {
     public static let allowedTools = (["Read(./**)", "Edit(./scene/**)"]
         + (AISessionPolicy.commands + ["help"]).map { "Bash(livepaper \($0) *)" }).joined(separator: ",")
@@ -84,7 +89,8 @@ public struct ClaudeAdapter: HarnessAdapter {
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         var args = ["-p", "--output-format", "stream-json", "--verbose",
-                    "--permission-mode", "dontAsk", "--allowedTools", Self.allowedTools, "--disallowedTools", Self.disallowedTools]
+                    "--permission-mode", "dontAsk", "--allowedTools", Self.allowedTools, "--disallowedTools", Self.disallowedTools,
+                    "--strict-mcp-config", "--disable-slash-commands"]
         if let model = context.model { args += ["--model", model] }
         args += context.extraArguments
         return HarnessInvocation(executable: harness.executable, arguments: args,

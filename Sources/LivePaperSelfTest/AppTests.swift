@@ -730,6 +730,13 @@ extension SelfTests {
             try expectEqual(toggled.filter(\.isActive).map(\.id), ["L"])
             try expectEqual(Set(toggled.map(\.id)).count, toggled.count)   // stable, unique ids for ForEach
         },
+        TestCase(name: "app.feedback.return-sends") {
+            try expectEqual(ReturnKeyRule.action(shift: false, option: false, composing: false, canSend: true), .send)
+            try expectEqual(ReturnKeyRule.action(shift: true, option: false, composing: false, canSend: true), .asUsual)
+            try expectEqual(ReturnKeyRule.action(shift: false, option: true, composing: false, canSend: true), .asUsual)
+            try expectEqual(ReturnKeyRule.action(shift: false, option: false, composing: true, canSend: true), .asUsual)   // IME
+            try expectEqual(ReturnKeyRule.action(shift: false, option: false, composing: false, canSend: false), .nothing)
+        },
         TestCase(name: "app.about.version-with-build") {
             try expectEqual(AppVersion.display(short: "0.1.0", build: "195"), "0.1.0.195")
             try expectEqual(AppVersion.display(short: "0.1.0-beta.2", build: "201"), "0.1.0-beta.2.201")

@@ -482,11 +482,20 @@ private struct SessionDecisionBar: View {
         return "Replace \u{201C}\(name)\u{201D}"
     }
 
+    /// Return in the feedback box: try again with it. Nothing to send (no text, or a session is
+    /// already starting): false, and Return does nothing.
+    private func sendFeedback() -> Bool {
+        guard !feedback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, !model.isStartingSession else { return false }
+        Task { await model.retry(session, feedback: feedback) }
+        return true
+    }
+
     private func feedbackBox(buttonTitle: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            TextField("Feedback", text: $feedback, prompt: Text("What should be different? (optional)"), axis: .vertical)
-                .lineLimit(2...4)
-                .textFieldStyle(.roundedBorder)
+            // Return sends the feedback (⇧Return for a new line); ⌘Return stays the Add/Replace button.
+            PromptEditor(text: $feedback, placeholder: "What should be different? Return sends it, \u{21E7}Return adds a line.",
+                         label: "Feedback", onReturn: sendFeedback)
+                .frame(minHeight: 52, maxHeight: 96)
             Button(buttonTitle) { Task { await model.retry(session, feedback: feedback) } }
                 .disabled(model.isStartingSession)
                 .help(session.references.isEmpty

@@ -615,7 +615,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   * Claude Code: `claude -p --output-format stream-json --verbose --permission-mode dontAsk
     --allowedTools "Read(./**),Edit(./scene/**),Bash(livepaper check *),…" --disallowedTools
     "WebFetch,WebSearch,Edit(./bin/**),…,Edit(./references/**),Edit(./scene/assets/reference.*)"
-    [--model M] <extra>`, TASK.md on stdin. `dontAsk` denies
+    --strict-mcp-config --disable-slash-commands [--model M] <extra>`, TASK.md on stdin (none of the
+    user's MCP servers, skills or commands are loaded into a session). `dontAsk` denies
     whatever the rules don't allow: reading the workspace, editing ./scene, and `livepaper
     check|still|bench|live|thumbnail|compile|help` (Claude Code checks each part of a compound
     command). `acceptEdits` is not used: it auto-approves edits and mv/cp anywhere in the workspace.

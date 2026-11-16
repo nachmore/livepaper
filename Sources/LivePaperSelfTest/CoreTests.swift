@@ -1189,6 +1189,7 @@ extension SelfTests {
                                                "--disallowedTools", "WebFetch,WebSearch,Edit(./bin/**),Edit(./sdk/**),Edit(./.livepaper/**)," +
                                                    "Edit(./.kiro/**),Edit(./AGENTS.md),Edit(./CLAUDE.md),Edit(./TASK.md)," +
                                                    "Edit(./references/**),Edit(./scene/assets/reference.*)",
+                                               "--strict-mcp-config", "--disable-slash-commands",
                                                "--model", "haiku", "--x", "1"])
             try expect(!claude.arguments.joined(separator: " ").contains("livepaper:*") && !claude.arguments.contains("acceptEdits"))
             try expectEqual(claude.stdinFile, ws.taskFile)

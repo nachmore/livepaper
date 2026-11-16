@@ -213,9 +213,13 @@ struct PromptEditor: View {
     let placeholder: String
     var onImages: (([ReferenceInput], [String]) -> Void)?
     var onDropTargeted: ((Bool) -> Void)?
+    var label: String = "Prompt"
+    /// Return sends (see PromptTextView.onReturn); nil: Return adds a new line.
+    var onReturn: (() -> Bool)?
 
     var body: some View {
-        PromptTextView(text: $text, hint: placeholder, onImages: onImages, onDropTargeted: onDropTargeted)
+        PromptTextView(text: $text, hint: placeholder, onImages: onImages, onDropTargeted: onDropTargeted,
+                       label: label, onReturn: onReturn)
             .padding(8)
             .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(alignment: .topLeading) {
