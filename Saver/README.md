@@ -9,19 +9,21 @@ and how to build and test it.
 
 | File | What it does |
 |---|---|
-| `LivePaperSaverView.swift` | Principal class (`@objc(LivePaperSaverView)`). Lifecycle, run gate, scene selection, crossfades, recovery, system events. |
-| `SaverLogic.swift` | All pure, Foundation-only decisions: playlist validation, sessions/epochs, deck order, schedule, back-off, run gate and its policy, lock-UI state, clock geometry/format, web bridge JSON, Options summary. Unit tested. |
+| `LivePaperSaverView.swift` | Principal class (`@objc(LivePaperSaverView)`). Lifecycle, run gate, scene selection, displays (in-process join, display plan, live/still/off), crossfades, recovery, system events. |
+| `SaverLogic.swift` | All pure, Foundation-only decisions: playlist validation (and display-only scenes), sessions/epochs (and per-display history), deck order (with a spread for several displays), schedule, the display plan of every mode and span geometry, back-off, run gate and its policy, lock-UI state, clock geometry/format, web bridge JSON, Options summary. Unit tested. |
 | `SceneHost.swift` | The interface between the view and one scene on screen (`SceneHost`, `SceneContext`). |
 | `WebSceneHost.swift` | Web scenes: `PassiveWebView` (WKWebView), injected `LIVEPAPER_CONFIG`, `livepaper` message handler, host calls. |
-| `VideoSceneHost.swift` | Video scenes: `AVPlayerLayer` + `AVPlayerLooper`, muted, with the native clock. |
+| `VideoSceneHost.swift` | Video scenes: `AVPlayerLayer` + `AVPlayerLooper`, muted, with the native clock; one shared player per file for every display (`SharedVideoPlayers`), spanning by layer geometry, a still frame on battery. |
 | `ClockOverlay.swift` | Native lock-screen-style clock (`CATextLayer`s), once-a-minute ticks aligned to the minute. |
 | `FallbackSceneHost.swift` | Built-in scene when nothing is published or every scene failed. |
 | `OptionsSheet.swift` | The "Options…" sheet: read-only summary and "Open LivePaper…". |
-| `SaverSupport.swift` | os_log (incl. the `lifecycle` category), power source, notification relay, session-lock, display-sleep and ScreenSaverEngine/frontmost-app queries, dev-host overrides, ScreenSaverDefaults store. |
+| `SaverSupport.swift` | os_log (incl. the `lifecycle` category), power source, notification relay (incl. screen changes), session-lock, display-sleep and ScreenSaverEngine/frontmost-app queries, displays (`SaverDisplays`: keys, arrangement), dev-host overrides, ScreenSaverDefaults store. |
 | `Info.plist`, `Resources/thumbnail*.png` | Bundle metadata; System Settings thumbnail (drawn by `scripts/dev/render-saver-thumbnail.swift`). |
 
 The saver also compiles `Sources/LivePaperCore/Playlist/PlaylistModel.swift` (the playlist
-contract); it has no other dependency on LivePaperCore.
+contract), `Sources/LivePaperCore/Playlist/DisplayLayout.swift` (display keys, arrangement, virtual
+canvas) and `Sources/LivePaperCore/Render/SceneNavigationGate.swift`; it has no other dependency on
+LivePaperCore.
 
 ## Behaviour
 
@@ -72,6 +74,12 @@ other views of the same process that are running, and the window's state:
 | `willstop` precedes the host's exit; `didstop` ends a run | `willstop` **Verified** (clean `exit(0)` 0.5 s later, 15/15). `didstop` **Verified in disassembly** (ScreenSaverEngine quits on it); its delivery to the saver is assumed. |
 | ScreenSaverEngine runs exactly while a saver it started is up | **Verified in disassembly**: on macOS 26 it only calls `SACScreenSaverStartNow` and idles until `didstop`. Querying it from the sandbox (`NSRunningApplication`) is assumed to work; it is re-read on every lifecycle event because the launch notification may not be posted for this background app. |
 | System Settings' preview host: frontmost-app and window visibility signals inside the sandbox | **Unknown.** An unknown frontmost app counts as "in front"; window signals that never say "visible" are ignored. |
+| All displays' views run in one host process | **Verified** (lifecycle log of a real lock with two displays: two views, one pid, `new` then `joined` session 100 ms apart). |
+| `NSScreen.screens`, `window.screen`, `CGDisplayCreateUUIDFromDisplayID`, `CGDisplayIsBuiltin` in the sandbox | **Assumed** (the `load` line logs the arrangement and this view's display; an unknown display plays as if alone). |
+| `NSApplication.didChangeScreenParametersNotification` in the host | **Unknown** (the arrangement is also re-read at every start and when the window changes screen; `event=screensChanged` shows it arriving). |
+| A view is created for a display connected mid-run | **Unknown** (if so, it joins the running views' session in-process). |
+| macOS's lock-UI clock on displays other than the main one | **Unknown** (every display hands its clock off as before). |
+| One `AVPlayer` behind several `AVPlayerLayer`s | AVFoundation-documented; **assumed** in this host (`sharedLayers` in the video host's diagnostics). |
 
 Questions the logs answer: does the prewarm view get `startAnimation` (an `event=startAnimation`
 long before any lock)? Does `event=saverDidStart` arrive at real starts, and before or after the
@@ -97,6 +105,39 @@ inside `Playlist/` with a matching extension (`html`/`htm`, `mov`/`mp4`/`m4v`) a
 are logged. A missing, unreadable or empty playlist shows the fallback: a dark gradient, the
 native clock and "Open LivePaper to choose a scene".
 
+**Displays.** Every display's view runs in the same host process. Each view finds its display
+(`window.screen` → `NSScreenNumber` → `CGDisplayCreateUUIDFromDisplayID`, uppercase — the wallpaper
+store's form; "DISPLAY-<id>" without a UUID), the arrangement (`NSScreen.screens`, turned into
+top-left global points), its index in a stable order (left edge, then top edge, then key) and the
+main display (the built-in one if it is on, else the menu-bar screen) — at every start, on screen
+changes and when its window moves to another screen — and logs them on the `load` line
+(`display 2/3 main=0 mode=different liveness=still lead=0 key=37D8832A`). The playlist's `displays`
+setting (`SaverDisplayPlan`) then decides what it shows: *same* (as before); *different* (display k
+plays k steps ahead in the deck); *choose* (its assigned scene, from the deck or `displayScenes`,
+without cycling; the playlist when it has none or the scene keeps failing); *span* (a step whose scene
+supports it is drawn across all displays: each shows its viewport of the union of all frames; the
+others play as *same*). Different and span need two displays. Previews, and a display the view can't
+find in the arrangement, play as *same*. On battery or in Low Power Mode every display but the main
+one follows `onBattery`: the scene, a **still** (web: the page loaded paused with its clock hidden —
+one frame, no frame loop; video: one decoded frame, no player; fallback: no clock or hint; still
+displays still cycle with the playlist, one page load per cycle) or **off** (no scene, no timers:
+black; with span the main display then shows the whole scene). Power and screen changes are followed
+live (`event=displays reason=power|screens|window`): another scene or slice crossfades in, live ⇄
+still switches in place.
+
+**Spanning.** All displays share the seed and the time origin (the step's start, wall clock), so
+web slices line up frame for frame (`timeOrigin` in `LIVEPAPER_CONFIG`; the runtime offsets the
+page's drawing, SCENE_API.md §16); the runtime's governor is off. There is one clock, on the main
+display, placed by the scene's clock position inside that display: web pages get the main
+display's viewport as the clock box (`lp.clockRect` is the same on every display), video and
+fallback scenes create a native clock only there. A spanning video is one shared player whose layer
+is framed as the whole canvas, offset by −viewport, and clipped by the host view.
+
+**Shared video.** Displays showing the same video (same file and publish) lease one `AVQueuePlayer`
++ `AVPlayerLooper` (`SharedVideoPlayers`), each with its own `AVPlayerLayer` and readiness: it plays
+while any lease runs (each display still pauses with its own gate) and is released with the last
+lease; a looper failure fails every leaseholder, and their retries create a fresh player.
+
 **Scene selection.** `shuffle`, `sequence` or `single`. Every display decides independently but
 identically: a display joins the session recorded by another display if that session is still
 running (no willstop yet) and started less than 45 s earlier. Otherwise it starts a new session in
@@ -109,7 +150,17 @@ the scene shown last or with any of the newest ⌊n/2⌋ of an n-scene deck, so 
 through the deck, and sequence continues after the scene shown last. Each shuffled pass is
 reshuffled without repeating across the pass boundary. What a session's first scene avoids is
 frozen in the record when the session starts (`startRecent`), so a display that joins builds the
-same deck. By then the history already holds the scene the first display is showing. Scene changes
+same deck. By then the history already holds the scene the first display is showing. A view that
+starts while another view of the same process runs joins that view's session in-process, however
+old it is (a display connected mid-run must share the time origin); the store-based join above is
+the fallback. With *different*, display k plays step s + k of a deck whose `spread` is the number of
+displays: any d consecutive steps are distinct (across reshuffles too, so the displays differ
+whenever the deck has at least d scenes; with fewer, display k matches display k + n), the start
+avoids the newest min(⌊n/2⌋, n − d) recent scenes in all d positions, and no display starts with the
+scene it showed last (`shownOn`, display key → scene, frozen at the session start as `startShownOn`);
+with n ≥ 2d nothing that was on screen at the end of the last session comes back first. Only the last
+display in order that shows anything writes `lastShown`, so *sequence* continues after it. With
+`spread` 1 the deck is exactly the single-display one (`saver.deck.spread1MatchesLegacy`). Scene changes
 happen every `cycleMinutes` at wall-clock steps from the session start, so displays switch together
 and a view that slept catches up. Changes crossfade (2 s; first reveal 0.6 s). Bookkeeping is a
 single blob in ScreenSaverDefaults (see the pitfalls in `SaverSupport.swift`); previews never write
@@ -225,14 +276,19 @@ LivePaperCore — hence the `#if canImport(LivePaperCore)` at the top of the fil
 swift run LivePaperSelfTest saver
 ```
 
-They cover playlist validation, the deck (determinism, no repeats over many seeds, sequence and
-single), sessions (displays that join build the same deck after the first display recorded its
-scene, epoch boundaries, ended sessions, quick re-locks, displays keeping each other's history,
-damaged records), the schedule, back-off, events and
+They cover playlist validation (and display-only scenes), the deck (determinism, no repeats over
+many seeds, sequence and single; the spread for several displays against a frozen copy of the
+single-display deck, displays differing for 1–4 displays and 1–8 scenes, no display repeating
+itself over 30 re-locks), sessions (displays that join build the same deck after the first display
+recorded its scene, epoch boundaries, ended sessions, quick re-locks, displays keeping each other's
+history, damaged records, per-display history and the lead), the display plan of every mode ×
+display count × power × battery setting (assignments, span per scene, previews and unknown displays),
+span geometry (video layer frames, the clock), the schedule, back-off, events and
 lock-UI state, the run gate (prewarm, explicit starts, display sleep, release, previews, the
 policy switches), clock geometry (against the runtime's numbers) and locale
 formatting, the web bridge JSON, performance resolution, the Options summary and the bundle
-contract (Info.plist, principal class name, thumbnails). They use temp directories only.
+contract (Info.plist, principal class name, thumbnails). They use temp directories only. (The
+runtime's span logic is tested in `runtime.span.jsLogic`, its pixels in `runtime.e2e.spanCrops`.)
 
 **End-to-end dev host (one GUI launch).** `scripts/dev/saverhost-lp.swift` loads the built bundle
 the way the host does and drives one scripted scenario through off-screen windows in a
@@ -280,8 +336,14 @@ ScreenSaverEngine from tooling.
   lock and `didstart` and both render (`othersRunning=1` in the log); unverified.
 * Whether System Settings' preview host reports its window's visibility and the frontmost app to
   the sandboxed saver is unverified; previews then fall back to "visible".
-* A display that starts more than 45 s after another begins a new session and may pick a different
-  scene (it still avoids the recent scenes).
+* A display in another host process that starts more than 45 s after another begins a new session
+  and may pick a different scene (it still avoids the recent scenes). In the same process it joins.
+* Connecting or disconnecting a display while the saver runs changes the arrangement: in *different*
+  and *span* the other displays may switch scene or slice (with a crossfade). Bezels aren't
+  compensated (System Settings' arrangement is the truth), and spanning web slices on displays with
+  different refresh rates can be up to a frame apart.
+* Recovery moves only the failing display on: in *different* two displays may briefly show the same
+  scene.
 * A session counts as ended only once willstop arrives. If a run ends without one (for example a
   prewarmed instance behind a direct lock, which just releases its scene after the unlock), a
   re-lock within 45 s of that session's start joins it and shows its first scene again.

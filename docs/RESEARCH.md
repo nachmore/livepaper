@@ -101,6 +101,25 @@ something, and falls back to a guided manual step.
 * A sandboxed process may post a distributed notification only with `userInfo == nil`. Any data
   goes in the `object` string.
 
+### 4.1 Several displays
+
+* **All displays' saver views run in one `legacyScreenSaver` process** (Verified, from the saver's
+  lifecycle log during a real lock with two displays: two views, one pid, the first starting a new
+  session and the second joining it about 100 ms later). So a process-wide object — one AVPlayer
+  for every display showing a video, one session for every display — is shared by all displays.
+* `NSScreen.screens`, `window.screen` (`NSScreenNumber`), `CGDisplayCreateUUIDFromDisplayID` and
+  `CGDisplayIsBuiltin` inside the sandboxed host: **Inferred** to work (they are plain WindowServer
+  and CoreGraphics queries; the saver logs the arrangement it sees at every start, and a display it
+  can't identify plays as if it were the only one).
+* `NSApplication.didChangeScreenParametersNotification` inside the host: **Unknown**. The saver also
+  re-reads the arrangement at every start and when its window changes screen.
+* Whether a view is created for a display connected while the saver runs: **Unknown**. If one is,
+  it joins the running views' session in-process (so it shares their time origin and seed).
+* Whether macOS draws its lock-UI clock on displays other than the main one: **Unknown**. Every
+  display hands its clock off on `screenLockUIIsShown` as before.
+* One `AVPlayer` behind several `AVPlayerLayer`s is documented AVFoundation behaviour; that it works
+  in this host is **Inferred**.
+
 ## 5. Selecting the screen saver: the wallpaper store
 
 ### 5.1 The file
