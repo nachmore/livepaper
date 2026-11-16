@@ -66,14 +66,25 @@ declare namespace LivePaper {
     readonly gl: WebGLRenderingContext | WebGL2RenderingContext | null;
     /** The context actually created. */
     readonly context: ContextKind;
-    /** Viewport size in CSS pixels. Draw in these units (2D contexts are pre-scaled by dpr). */
+    /** Canvas size in CSS pixels: the display, or the whole virtual canvas while the scene spans
+     *  several displays (`span`). Draw in these units (2D contexts are pre-scaled by dpr). */
     readonly w: number;
     readonly h: number;
     /** Canvas pixels per CSS pixel: display density × governor scale (e.g. 2 × 0.75 = 1.5). */
     readonly dpr: number;
-    /** Canvas size in device pixels (w × dpr, h × dpr). Use for WebGL. */
+    /** Canvas size in device pixels (w × dpr, h × dpr): the whole virtual canvas while spanning. Use
+     *  for WebGL and device-pixel work, never canvas.width or gl.drawingBufferWidth. */
     readonly pw: number;
     readonly ph: number;
+    /** The part of the canvas this page shows (CSS px): {0, 0, w, h} unless spanning. */
+    readonly viewport: Rect;
+    /** The scene spans several displays: this page shows `viewport` of the canvas (SCENE_API.md §16). */
+    readonly span: boolean;
+    /** Device-pixel offset of this page's slice in GL's bottom-left convention:
+     *  gl_FragCoord.xy + fragOffset = the position in the whole canvas. [0, 0] unless spanning. */
+    readonly fragOffset: readonly [number, number];
+    /** Where the clock is laid out: the whole canvas, or the main display's part of it while spanning. */
+    readonly clockBox: Rect;
     /** Centre, short side, long side, aspect ratio (w / h), in CSS pixels. */
     readonly cx: number;
     readonly cy: number;
@@ -93,7 +104,8 @@ declare namespace LivePaper {
     readonly rand: () => number;
     /** 0.5–1. Drops when the governor detects frames over budget; draw fewer particles when < 1. */
     readonly quality: number;
-    /** Where the runtime clock is (CSS px), or null if the runtime draws no clock. Keep it calm. */
+    /** Where the runtime clock is (CSS px, canvas coordinates: the same on every display while
+     *  spanning), or null if the runtime draws no clock. Keep it calm. */
     readonly clockRect: Rect | null;
     /** False while no clock should be visible: the user hid it, or the macOS lock UI (with Apple's
      *  clock) is on screen. Scenes that draw their own clock must hide it then. */
@@ -257,6 +269,21 @@ declare namespace LivePaper {
     budgetMs: number;
     /** Post a 'stats' message every N seconds; 0 = never. */
     statsEvery: number;
+    /** Spanning displays (all CSS px; on when spanW and spanH are > 0): the virtual canvas, this
+     *  page's viewport origin in it (its size is the window's), and the main display's viewport
+     *  (the clock box; default the whole canvas). */
+    spanW: number;
+    spanH: number;
+    spanX: number;
+    spanY: number;
+    spanClockX: number;
+    spanClockY: number;
+    spanClockW: number;
+    spanClockH: number;
+    /** Live mode: ms since 1970 at which lp.t = 0 (wall-clock time base shared by every display). 0 = off. */
+    timeOrigin: number;
+    /** Start paused: one frame, no frame loop, until host.resume(). */
+    paused: boolean;
   }
 
   interface Host {
@@ -308,7 +335,8 @@ declare namespace LivePaper {
   /** Messages posted to the native host via webkit.messageHandlers.livepaper.postMessage(). */
   type HostMessage =
     | { type: 'ready'; mode: Mode; scene: string | null; t: number; errors: number;
-        clockRect: ReturnType<Debug['clockRect']>; bench?: number; frames?: number; failed?: boolean }
+        clockRect: ReturnType<Debug['clockRect']>; viewport: Rect | null; span: boolean; hasUpdate: boolean;
+        bench?: number; frames?: number; failed?: boolean }
     | { type: 'error'; message: string }
     | Stats;
 }
@@ -317,7 +345,8 @@ interface Window {
   LivePaper: typeof LivePaper;
   /** Injected by the host before the runtime runs. */
   LIVEPAPER_CONFIG?: Partial<LivePaper.Config>;
-  /** Injected by the compiler: manifest metadata. */
+  /** Injected by the compiler: manifest metadata. (scene.json's `"span": true` — SCENE_API.md §16 —
+   *  is read by the playlist, not by the page.) */
   LIVEPAPER_SCENE?: { id: string; name: string; clock: LivePaper.ClockPosition; runtime: number; line: number };
   /** Injected by the compiler: assets/ as data: URLs. */
   LIVEPAPER_ASSETS?: Record<string, string>;

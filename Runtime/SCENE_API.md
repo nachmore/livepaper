@@ -22,6 +22,7 @@ Exact types: `livepaper.d.ts`. A complete example: `templates/web/`.
 13. [Rules](#13-rules)
 14. [Checking a scene](#14-checking-a-scene-livepaper-check)
 15. [Host bridge (for host developers)](#15-host-bridge-for-host-developers)
+16. [Spanning several displays](#16-spanning-several-displays)
 
 ## 1. Quick start
 
@@ -77,7 +78,7 @@ A scene is a directory (`<id>.lpscene` in the library):
 
 | File | |
 |---|---|
-| `scene.json` | Manifest. `id` is kebab-case (`a-z`, `0-9`, inner `-`, ≤ 64 chars). `clock.position` is `top`, `bottom-left`, `bottom-right` or `none`. `performance` is written by `livepaper check`; don't edit it. |
+| `scene.json` | Manifest. `id` is kebab-case (`a-z`, `0-9`, inner `-`, ≤ 64 chars). `clock.position` is `top`, `bottom-left`, `bottom-right` or `none`. `"span": true` declares that the scene may stretch across several displays (§16). `performance` is written by `livepaper check`; don't edit it. |
 | `scene.js` | All the code. A classic script (not an ES module): no `import`/`export`, no other files are loaded. |
 | `assets/` | Optional small images, fonts, JSON or shader sources, inlined at compile time (§11). |
 | `.check/` | Output of the last `livepaper check` (report + PNGs). Not published. |
@@ -121,9 +122,13 @@ One object, updated in place and passed to every callback.
 |---|---|
 | `canvas` | The full-viewport stage canvas. |
 | `ctx` / `gl` | The 2D context, or the WebGL context (the other is `null`). `context` says which. |
-| `w`, `h` | Viewport size in **CSS pixels**. Lay out in these units. |
+| `w`, `h` | Canvas size in **CSS pixels** — the display, or the whole virtual canvas while a scene spans several displays (§16). Lay out in these units. |
 | `dpr` | Canvas pixels per CSS pixel = display density × render scale (e.g. 2 × 0.75 = 1.5). |
-| `pw`, `ph` | Canvas size in device pixels (`w × dpr`, `h × dpr`). Use for WebGL. |
+| `pw`, `ph` | Canvas size in device pixels (`w × dpr`, `h × dpr`). Use for WebGL and device-pixel work (never `canvas.width` or `gl.drawingBufferWidth`). |
+| `viewport` | `{x, y, w, h}`: the part of the canvas this page shows (CSS px). `{0, 0, w, h}` unless spanning (§16). |
+| `span` | `true` while the scene spans several displays (§16). |
+| `fragOffset` | `[x, y]`: device-pixel offset of this page's slice in the canvas, in GL's bottom-left convention: `gl_FragCoord.xy + fragOffset` is the position in the whole canvas. `[0, 0]` unless spanning. |
+| `clockBox` | `{x, y, w, h}`: the region the clock is laid out in — the whole canvas, or the main display's part of it while spanning (§16). |
 | `cx`, `cy`, `min`, `max`, `aspect` | Centre, short side, long side, `w / h`. Screens range from 32:9 ultra-wides to 5:4. |
 | `scale` | Render scale from the performance profile and governor (already included in `dpr`). |
 | `t`, `dt`, `frame` | Scene time (s), seconds since the last frame (≤ 0.1), frame counter. |
@@ -427,7 +432,9 @@ LivePaper draws an Apple-style lock-screen clock (date above a large time, SF fo
 
 **Keep the clock region dark and calm.** The clock is white; `livepaper check` measures the
 scene's brightness behind it (with the clock hidden) and fails scenes that make it hard to read.
-`lp.clockRect` tells you where it is, e.g. to keep particles or bright features out of it.
+`lp.clockRect` tells you where it is, e.g. to keep particles or bright features out of it. While a
+scene spans several displays there is one clock, on the main display, and `lp.clockRect` is the
+same (canvas coordinates) on every display (§16).
 
 **The hand-off.** When the user touches the keyboard or mouse on the lock screen, macOS draws its
 own lock UI — including Apple's clock at **top centre** — over the running scene. LivePaper then
@@ -539,7 +546,10 @@ LivePaper.scene({
 });
 ```
 
-* Use `lp.pw`/`lp.ph` for the drawing-buffer size; the runtime resizes the canvas.
+* Use `lp.pw`/`lp.ph` for the drawing-buffer size; the runtime resizes the canvas. (While spanning,
+  `lp.pw`/`lp.ph` are the whole canvas and the runtime offsets `gl.viewport`/`gl.scissor` on the
+  default framebuffer, so never use `gl.drawingBufferWidth`/`Height` or `canvas.width`; add
+  `lp.fragOffset` to `gl_FragCoord` when a shader needs absolute positions — §16.)
 * **Uniforms are 32-bit floats.** A raw `lp.t` uniform, or noise coordinates like `p + u_time * k`,
   lose precision the longer the screen saver runs: after hours, drifts start to step and hash-based
   noise can break up. Compute what moves in JavaScript (doubles) and pass bounded values: offsets as
@@ -625,17 +635,75 @@ at document start) < URL hash (`#still=1&t=12&clock=0&debug=1`, for development)
 `LivePaper.host.config({...})` at run time. Keys: `still`, `t`, `bench`, `manual`, `clock`,
 `clockPosition`, `hour12`, `clockTime`, `fps`, `scale`, `dprMax`, `performance`, `power`,
 `lowPower`, `reducedMotion`, `preview`, `lockUI`, `seed`, `debug`, `governor`, `budgetMs`,
-`statsEvery` (see `livepaper.d.ts`).
+`statsEvery`, and for spanning displays (§16) `spanW`, `spanH`, `spanX`, `spanY`, `spanClockX`,
+`spanClockY`, `spanClockW`, `spanClockH`, `timeOrigin` (ms since 1970: in live mode `lp.t` is then
+the wall-clock time since it, the same on every display) and `paused` (start paused: one frame, no
+frame loop, until `host.resume()`) — see `livepaper.d.ts`. All of them work in the URL hash too.
 
 Host → page: `LivePaper.host.config(obj)`, `.pause()`, `.resume()`, `.lockUI(bool)`,
 `.power({power, lowPower, reducedMotion, fps, scale, performance})`, `.advance(dt)` (manual mode).
 
 Page → host, via `webkit.messageHandlers.livepaper.postMessage(...)`:
-`{type: 'ready', mode, scene, t, errors, clockRect, bench?, frames?, failed?}` once the first frame
-is drawn (`failed: true` if the scene never registered), `{type: 'error', message}` per distinct
+`{type: 'ready', mode, scene, t, errors, clockRect, viewport, span, hasUpdate, bench?, frames?, failed?}`
+once the first frame is drawn (`failed: true` if the scene never registered), `{type: 'error', message}` per distinct
 error (repeats are capped), `{type: 'stats', …}` on governor changes or every `statsEvery` seconds.
 
 Modes: **still** (`still: true, t`) steps to `t` and draws one frame; **bench** (`bench: N, t`)
 steps to `t`, warms up, renders N frames synchronously and reports ms/frame; **manual**
 (`manual: true`) draws on `host.advance(dt)` for frame-by-frame capture; otherwise **live**.
 `LivePaper.debug.clockRect()` / `.stats()` / `.errors()` / `.overlay(bool)` serve the render server.
+
+## 16. Spanning several displays
+
+With "Span across displays" (the playlist's *Multiple displays* setting), one scene stretches over
+every display, as they are arranged in System Settings › Displays. Only scenes whose `scene.json`
+says `"span": true` span; the others show on every display as usual.
+
+**The canvas.** The virtual canvas is the union of all displays' frames (points = CSS px), gaps
+included (parts no display covers are simply never seen). Each display runs its own page that
+shows its **viewport** of that canvas: `lp.w`/`lp.h` (and `cx`, `cy`, `min`, `max`, `aspect`) are
+the **whole canvas**, `lp.pw`/`lp.ph` its device pixels, and `lp.viewport` is this page's part.
+
+**Slicing is automatic** — draw the whole canvas as you would one screen:
+
+* 2D: the runtime offsets the stage context, including your own absolute `setTransform(...)` /
+  `resetTransform()` calls (`getTransform()` reports the un-offset matrix, so round trips work).
+  Device-pixel drawing with `setTransform(1, 0, 0, 1, 0, 0)` and `lp.pw`/`lp.ph` lines up too.
+* WebGL: `gl.viewport` and `gl.scissor` on the default framebuffer are offset for you (offscreen
+  framebuffers are untouched), so a full-canvas quad with varying UVs spans as is.
+
+**Requirements for `"span": true`** — the scene must be a pure function of `lp.t`, the seed and the
+canvas size, because every display renders its own frames:
+
+* no `update()` (accumulated state drifts apart between displays) and no `Math.random()`
+  (`livepaper check` rejects both); use seeded `LivePaper.util.mulberry32`/`hash2`;
+* lay out from `lp.w`/`lp.h`, never `innerWidth`/`innerHeight`, `canvas.width`/`height` or
+  `gl.drawingBufferWidth`/`Height`; use `lp.pw`/`lp.ph` for device pixels;
+* don't branch layout on `lp.quality`, `lp.scale` or `lp.dpr` (the governor is off while spanning, so
+  quality stays 1, but displays can have different densities);
+* don't read the stage back (`getImageData`/`putImageData`/`drawImage(lp.canvas)` on the stage
+  canvas); offscreen layers are fine;
+* a shader that needs absolute positions uses `gl_FragCoord.xy + lp.fragOffset` (a uniform);
+  dithering with plain `gl_FragCoord` is harmless.
+
+**Time.** Every display gets the same seed and the same time origin (the moment the scene came on),
+so `lp.t` is the wall-clock time since then on every display and the slices line up frame for frame
+(displays at different refresh rates are at most a frame apart).
+
+**The clock.** There is one clock, on the main display (the built-in display, else the one with
+the menu bar), placed by `clock.position` inside that display's part of the canvas: `lp.clockBox`
+is that part, `lp.clockRect` the clock in canvas coordinates — identical on every display, so a
+layout that keeps the clock region calm agrees everywhere. A scene with `clock: 'none'` that draws
+its own clock should place it inside `lp.clockBox`.
+
+**Cost and memory.** Every display still issues the whole canvas's draw calls (only the pixels it
+fills are its own), so a spanning scene costs each display about what it costs there alone; you may
+skip work outside `lp.viewport`. Canvas-sized `LivePaper.util.layer`s are capped at 16 megapixels
+while spanning (a lower density for very large canvases); a very wide WebGL canvas may render at a
+lower density to stay within `MAX_VIEWPORT_DIMS`.
+
+**Checking.** For a scene with `"span": true`, `livepaper check` renders a 4072×1440 canvas (a
+1512×982 laptop bottom-aligned next to a 2560×1440 display) at t = 12 as a whole and as each
+display's slice, and fails the scene when a slice doesn't match its crop of the whole
+(`.check/span-B-t12-*.png`, `span` in `report.json`). Quick checks skip the renders but not the
+`update()`/`Math.random()` rules.

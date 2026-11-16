@@ -9,7 +9,7 @@ full-screen canvas through the LivePaper runtime.
 | Path | |
 |---|---|
 | `scene/` | **The scene you are working on. The only place you may create or change files.** |
-| `scene/scene.json` | Manifest: `name`, `description`, `tags`, `clock.position`. Keep `id`, `kind`, `runtime`, `schema` as they are; never edit `performance` (the check writes it). |
+| `scene/scene.json` | Manifest: `name`, `description`, `tags`, `clock.position` (and `span`, see "Spanning displays" below). Keep `id`, `kind`, `runtime`, `schema` as they are; never edit `performance` (the check writes it). |
 | `scene/scene.js` | All of the scene's code (a classic script that calls `LivePaper.scene({...})` once). |
 | `scene/assets/` | Optional small images/fonts/JSON/shaders, read with `LivePaper.image/text/asset(name)`. |
 | `scene/.check/` | Written by `livepaper check`: `report.json`, full-size PNG stills, and small JPEG copies of them in `previews/`. Read it; don't edit it. |
@@ -61,6 +61,11 @@ full-screen canvas through the LivePaper runtime.
 * **Cheap.** Pre-render static layers in `resize()`, batch shapes into a few `Path2D` fills, use
   `LivePaper.util.glow` sprites instead of `shadowBlur`/`ctx.filter`, no per-frame
   `getImageData`/`toDataURL`, and draw fewer particles when `lp.quality < 1` (SCENE_API.md §9).
+* **Spanning displays (optional).** Add `"span": true` to `scene/scene.json` only if the scene is a
+  pure function of `lp.t`, its seeds and `lp.w`/`lp.h` — no `update()`, no `Math.random()`, nothing
+  laid out from `innerWidth`, `canvas.width` or `gl.drawingBufferWidth` — so it can stretch across
+  several displays; `livepaper check` then renders it as a whole and per display and fails it when
+  the slices don't line up (SCENE_API.md §16).
 
 ## Make it feel alive
 
