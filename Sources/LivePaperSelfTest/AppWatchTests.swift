@@ -61,32 +61,47 @@ extension SelfTests {
             try expectEqual(LibraryWatcher.canonicalPath(dir.appendingPathComponent("not/yet")), real + "/not/yet")
         },
         TestCase(name: "app.watch.debounce") {
+            // Signals are scheduled on the debouncer's own queue at absolute deadlines, and what has
+            // fired is read on that queue right after a burst's last signal — not by sleeping on the
+            // test thread, so a stall on a busy CI runner can't stretch a gap past the delay or make a
+            // check run late. When the queue catches up after a stall, due items run in deadline order.
             let queue = DispatchQueue(label: "selftest.debounce")
             let fired = WatchLog<DiskChanges>()
-            let debouncer = ChangeDebouncer(queue: queue, delay: 0.15, maxDelay: 0.6) { fired.append($0) }
-            // A burst (signals 30 ms apart) fires once, after it ends, with the union.
-            for i in 0..<6 {
-                queue.async { debouncer.signal(i == 3 ? .playlist : .library) }
-                Thread.sleep(forTimeInterval: 0.03)
+            let debouncer = ChangeDebouncer(queue: queue, delay: 0.25, maxDelay: 0.8) { fired.append($0) }
+            /// Schedules `count` signals `spacing` apart and returns how many fires there were when
+            /// the last one had run (read on the queue, before any later flush).
+            func burst(_ count: Int, spacing: Double, _ changes: @escaping (Int) -> DiskChanges) -> Int {
+                let start = DispatchTime.now(), done = DispatchSemaphore(value: 0)
+                var seen = 0
+                for i in 0..<count {
+                    queue.asyncAfter(deadline: start + spacing * Double(i)) {
+                        debouncer.signal(changes(i))
+                        if i == count - 1 { seen = fired.values.count; done.signal() }
+                    }
+                }
+                done.wait()
+                return seen
             }
-            try expectEqual(fired.values, [])
-            Thread.sleep(forTimeInterval: 0.4)
+            func waitFor(_ count: Int, within limit: TimeInterval = 5) {
+                let deadline = Date().addingTimeInterval(limit)
+                while fired.values.count < count && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
+            }
+            // A burst (signals 30 ms apart) fires once, after it ends, with the union.
+            try expectEqual(burst(6, spacing: 0.03) { $0 == 3 ? .playlist : .library }, 0)
+            waitFor(1)
             try expectEqual(fired.values, [.all])
             // Nothing pending: nothing fires; an empty signal is ignored.
             queue.async { debouncer.signal([]) }
-            Thread.sleep(forTimeInterval: 0.3)
+            Thread.sleep(forTimeInterval: 0.5)
             try expectEqual(fired.values.count, 1)
-            // A burst that doesn't end still fires (maxDelay), so the UI can't fall behind for long.
-            for _ in 0..<30 {
-                queue.async { debouncer.signal(.library) }
-                Thread.sleep(forTimeInterval: 0.05)
-            }
-            try expect(fired.values.count >= 3, "fired \(fired.values.count - 1) times during a 1.5 s burst")
-            Thread.sleep(forTimeInterval: 0.4)
+            // A burst that doesn't end still fires (maxDelay), so the UI can't fall behind for long:
+            // 2 s of signals 50 ms apart fire at least twice before the burst is over.
+            try expect(burst(40, spacing: 0.05) { _ in .library } - 1 >= 2, "fired \(fired.values.count - 1) times during a 2 s burst")
+            waitFor(fired.values.count + 1, within: 2)        // the burst's tail
             let afterBurst = fired.values.count
             // cancel() drops what is pending.
             queue.sync { debouncer.signal(.playlist); debouncer.cancel() }
-            Thread.sleep(forTimeInterval: 0.4)
+            Thread.sleep(forTimeInterval: 0.5)
             try expectEqual(fired.values.count, afterBurst)
         },
         TestCase(name: "app.watch.package-add-remove") {
