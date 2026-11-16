@@ -72,6 +72,10 @@ final class WindowRouter {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var observers: [(NotificationCenter, NSObjectProtocol)] = []
+    /// SIGTERM (`kill`, scripts/dev-install.sh, an uninstall script) quits like ⌘Q, so running AI
+    /// sessions' agents are stopped first instead of being left running on their own (their output
+    /// would reach no one).
+    private var terminationSignal: DispatchSourceSignal?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Menu-bar app: no Dock icon until the main window appears (DockIconPolicy). Info.plist
@@ -92,6 +96,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if !model.environment.isMock { observeLockState(model) }
         observeActivation(model)
         observeScreens(model)
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .main)
+        source.setEventHandler { NSApp.terminate(nil) }
+        source.resume()
+        terminationSignal = source
     }
 
     /// Connecting a display gives it a wallpaper-store record copied from SystemDefault; if that is

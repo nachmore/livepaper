@@ -1,12 +1,13 @@
 #!/bin/bash
 # Installs a locally built LivePaper.app (scripts/build.sh) for the current user.
 #
-#   scripts/dev-install.sh [--app PATH] [--dest DIR] [--launch] [--link-cli [DIR]]
+#   scripts/dev-install.sh [--app PATH] [--dest DIR] [--launch] [--link-cli [DIR]] [--force]
 #
 #   --app PATH       the bundle to install (default: build/LivePaper.app)
 #   --dest DIR       install into DIR (default: where LivePaper is already installed, else
 #                    /Applications when it is writable, else ~/Applications)
 #   --launch         open LivePaper afterwards (first launch runs the guided setup)
+#   --force          install even while an AI session runs (quitting the app stops it)
 #   --link-cli [DIR] symlink the bundled `livepaper` CLI into DIR (default ~/.local/bin)
 #
 # It quits a running LivePaper first (the helper and render daemon are restarted by launchd / on
@@ -24,11 +25,13 @@ SRC="$ROOT/build/LivePaper.app"
 DEST_DIR=""
 LAUNCH=0
 LINK_DIR=""
+FORCE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --app) SRC="$2"; shift 2 ;;
     --dest) DEST_DIR="$2"; shift 2 ;;
     --launch) LAUNCH=1; shift ;;
+    --force) FORCE=1; shift ;;
     --link-cli)
       if [ $# -gt 1 ] && [ "${2#--}" = "$2" ]; then LINK_DIR="$2"; shift 2; else LINK_DIR="$HOME/.local/bin"; shift; fi ;;
     -h|--help) sed -n '2,19p' "$0"; exit 0 ;;
@@ -85,11 +88,24 @@ for d in /Applications "$HOME/Applications"; do
   fi
 done
 
+# Quitting LivePaper stops its AI sessions' agents (AgentShutdown): never do that behind the user's
+# back. An agent runs in a workspace under the support directory and carries LIVEPAPER_AI_SESSION.
+running_sessions() {
+  # shellcheck disable=SC2009  # pgrep can't match the environment
+  ps -E -ww -U "$(id -u)" -o pid=,command= 2>/dev/null | grep -F 'LIVEPAPER_AI_SESSION=' | grep -v -F 'grep' || true
+}
+if [ "$FORCE" = 0 ] && pgrep -x LivePaper >/dev/null 2>&1 && [ -n "$(running_sessions)" ]; then
+  echo "✗ an AI session is running in LivePaper; installing would quit the app and stop it." >&2
+  echo "  Let it finish (or stop it in LivePaper), then install again — or pass --force." >&2
+  exit 1
+fi
+
 # Quit the running app (SIGTERM lets it shut its embedded render server down cleanly).
 if pgrep -x LivePaper >/dev/null 2>&1; then
   echo "▸ quitting the running LivePaper"
   pkill -TERM -x LivePaper || true
-  for _ in $(seq 1 50); do pgrep -x LivePaper >/dev/null 2>&1 || break; sleep 0.1; done
+  # Up to 15 s: with --force, quitting first stops the AI sessions' agents (a few seconds).
+  for _ in $(seq 1 150); do pgrep -x LivePaper >/dev/null 2>&1 || break; sleep 0.1; done
   if pgrep -x LivePaper >/dev/null 2>&1; then echo "✗ LivePaper is still running; quit it and try again" >&2; exit 1; fi
 fi
 
