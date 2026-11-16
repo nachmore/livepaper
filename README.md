@@ -8,6 +8,8 @@ battery use before it ever reaches your lock screen.
 * A menu-bar app with a library of scenes, a playlist, and guided setup.
 * Web scenes (one JavaScript file on a full-screen canvas) and video scenes (hardware-decoded).
 * AI authoring from the app or the terminal, checked by LivePaper itself — never on the agent's word.
+* Reference images: paste, drop or pick images or folders as a starting point — or have the agent
+  animate one exact picture.
 * Your usual lock keys (⌃⌘Q, Apple menu › Lock Screen, the Touch ID / lock key) can show the scene.
 * One-step uninstall that puts everything back.
 
@@ -86,6 +88,15 @@ re-run from Settings and only changes what still needs it.
   session — the agent's messages, tool calls and the stills it renders while it iterates. When the
   agent finishes, LivePaper runs its own check; a passing scene can be added to the library (or,
   for *Modify with AI…*, replace the scene — the previous version is kept in its history).
+  To give the agent **reference images**, paste them (⌘V, e.g. a screenshot), drop images or
+  folders onto the card, or click *Add Images…* (up to 10). Each is a reference — inspiration for
+  style, colours and composition — or, for one of them, *Animate this image*: the scene then shows
+  that exact picture, cover-filling any screen, and brings it to life (water shimmer, drifting mist,
+  a slow camera), and LivePaper's check makes sure it still looks like the picture. The agent works
+  from copies LivePaper makes in its workspace (resized, metadata such as location removed); a
+  path typed into the prompt gets an *Attach* suggestion, because the agent can't open files
+  elsewhere on your Mac. LivePaper itself uploads nothing (the agent shows the images it looks at to
+  its model, like the rest of the session), and *Try Again* keeps them.
 * **By hand.** `livepaper new "Aurora Lake"` scaffolds a web scene from the template; edit its
   `scene.js` (see [Runtime/SCENE_API.md](Runtime/SCENE_API.md)) and run `livepaper check` on it.
 * **The playlist.** Choose which scenes the screen saver shows, shuffle / in sequence / one scene,
@@ -112,6 +123,7 @@ is limited to editing the scene and running those commands (details in
 | `import <video \| .lpscene \| .zip> [--name N] [--battery]` | add a video or a scene package |
 | `publish [--scenes a,b\|all] [--mode M] [--cycle MIN] [--performance P] [--clock\|--no-clock]` | update the playlist settings (optional) and publish into the installed saver |
 | `ai create "<prompt>"` / `ai modify <id> "<prompt>"` | run an AI session in the terminal; `--harness claude\|codex\|kiro\|custom`, `--command "<template>"`, `--model`, `--timeout`, `--yes` to accept without asking, `--json` for one JSON event per line |
+| `ai create [...] --ref <image\|folder>… [--animate <image>]` | the same with reference images (up to 10; `--ref` is repeatable and folders expand) and at most one picture to animate exactly; the prompt may be left out when images are given (also for `ai modify`) |
 | `ai harnesses` | the AI command-line tools LivePaper found |
 | `doctor [--no-ai] [--json]` | saver, helper, lock settings, render server, library and AI tools; exits 1 when something needs fixing |
 | `uninstall [--yes] [--keep-scenes] [--dry-run]` | undo everything LivePaper changed (see below) |

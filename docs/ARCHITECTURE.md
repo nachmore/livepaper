@@ -565,7 +565,10 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   named as not attached. When the harness exits LivePaper puts the picture back if it changed (and says
   so), and the final check compares the stills with it (`CheckOptions.reference`, kept in memory — the
   index in the workspace is in the agent's reach). Nothing is fetched or uploaded; pasted or dropped
-  data never touches a temporary file; names and paths never reach the workspace, logs or history.
+  image data stays in memory — LivePaper writes no temporary files (a drop that macOS hands over as a
+  file, such as a Photos file promise, is read from macOS's own temporary copy, size-checked first,
+  which macOS deletes as soon as it has been read); names and paths never reach the workspace, logs or
+  history.
 * **What an agent may run** (`AISessionPolicy`): every harness process carries
   `LIVEPAPER_AI_SESSION`, `LIVEPAPER_AI_WORKSPACE` and `LIVEPAPER_RENDER_SPOOL` (and not
   `LIVEPAPER_CLI`/`LIVEPAPER_RENDERD`). The shim sets them again and passes on only `check`,
@@ -603,17 +606,40 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     Clone, Modify with AI…, Export, Delete, check report and provenance.
   * *Create* — **Video** (drop a file; optional "optimise for battery" HEVC transcode) and
     **Describe it** (prompt, agent + model picker, reference images) → live session view.
-  * *Reference images* (`Logic/ReferenceTray.swift`; the Describe-it card and the Modify with AI
-    sheet): images, folders and pasted/dropped image data are prepared when added — off the main
-    thread, one at a time — so starting the session only hands over bytes; at most 10 (failed ones
-    don't count), duplicates by real path skipped, one "Animate this image" (choosing it for one
-    demotes the other), a note for whatever was left out. Paths typed into the prompt are offered
-    as "Attach" suggestions (never attached silently; paths in Desktop/Documents/Downloads/iCloud
-    Drive/volumes aren't looked at until clicked, so typing never raises a privacy prompt).
-    `ReferencePasteRules` decides whether ⌘V is images (a screenshot, Finder copies of images or
-    folders, Safari's Copy Image) or text; `ReferenceDropReader` turns drops into files, image data
-    or — for web URLs — a note (nothing is downloaded). A session keeps its prepared references, so
-    Try Again / Try Again with Feedback / Start Again reuse them (`AppModel.retry`).
+  * *Reference images* (`Views/Create/ReferenceTrayView.swift` over `Logic/ReferenceTray.swift`;
+    the Describe-it card, between the prompt and the ideas, and — with smaller tiles — the Modify
+    with AI sheet). Ways in: ⌘V in the prompt box (`Views/Common/PromptTextView.swift`, an
+    NSTextView whose paste hands images to the tray and pastes text as usual; it enables Paste for an
+    image-only pasteboard such as a screenshot), ⌘V while the tray or another control of the card has
+    focus (`onPasteCommand`), drops anywhere on the card or sheet (Finder files and folders, Photos,
+    a browser's image data; the prompt box takes image drops itself and leaves text drops alone), and
+    "Add Images…" (an open panel for images and folders, several at once). Images, folders and
+    pasted/dropped image data are prepared when added — off the main thread, one at a time — so
+    starting the session only hands over bytes; at most 10 (failed ones don't count), duplicates by
+    real path skipped, a note for whatever was left out. Each tile (88 pt, 72 in the sheet; the
+    thumbnail is the prepared copy decoded small off the main thread through `ThumbnailCache`) has a
+    remove button, a role menu ("Reference — inspiration for style, colours and composition" /
+    "Animate this image — the scene shows this exact picture, brought to life"; choosing it for one
+    demotes the other; the picture to animate gets an accent border and a film badge), the same in
+    its context menu, Delete when focused, and a VoiceOver label ("Reference image 2 of 4,
+    sunset.heic, animate") with Remove / Animate actions. Images that can't be added stay as marked
+    tiles with the reason listed under the tray (and, on the Create card, in a banner); "Preparing 2
+    images…" replaces the footer line and Generate / Start wait meanwhile. With images attached the
+    prompt may be left empty (`PromptComposer.effectivePrompt` asks for the default request). Paths
+    typed into the prompt are offered, about 0.4 s after typing pauses, as "Attach" chips ("The agent
+    can't open “refs” on your Desktop. Attach copies of its images?" — Attach Folder, or Attach /
+    Animate It for an image; × hides it); never attached silently, and paths in
+    Desktop/Documents/Downloads/iCloud Drive/volumes aren't looked at until clicked, so typing never
+    raises a privacy prompt. In the prompt box Tab moves to the next control and quotes and dashes
+    stay as typed (paths and code survive). `ReferencePasteRules` decides whether a paste is images
+    (a screenshot, Finder copies of images or folders, Safari's Copy Image) or text and what it
+    holds; `ReferenceDropReader` turns drops into files, image data or — for web URLs — a note
+    (nothing is downloaded). The session view shows the session's references (header "· 3
+    references"; a References box of thumbnails with the "Animate" badge, from the copies held in
+    memory, as the workspace's are pruned after a day), and a session keeps its prepared references,
+    so Try Again / Try Again with Feedback / Start Again reuse them (`AppModel.retry`). A check
+    report of an animate session adds "Looks like the picture: 0.92" (§9), and the scene's history
+    "· 3 reference images (1 animated)".
   * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, profile) → Save & Publish; a
     publish that left scenes out lists them with the reason (and a banner says so).
 * **Full-screen preview** (`Views/FullScreen/`): one borderless black window on one screen (the
@@ -660,7 +686,9 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
 * **Developer modes:** `LIVEPAPER_MOCK=1` runs on sample data in a temp directory with mock
   services (nothing on the system changes; Lock Now only shows a notice). Debug builds:
   `.build/debug/LivePaperApp --snapshot <dir> [--only name,…]` renders every key screen with mock
-  data to PNGs and exits (`.prohibited` activation policy, off-screen windows, no live previews).
+  data to PNGs and exits (`.prohibited` activation policy, off-screen windows, no live previews);
+  `create-references-light`, `modify-references-dark` and `session-references-light` show the
+  reference tray, the sheet's compact tray and a session's references with generated pictures.
 
 ## 12. Performance & battery policy
 * Budgets enforced by `livepaper check` (§9), shown in the UI as energy badges.
