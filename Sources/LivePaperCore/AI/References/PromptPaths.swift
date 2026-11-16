@@ -10,7 +10,10 @@
 // Paths are often pasted unquoted with plain spaces (Finder's Copy as Pathname, macOS screenshot
 // names like "Screenshot 2026-11-15 at 10.41.23.png"): an unquoted path that stops at a space or a
 // parenthesis is carried on across a few words when that reaches an image file name in a way that
-// reads like one name (see `extend`), never by looking at the disk.
+// reads like one name, or a folder name ending in "/" (see `extend`), never by looking at the disk.
+// Where the words don't say ("~/Desktop/Summer Trip for the palette", a folder Finder copies without
+// a trailing slash), the mention keeps the shorter path and carries the longer readings as
+// `alternatives`, which `resolveReadings` tries on disk when something may look (a click, the CLI).
 import Foundation
 import UniformTypeIdentifiers
 
@@ -23,8 +26,14 @@ public struct PromptPathMention: Sendable, Equatable {
     /// Expanded (`~`, `file://`, escapes) and standardized.
     public var url: URL
     public var kind: Kind
-    public init(text: String, range: Range<String.Index>, url: URL, kind: Kind) {
-        self.text = text; self.range = range; self.url = url; self.kind = kind
+    /// Other readings of an unquoted path, in the order to try them when this one names nothing on
+    /// disk (`PromptPaths.resolveReadings`): for a path that was carried on across spaces, the token
+    /// it started from first; then the token carried on word by word to the end of its clause
+    /// ("~/Desktop/Summer" → "~/Desktop/Summer Trip", "~/Desktop/Summer Trip for", …). Syntax only;
+    /// empty for quoted paths and for paths that end the clause.
+    public var alternatives: [PromptPathMention]
+    public init(text: String, range: Range<String.Index>, url: URL, kind: Kind, alternatives: [PromptPathMention] = []) {
+        self.text = text; self.range = range; self.url = url; self.kind = kind; self.alternatives = alternatives
     }
 }
 
@@ -65,37 +74,45 @@ public enum PromptPaths {
                 token.removeLast(); length -= (String(last) as NSString).length
                 endsClause = true
             }
+            let tokenEnd = m.range.location + length
+            let words = endsClause ? [] : Self.words(in: ns, after: tokenEnd)
             var span = NSRange(location: m.range.location, length: length)
-            switch endsClause ? .none : extend(token, in: ns, after: m.range.location + m.range.length) {
-            case .extended(let longer, let end):
-                token = longer
-                span = NSRange(location: m.range.location, length: end - m.range.location)
+            var chosen = token
+            if let longer = extend(token, words: words, in: ns, after: tokenEnd) {
+                chosen = longer.text
+                span = NSRange(location: m.range.location, length: longer.end - m.range.location)
                 covered.append(span)   // later matches inside it are part of this path
-            case .fragment: continue   // the start of a longer path that can't be read: no bogus folder
-            case .none: break
             }
-            guard let range = Range(span, in: text) else { continue }
-            if let mention = make(token, range: range, home: home, quoted: false) { found.append(mention) }
+            guard let range = Range(span, in: text), var mention = make(chosen, range: range, home: home, quoted: false) else { continue }
+            // The other readings, for a look on disk later: the token it started from, then longer ones.
+            var others = chosen == token ? [] : [(text: token, end: tokenEnd)]
+            others += readings(token, words: words, in: ns, after: tokenEnd).filter { $0.text != chosen }
+            for reading in others {
+                guard let r = Range(NSRange(location: m.range.location, length: reading.end - m.range.location), in: text),
+                      let other = make(reading.text, range: r, home: home, quoted: false),
+                      other.url != mention.url, !mention.alternatives.contains(where: { $0.url == other.url }) else { continue }
+                mention.alternatives.append(other)
+            }
+            found.append(mention)
         }
         return found.sorted { $0.range.lowerBound < $1.range.lowerBound }
     }
 
-    enum Extension: Equatable { case none, extended(String, end: Int), fragment }
+    /// A word after an unquoted path on its line: as typed, without the sentence punctuation after
+    /// it, and where that ends (UTF-16 offset).
+    struct Word: Equatable {
+        var text: String
+        var trimmed: String
+        var end: Int
+        /// Sentence punctuation follows it: the clause (and so the path) ends there.
+        var endsClause: Bool { trimmed != text }
+    }
 
-    /// Carries an unquoted `token` (ending at UTF-16 offset `end` of `text`) on across spaces and
-    /// parentheses, word by word on the same line (≤ `maxExtraWords`, ≤ `maxExtraLength`), stopping
-    /// at a word that starts another path. It is carried on to the first word that ends in an image
-    /// file name when that reads like one name — a single word ("old photo.jpg", "photo (1).png"),
-    /// a folder name with a slash ("My Refs/heron.png"), a parenthesis that opens right after the
-    /// token and closes in the file name ("photo (copy 2).png", not "refs (the folder) and x.png"),
-    /// a word with a digit before the last ("Screenshot 2026-11-15 at 10.41.23.png"), or only
-    /// capitalised words before it ("My Holiday Photo.png") — and not otherwise ("refs and
-    /// sunset.png" stays the folder refs); or to a word ending in "/" within two
-    /// words ("My Refs/"). A token directly followed by a word with a slash inside that leads
-    /// nowhere is a `fragment`.
-    static func extend(_ token: String, in text: NSString, after end: Int) -> Extension {
-        guard !token.hasSuffix("/"), !ReferenceFolders.isImageFileName(token) else { return .none }
-        var words: [(text: String, start: Int, end: Int)] = []
+    /// The words after `end` on the same line that may still belong to an unquoted path
+    /// (≤ `maxExtraWords`, ≤ `maxExtraLength`), stopping at a delimiter or a word that starts
+    /// another path.
+    static func words(in text: NSString, after end: Int) -> [Word] {
+        var words: [Word] = []
         var i = end
         let limit = min(text.length, end + maxExtraLength)
         func isSpace(_ c: unichar) -> Bool { c == 0x20 || c == 0x09 || c == 0xA0 || c == 0x202F || c == 0x2009 }
@@ -110,32 +127,80 @@ public enum PromptPaths {
             while k < limit, !isBreak(text.character(at: k)) { k += 1 }
             let word = text.substring(with: NSRange(location: j, length: k - j))
             if word.hasPrefix("/") || word.hasPrefix("~/") || word.hasPrefix("file://") { break }
-            words.append((word, j, k))
-            i = k
-        }
-        guard !words.isEmpty else { return .none }
-        for (n, w) in words.enumerated() {
-            var trimmed = w.text, wordEnd = w.end
+            var trimmed = word, wordEnd = k
             while let last = trimmed.last, trailing.contains(last) {
                 trimmed.removeLast(); wordEnd -= (String(last) as NSString).length
             }
-            guard !trimmed.isEmpty else { break }
-            let candidate = token + text.substring(with: NSRange(location: end, length: wordEnd - end))
+            words.append(Word(text: word, trimmed: trimmed, end: wordEnd))
+            i = k
+        }
+        return words
+    }
+
+    /// `token` (ending at UTF-16 offset `end` of `text`) carried on across `words`, one more word
+    /// each, shortest first, to the end of its clause: after a word with sentence punctuation, a
+    /// reading that ends in "/" or an image file name, nothing more belongs to it.
+    static func readings(_ token: String, words: [Word], in text: NSString, after end: Int) -> [(text: String, end: Int)] {
+        guard !token.hasSuffix("/"), !ReferenceFolders.isImageFileName(token) else { return [] }
+        var out: [(text: String, end: Int)] = []
+        for w in words {
+            guard !w.trimmed.isEmpty else { break }
+            let candidate = token + text.substring(with: NSRange(location: end, length: w.end - end))
+            out.append((candidate, w.end))
+            if w.endsClause || candidate.hasSuffix("/") || ReferenceFolders.isImageFileName(candidate) { break }
+        }
+        return out
+    }
+
+    /// The reading of an unquoted `token` that is the path when the words say so (nil: the token as
+    /// it is) — carried on across spaces and parentheses within its clause (`words`). It is carried on
+    /// to the first word that ends in an image file name when that reads like one name — a single
+    /// word ("old photo.jpg", "photo (1).png"), a folder name with a slash ("My Old Refs/heron.png"),
+    /// a parenthesis that opens right after the token and closes in the file name ("photo (copy
+    /// 2).png", not "refs (the folder) and x.png"), a word before it that looks like a date, a time
+    /// or a year ("Screenshot 2026-11-15 at 10.41.23.png"; a count such as "3" doesn't), only
+    /// capitalised words before it ("My Holiday Photo.png"), or Finder's "copy" ("heron copy
+    /// 2.png") — and not otherwise ("refs and sunset.png", "refs for 3 more like x.png" stay the
+    /// folder refs); or to a word within two words that ends a folder name in "/" ("My Refs/", not the
+    /// shorthand "w/"). Anything else stays the token, with the longer readings as alternatives.
+    static func extend(_ token: String, words: [Word], in text: NSString, after end: Int) -> (text: String, end: Int)? {
+        guard !token.hasSuffix("/"), !ReferenceFolders.isImageFileName(token) else { return nil }
+        for (n, w) in words.enumerated() {
+            guard !w.trimmed.isEmpty else { break }
+            let candidate = token + text.substring(with: NSRange(location: end, length: w.end - end))
             if ReferenceFolders.isImageFileName(candidate) {
                 let extra = words[0...n].map(\.text)
-                let parenthesised = words[0].text.hasPrefix("(") && !extra.dropLast().contains { $0.contains(")") }
-                let reads = n == 0 || extra.contains { $0.contains("/") } || parenthesised
-                    || extra.dropLast().contains { $0.contains(where: \.isNumber) }
-                    || extra.dropLast().allSatisfy { $0.first?.isUppercase == true }
-                return reads ? .extended(candidate, end: wordEnd) : .none
+                let before = extra.dropLast()
+                let parenthesised = extra[0].hasPrefix("(") && !before.contains { $0.contains(")") }
+                let reads = n == 0 || hasFolderPart(w.trimmed) || parenthesised || before.contains(where: looksLikeDateOrTime)
+                    || before.allSatisfy { $0.first?.isUppercase == true } || before.allSatisfy { $0.lowercased() == "copy" }
+                return reads ? (candidate, w.end) : nil
             }
-            if n < 2, w.text.hasSuffix("/") || trimmed.hasSuffix("/") {
-                return .extended(candidate, end: wordEnd)
-            }
+            if n < 2, endsFolderName(w.trimmed) { return (candidate, w.end) }
+            if w.endsClause { break }
         }
-        let first = words[0].text
-        if first.dropLast().contains("/") { return .fragment }
-        return .none
+        return nil
+    }
+
+    /// "Refs/" ends a folder name; "w/" (shorthand for "with") and "/" alone don't.
+    static func endsFolderName(_ word: String) -> Bool {
+        guard word.hasSuffix("/") else { return false }
+        return (word.dropLast().split(separator: "/").last?.count ?? 0) >= 2
+    }
+
+    /// "Refs/heron.png": a folder name (two characters or more) before the file name.
+    static func hasFolderPart(_ word: String) -> Bool {
+        let parts = word.split(separator: "/", omittingEmptySubsequences: false)
+        return parts.count >= 2 && parts.dropLast().allSatisfy { $0.count >= 2 }
+    }
+
+    /// "2026-11-15", "10.41.23", "12:30", "2024": a date, a time or a year in a file name — not a
+    /// count in a sentence ("3", "12", "100").
+    static func looksLikeDateOrTime(_ word: String) -> Bool {
+        let c = Array(word)
+        if c.filter(\.isNumber).count >= 4 { return true }
+        guard c.count >= 3 else { return false }
+        return (1..<(c.count - 1)).contains { ".:-_".contains(c[$0]) && c[$0 - 1].isNumber && c[$0 + 1].isNumber }
     }
 
     private static func make(_ typed: String, range: Range<String.Index>, home: URL, quoted: Bool) -> PromptPathMention? {
@@ -195,12 +260,30 @@ public enum PromptPaths {
         }
     }
 
+    /// `m`, or the first of its other readings (`alternatives`) that names something, with what it
+    /// names: `resolve` (the file system, or a test's stand-in) is asked about `m` first and about
+    /// the others in order while the answer is `.missing` — so "~/Desktop/Summer Trip for the
+    /// palette" finds the folder "Summer Trip", and a longer reading that isn't there falls back to the
+    /// shorter one. `m` and `.missing` when none of them is there. Touches the file system: only when
+    /// LivePaper may look (a click on a suggestion, paths outside the privacy-protected folders).
+    public static func resolveReadings(_ m: PromptPathMention, using resolve: (PromptPathMention) -> Resolution = { PromptPaths.resolve($0) })
+        -> (mention: PromptPathMention, resolution: Resolution) {
+        let first = resolve(m)
+        guard first == .missing else { return (m, first) }
+        for other in m.alternatives {
+            let found = resolve(other)
+            if found != .missing { return (other, found) }
+        }
+        return (m, .missing)
+    }
+
     /// `prompt` with every mention of an attached image (or of a folder they came from) replaced by
     /// its workspace name, plus the mentions that weren't attached. No file-system access: matches
     /// are by the paths the references were added with (as given, and real). The attached files'
-    /// paths are also replaced wherever they appear literally (as given, real, `~/…`, with `\ `
-    /// escapes, as a file URL), so an attached path never survives into TASK.md or the history,
-    /// however `mentions` read it.
+    /// paths, and the folders they came from (below the home folder and /), are also replaced
+    /// wherever they appear literally (as given, real, `~/…`, with `\ ` escapes, as a file URL; a
+    /// folder with or without its trailing "/"), so an attached path never survives into TASK.md or
+    /// the history, however `mentions` read it ("use ~/Desktop/Summer Trip for the palette").
     public static func rewrite(_ prompt: String, attached: [PreparedReference], home: URL = LPPaths.home)
         -> (text: String, unattached: [PromptPathMention]) {
         let ns = prompt as NSString
@@ -209,13 +292,16 @@ public enum PromptPaths {
         }
         var edits: [(range: NSRange, with: String)] = []
         func free(_ r: NSRange) -> Bool { !edits.contains { NSIntersectionRange($0.range, r).length > 0 } }
+        func folderName(_ indexes: [Int]) -> String { "`\(ReferenceWorkspace.directoryName)/` (\(indexList(indexes)))" }
 
-        // 1. Literal occurrences of the attached files' paths, longest first.
-        var forms: [(text: String, file: String)] = []
+        // 1. Literal occurrences of the attached files' paths and of the folders they came from, longest first.
+        var forms: [(text: String, with: String)] = []
+        func add(_ form: String, _ with: String) { if !forms.contains(where: { $0.text == form }) { forms.append((form, with)) } }
         for p in paths {
-            for path in p.paths {
-                for form in Self.forms(of: path, home: home) where !forms.contains(where: { $0.text == form }) { forms.append((form, p.file)) }
-            }
+            for path in p.paths { for form in Self.forms(of: path, home: home) { add(form, "`\(p.file)`") } }
+        }
+        for folder in sourceFolders(paths.map { ($0.index, $0.paths) }, home: home) {
+            for form in Self.forms(of: folder.path, home: home, folder: true) { add(form, folderName(folder.indexes)) }
         }
         forms.sort { ($0.text as NSString).length > ($1.text as NSString).length }
         for form in forms {
@@ -226,24 +312,28 @@ public enum PromptPaths {
                 search = NSRange(location: r.location + r.length, length: ns.length - r.location - r.length)
                 guard isBoundary(ns, before: r.location), isBoundary(ns, after: r.location + r.length) else { continue }
                 let widened = widenToQuotes(r, in: ns)
-                if free(widened) { edits.append((widened, "`\(form.file)`")) }
+                if free(widened) { edits.append((widened, form.with)) }
             }
         }
 
-        // 2. Mentions: an attached image, a folder attached images came from, or not attached.
+        // 2. Mentions — or one of their other readings: an attached image, a folder attached images
+        //    came from, or not attached.
         var unattached: [PromptPathMention] = []
-        for m in mentions(in: prompt, home: home) {
-            let p = m.url.path
-            let where_ = NSRange(m.range, in: prompt)
-            guard free(where_) else { continue }
-            if let hit = paths.first(where: { $0.paths.contains(p) }) {
-                edits.append((where_, "`\(hit.file)`"))
-                continue
-            }
-            let inside = paths.filter { $0.paths.contains { $0.hasPrefix(p + "/") } }.map(\.index)
-            if !inside.isEmpty {
-                edits.append((where_, "`\(ReferenceWorkspace.directoryName)/` (\(indexList(inside)))"))
-                continue
+        mentions: for m in mentions(in: prompt, home: home) {
+            guard free(NSRange(m.range, in: prompt)) else { continue }
+            for reading in [m] + m.alternatives {
+                let p = reading.url.path
+                let where_ = NSRange(reading.range, in: prompt)
+                guard free(where_) else { continue }
+                if let hit = paths.first(where: { $0.paths.contains(p) }) {
+                    edits.append((where_, "`\(hit.file)`"))
+                    continue mentions
+                }
+                let inside = paths.filter { $0.paths.contains { $0.hasPrefix(p + "/") } }.map(\.index)
+                if !inside.isEmpty {
+                    edits.append((where_, folderName(inside)))
+                    continue mentions
+                }
             }
             unattached.append(m)
         }
@@ -255,14 +345,40 @@ public enum PromptPaths {
         return (text as String, unattached)
     }
 
-    /// The ways a path may have been typed: as is, `~/…`, with `\ ` escapes, as a file URL.
-    static func forms(of path: String, home: URL) -> [String] {
+    /// The ways a path may have been typed: as is, `~/…`, with `\ ` escapes, as a file URL (for a
+    /// folder each with and without a trailing "/"). No file-system access.
+    static func forms(of path: String, home: URL, folder: Bool = false) -> [String] {
         var out = [path]
         let homePath = home.standardizedFileURL.path
         if path.hasPrefix(homePath + "/") { out.append("~/" + path.dropFirst(homePath.count + 1)) }
         for p in out where p.contains(" ") { out.append(p.replacingOccurrences(of: " ", with: "\\ ")) }
-        out.append(URL(fileURLWithPath: path).absoluteString)
+        if folder { out += out.map { $0 + "/" } }
+        let url = URL(fileURLWithPath: path, isDirectory: folder).absoluteString
+        out.append(url)
+        if folder, url.hasSuffix("/") { out.append(String(url.dropLast())) }
         return out
+    }
+
+    /// The folders attached files came from, each with the files (their indexes) inside it: every
+    /// folder a file is in, up to the home folder (or, outside it, folders with at least two
+    /// components, as `mentions` reads them) — never the home folder, a folder that holds it, or /.
+    static func sourceFolders(_ files: [(index: Int, paths: [String])], home: URL) -> [(path: String, indexes: [Int])] {
+        let homePath = home.standardizedFileURL.path
+        var out: [(path: String, indexes: [Int])] = []
+        for file in files {
+            for path in file.paths {
+                var folder = (path as NSString).deletingLastPathComponent
+                while folder != homePath, !homePath.hasPrefix(folder + "/"), (folder as NSString).pathComponents.count >= 3 {
+                    if let i = out.firstIndex(where: { $0.path == folder }) {
+                        if !out[i].indexes.contains(file.index) { out[i].indexes.append(file.index) }
+                    } else {
+                        out.append((folder, [file.index]))
+                    }
+                    folder = (folder as NSString).deletingLastPathComponent
+                }
+            }
+        }
+        return out.map { ($0.path, $0.indexes.sorted()) }
     }
 
     /// No path character right before `i` (the match isn't the tail of a longer path).
@@ -271,11 +387,13 @@ public enum PromptPaths {
         return !(CharacterSet.alphanumerics.contains(c) || "/._-~\\".unicodeScalars.contains(c))
     }
 
-    /// No path character right after `i` (the match isn't the head of a longer name).
+    /// No path character right after `i` (the match isn't the head of a longer name or path: a
+    /// full stop ends a sentence, but not in "x.png.bak" or "~/Desktop/./more").
     private static func isBoundary(_ s: NSString, after i: Int) -> Bool {
         guard i < s.length, let c = Unicode.Scalar(s.character(at: i)) else { return true }
         if CharacterSet.alphanumerics.contains(c) || "/_-~".unicodeScalars.contains(c) { return false }
-        if c == ".", i + 1 < s.length, let d = Unicode.Scalar(s.character(at: i + 1)), CharacterSet.alphanumerics.contains(d) { return false }
+        if c == ".", i + 1 < s.length, let d = Unicode.Scalar(s.character(at: i + 1)),
+           CharacterSet.alphanumerics.contains(d) || "/.".unicodeScalars.contains(d) { return false }
         return true
     }
 

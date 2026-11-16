@@ -569,6 +569,16 @@ enum ReferenceTests {
             let mentioned = try builder(sb).buildSession(.create(prompt: "like ~/Desktop/heron.png"), sessionID: "r3")
             try expect(text(mentioned.workspace.taskFile).contains("## Files mentioned in the request"), text(mentioned.workspace.taskFile))
 
+            // A folder with a space in its name, typed unquoted without a trailing slash (Finder's Copy
+            // as Pathname): neither TASK.md nor the recorded prompt keeps its path, and nothing claims it
+            // wasn't attached.
+            let trip = try prepare(write(png(ReferenceFixtures.photo(.lake, width: 300, height: 200)),
+                                         src.appendingPathComponent("Summer Trip/lake-secret.png")))
+            let tripped = try builder(sb).buildSession(.create(prompt: "use \(src.path)/Summer Trip for the palette"), references: [trip], sessionID: "r7")
+            try expectEqual(tripped.taskPrompt, "use `references/` (ref-01) for the palette")
+            let tripTask = text(tripped.workspace.taskFile)
+            try expect(!tripTask.contains("Summer") && !tripTask.contains(src.path) && !tripTask.contains("weren't attached"), tripTask)
+
             // Numbered with the picture to animate first, whatever order they were given in: the
             // files, the rewritten prompt and the harness's attachments agree.
             let reordered = try builder(sb).buildSession(.create(prompt: "Animate \(src.path)/refs/heron-secret-name.jpg"),
@@ -789,8 +799,37 @@ enum ReferenceTests {
                         [["/Users/tester/Desktop/refs", "folder"]])
         try expectEqual(found("**~/Desktop/refs** and 3 like x.png").map { [$0.1, "\($0.2)"] }, [["/Users/tester/Desktop/refs", "folder"]])
         try expectEqual(paths("~/Desktop/a b /tmp/c.png"), ["/Users/tester/Desktop/a", "/tmp/c.png"])
-        // A fragment of a longer path that can't be read is no folder.
-        try expectEqual(paths("~/Desktop/My Refs/notes and more"), [])
+        try expectEqual(paths("animate ~/Pictures/heron copy 2.png"), ["/Users/tester/Pictures/heron copy 2.png"])
+        // Shorthand and counts aren't part of a name: "w/" isn't a folder's end, "and/or" no path,
+        // "3" no date (the old reading of all three: the folder refs).
+        for prompt in ["use ~/Pictures/refs w/ soft light", "use ~/Pictures/refs w/ sunset.png", "use ~/Pictures/refs for 3 more like sunset.png",
+                       "use ~/Pictures/refs and/or sunset.png"] {
+            try expectEqual(found(prompt).map { [$0.1, "\($0.2)"] }, [["/Users/tester/Pictures/refs", "folder"]])
+        }
+        try expectEqual(paths("use ~/Desktop/refs and/or ~/Pictures/x.png"), ["/Users/tester/Desktop/refs", "/Users/tester/Pictures/x.png"])
+        // A folder whose name has a space, without the trailing slash Finder's Copy as Pathname leaves
+        // off: the words don't say where it ends, so the mention is the shorter path, with the longer
+        // readings to its clause's end as alternatives (tried on disk by resolveReadings).
+        func alternatives(_ s: String) -> [[String]] {
+            PromptPaths.mentions(in: s, home: home).map { [$0.url.path] + $0.alternatives.map(\.url.path) }
+        }
+        let trip = "/Users/tester/Desktop/Summer"
+        try expectEqual(alternatives("use \(trip) Trip for the palette, and more"),
+                        [[trip, trip + " Trip", trip + " Trip for", trip + " Trip for the", trip + " Trip for the palette"]])
+        try expectEqual(alternatives("use ~/Desktop/untitled folder."), [["/Users/tester/Desktop/untitled", "/Users/tester/Desktop/untitled folder"]])
+        try expectEqual(PromptPaths.mentions(in: "use ~/Desktop/Summer Trip for", home: home).first?.alternatives.first.map(\.text),
+                        "~/Desktop/Summer Trip")
+        try expectEqual(alternatives("~/Desktop/a b /tmp/c.png"), [["/Users/tester/Desktop/a", "/Users/tester/Desktop/a b"], ["/tmp/c.png"]])
+        // A path carried on keeps the token it started from as its first alternative; a quoted path,
+        // or one that ends its clause, has none.
+        try expectEqual(alternatives("like ~/Pictures/photo (1).png"), [["/Users/tester/Pictures/photo (1).png", "/Users/tester/Pictures/photo"]])
+        try expectEqual(alternatives("like ~/Desktop/My Refs/ please"), [["/Users/tester/Desktop/My Refs", "/Users/tester/Desktop/My"]])
+        try expectEqual(alternatives("'~/Desktop/Summer Trip' and ~/Desktop/refs. Then more"), [["/Users/tester/Desktop/Summer Trip"], ["/Users/tester/Desktop/refs"]])
+        // The start of a longer path that can't be read keeps the shorter path, so a click can still
+        // find the folder (it used to be dropped).
+        try expectEqual(alternatives("~/Desktop/My Refs/notes and more"),
+                        [["/Users/tester/Desktop/My", "/Users/tester/Desktop/My Refs/notes", "/Users/tester/Desktop/My Refs/notes and",
+                          "/Users/tester/Desktop/My Refs/notes and more"]])
         // Folder names with dots; trailing punctuation; markdown; globs; ‘…’ quotes.
         try expectEqual(found("style from ~/Desktop/refs.old").map { [$0.1, "\($0.2)"] }, [["/Users/tester/Desktop/refs.old", "folder"]])
         try expectEqual(paths("in ~/Desktop/refs\u{2026}"), ["/Users/tester/Desktop/refs"])
@@ -840,6 +879,21 @@ enum ReferenceTests {
         let none = PromptPaths.rewrite("No paths here.", attached: refs, home: home)
         try expectEqual(none.text, "No paths here."); try expectEqual(none.unattached.count, 0)
 
+        // resolveReadings: the longer readings of an unquoted path when the shorter one isn't there,
+        // and the shorter one when a longer reading isn't.
+        let tripDir = try write(png(ReferenceFixtures.photo(.lake, width: 40, height: 30)), dir.appendingPathComponent("Summer Trip/a.png"))
+            .deletingLastPathComponent()
+        func readings(_ s: String) throws -> (path: String, resolution: PromptPaths.Resolution) {
+            let r = PromptPaths.resolveReadings(try SelfTests.unwrap(PromptPaths.mentions(in: s, home: home).first))
+            return (r.mention.url.path, r.resolution)
+        }
+        let trips = try readings("use \(dir.path)/Summer Trip for the palette")
+        try expectEqual(trips.path, tripDir.path); try expectEqual(trips.resolution, .folder(tripDir))
+        let holiday = try readings("use \(dir.path)/set My Holiday.png")   // read as the image "set My Holiday.png", which isn't there
+        try expectEqual(holiday.path, dir.path + "/set"); try expectEqual(holiday.resolution, .folder(dir.appendingPathComponent("set")))
+        let winter = try readings("use \(dir.path)/Winter Trip for the palette")
+        try expectEqual(winter.path, dir.path + "/Winter"); try expectEqual(winter.resolution, .missing)
+
         // An attached file whose path has spaces is replaced wherever it appears literally (as
         // given, ~/…, escaped), so it never survives into TASK.md or the history.
         let spaced = "/Users/tester/Desktop/Summer Trip/heron.png"
@@ -855,6 +909,25 @@ enum ReferenceTests {
         // Not inside a longer name.
         let longer = PromptPaths.rewrite("see \(spaced).bak and \(spaced)", attached: [heron], home: home)
         try expect(longer.text.hasPrefix("see \(spaced).bak and") && longer.text.hasSuffix("`references/ref-01.jpg`"), longer.text)
+        // The folder the attached files came from, however it was typed — unquoted with its space and
+        // no trailing slash too ("Summer Trip", attached by dropping or picking the folder, or --ref).
+        let egret = PreparedReference(role: .reference, displayName: "egret.png", requestedPath: "/Users/tester/Desktop/Summer Trip/egret.png",
+                                      originPath: "/Users/tester/Desktop/Summer Trip/egret.png", original: template.original,
+                                      master: template.master, vision: template.vision, summary: template.summary)
+        for folder in ["/Users/tester/Desktop/Summer Trip", "~/Desktop/Summer Trip", "'/Users/tester/Desktop/Summer Trip'", "\u{201C}~/Desktop/Summer Trip\u{201D}",
+                       #"~/Desktop/Summer\ Trip"#, "~/Desktop/Summer Trip/", "file:///Users/tester/Desktop/Summer%20Trip/",
+                       "file:///Users/tester/Desktop/Summer%20Trip"] {
+            let rw = PromptPaths.rewrite("use \(folder) for the palette", attached: [heron, egret], home: home)
+            try expectEqual(rw.text, "use `references/` (ref-01, ref-02) for the palette")
+            try expectEqual(rw.unattached.count, 0)
+        }
+        // … and only that folder: not a longer name, another file in it, the home folder or above.
+        let others = PromptPaths.rewrite("not ~/Desktop/Summer Trips, ~/Desktop/Summer Trip/other.png, /Users/tester or /Users; but ~/Desktop",
+                                         attached: [heron], home: home)
+        try expectEqual(others.text, "not ~/Desktop/Summer Trips, ~/Desktop/Summer Trip/other.png, /Users/tester or /Users; but `references/` (ref-01)")
+        try expectEqual(others.unattached.map(\.url.path), ["/Users/tester/Desktop/Summer", "/Users/tester/Desktop/Summer Trip/other.png"])
+        // A mention's longer reading that names the folder counts too, in a form no literal matches.
+        try expectEqual(PromptPaths.rewrite("like ~/Desktop/./Summer Trip for it", attached: [heron], home: home).text, "like `references/` (ref-01) for it")
     }
 
     // MARK: - The in-session check target
@@ -1595,6 +1668,41 @@ enum ReferenceTests {
             try SelfTests.awaitMain { await tray.updateSuggestions(for: "animate ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png") }
             try expectEqual(tray.suggestions.map(\.url.lastPathComponent), ["Screenshot 2026-11-15 at 10.41.23.png"])
             try expectEqual(tray.suggestions.map(\.kind), [.image])
+
+            // A folder whose name has a space, unquoted and without a trailing slash (Finder's Copy as
+            // Pathname): outside the protected folders it is looked up, longer readings too, and
+            // offered as itself; once attached it isn't offered again.
+            let trip = try write(png(ReferenceFixtures.photo(.lake, width: 30, height: 20)), dir.appendingPathComponent("Summer Trip/a.png"))
+                .deletingLastPathComponent()
+            let tripPrompt = "use \(trip.path) for the palette"
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: tripPrompt) }
+            try expectEqual(tray.suggestions.map(\.url.path), [trip.path])
+            try expectEqual(tray.suggestions.map(\.kind), [.folder])
+            tray.attach(try SelfTests.unwrap(tray.suggestions.first))
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(tray.items.last?.requestedPath, trip.appendingPathComponent("a.png").path)
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: tripPrompt) }
+            try expect(tray.suggestions.isEmpty, "attached: \(tray.suggestions.map(\.url.path))")
+            // On the Desktop it is offered unverified (as "Summer"); the click looks it up, finds
+            // "Summer Trip" and attaches its images — not "“Summer” wasn't found".
+            let desktopTrip = try write(png(ReferenceFixtures.photo(.city, width: 30, height: 20)),
+                                        home.appendingPathComponent("Desktop/Summer Trip/b.png")).deletingLastPathComponent()
+            let before = log.all.count
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "use ~/Desktop/Summer Trip for the palette") }
+            try expectEqual(tray.suggestions.map(\.url.path), [home.appendingPathComponent("Desktop/Summer").path])
+            try expect(log.all.count == before, "not looked up while typing")
+            tray.attach(try SelfTests.unwrap(tray.suggestions.first))
+            try SelfTests.awaitMain { await tray.settled() }
+            try expectEqual(Array(log.all.dropFirst(before)), [home.appendingPathComponent("Desktop/Summer").path, desktopTrip.path])
+            try expectEqual(tray.items.last?.displayName, "b.png")
+            try expect(!tray.notes.contains { $0.contains("Summer") }, "\(tray.notes)")
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "use ~/Desktop/Summer Trip for the palette") }
+            try expect(tray.suggestions.isEmpty, "\(tray.suggestions.map(\.url.path))")
+            // "w/" isn't part of a folder's name: the folder refs is offered, not "refs w".
+            let refsDir = dir.appendingPathComponent("refs")
+            _ = try write(png(ReferenceFixtures.photo(.lake, width: 30, height: 20)), refsDir.appendingPathComponent("c.png"))
+            try SelfTests.awaitMain { await tray.updateSuggestions(for: "use \(refsDir.path) w/ soft light") }
+            try expectEqual(tray.suggestions.map(\.url.path), [refsDir.path])
 
             // An empty folder named in the prompt: attaching it says so, and it isn't offered again.
             let empty = dir.appendingPathComponent("nothing-here")

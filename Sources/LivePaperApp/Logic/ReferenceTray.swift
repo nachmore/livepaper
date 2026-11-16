@@ -253,24 +253,30 @@ final class ReferenceTray {
 
     /// The image files and folders `prompt` names that aren't attached or dismissed. Paths in
     /// privacy-protected folders (Desktop, Documents, Downloads, iCloud Drive, volumes) are offered
-    /// unverified, so typing never triggers a privacy prompt; others are checked off the main thread.
+    /// unverified, so typing never triggers a privacy prompt; others are checked off the main thread
+    /// — with the longer readings of an unquoted path when the shorter one isn't there
+    /// ("~/Pictures/Summer Trip for the palette" offers "Summer Trip").
     func updateSuggestions(for prompt: String) async {
         suggestionGeneration += 1
         let generation = suggestionGeneration
         let attachedPaths = items.flatMap { [$0.originPath, $0.requestedPath].compactMap { $0 } }
-        let candidates = PromptPaths.mentions(in: prompt, home: home).filter { m in
+        let dismissed = self.dismissed
+        @Sendable func wanted(_ m: PromptPathMention) -> Bool {
             let p = m.url.path
-            guard !dismissed.contains(p) else { return false }
-            return !attachedPaths.contains { $0 == p || $0.hasPrefix(p + "/") }
+            return !dismissed.contains(p) && !attachedPaths.contains { $0 == p || $0.hasPrefix(p + "/") }
         }
+        let candidates = PromptPaths.mentions(in: prompt, home: home).filter(wanted)
         let home = self.home, resolve = self.resolve
         let kept = await Task.detached { () -> [PromptPathMention] in
             var out: [PromptPathMention] = []
             for m in candidates where !out.contains(where: { $0.url == m.url }) {
                 if PromptPaths.isPrivacyProtected(m.url, home: home) { out.append(m); continue }
-                switch resolve(m) {
-                case .image: var x = m; x.kind = .image; out.append(x)
-                case .folder: var x = m; x.kind = .folder; out.append(x)
+                let read = PromptPaths.resolveReadings(m, using: resolve)
+                var found = read.mention
+                guard found.url == m.url || (wanted(found) && !out.contains(where: { $0.url == found.url })) else { continue }
+                switch read.resolution {
+                case .image: found.kind = .image; out.append(found)
+                case .folder: found.kind = .folder; out.append(found)
                 case .missing, .notAnImage, .notPermitted: continue
                 }
             }
@@ -280,21 +286,23 @@ final class ReferenceTray {
         suggestions = kept
     }
 
-    /// Attaches what a suggestion names (looked up now, on the user's click). Whatever came of it,
-    /// the same path isn't suggested again (attached, or explained by a note).
+    /// Attaches what a suggestion names (looked up now, on the user's click — with the longer
+    /// readings of an unquoted path when it isn't there, or the shorter one when a longer reading
+    /// isn't). Whatever came of it, the same path isn't suggested again (attached, or explained by a note).
     func attach(_ m: PromptPathMention, animate: Bool = false) {
         suggestions.removeAll { $0.url == m.url }
         dismissed.insert(m.url.path)
         let resolve = self.resolve
         enqueue { [self] in
-            let found = await Task.detached { resolve(m) }.value
-            let name = m.url.lastPathComponent
+            let (mention, found) = await Task.detached { PromptPaths.resolveReadings(m, using: resolve) }.value
+            self.dismissed.insert(mention.url.path)
+            let name = mention.url.lastPathComponent
             switch found {
             case .image(let url): await self.process([.file(url, role: animate ? .animate : .reference)], animate: animate)
             case .folder(let url): await self.process([.file(url)], animate: false)
             case .missing: self.addNotes(["\u{201C}\(name)\u{201D} wasn't found; check the path in the prompt."])
             case .notAnImage: self.addNotes(["\u{201C}\(name)\u{201D} isn't an image or a folder."])
-            case .notPermitted: self.addNotes([ReferenceTrayText.notPermitted(m.url, home: self.home)])
+            case .notPermitted: self.addNotes([ReferenceTrayText.notPermitted(mention.url, home: self.home)])
             }
         }
     }

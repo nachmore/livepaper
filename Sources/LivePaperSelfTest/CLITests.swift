@@ -790,7 +790,22 @@ extension SelfTests {
             // A screenshot name with spaces: the whole name, quoted for the shell.
             r = try sb.run(["ai", "create", "animate ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png", "--command", agent.path], extraEnv: home)
             try expect(r.out.contains("the prompt mentions ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png (an image)") &&
-                       r.out.contains("add --ref '~/Desktop/Screenshot 2026-11-15 at 10.41.23.png'"), r.out)
+                       r.out.contains("add --ref '~/Desktop/Screenshot 2026-11-15 at 10.41.23.png'") && !r.out.contains("quote the whole path"), r.out)
+            // A folder whose name has a space, unquoted, without a trailing slash: where it may be
+            // looked up, the longer reading that exists is named (quoted for the shell); on the Desktop
+            // the hint can't know, and says to quote the whole path.
+            let trip = sb.root.appendingPathComponent("Summer Trip")
+            try FileManager.default.createDirectory(at: trip, withIntermediateDirectories: true)
+            try ReferenceFixtures.encode(ReferenceFixtures.photo(.lake, width: 120, height: 80), type: .png).write(to: trip.appendingPathComponent("a.png"))
+            r = try sb.run(["ai", "create", "use \(trip.path) for the palette", "--command", agent.path])
+            try expect(r.out.contains("the prompt mentions \(trip.path) (a folder)") && r.out.contains("add --ref '\(trip.path)' to attach copies") &&
+                       !r.out.contains("quote the whole path"), r.out)
+            r = try sb.run(["ai", "create", "use ~/Desktop/Summer Trip for the palette", "--command", agent.path], extraEnv: home)
+            try expect(r.out.contains("the prompt mentions ~/Desktop/Summer (a folder)") &&
+                       r.out.contains("If its name goes on after the space, quote the whole path."), r.out)
+            // "w/" ends no folder name.
+            r = try sb.run(["ai", "create", "use \(image.deletingLastPathComponent().path) w/ soft light", "--command", agent.path])
+            try expect(r.out.contains("add --ref \(image.deletingLastPathComponent().path) to attach copies"), r.out)
         },
         cliTest("cli.check.reference") { sb in
             // `livepaper check` inside a session that animates a picture compares the candidate's

@@ -510,7 +510,12 @@ exit 0 only if it passes.
 them. Paths in Desktop/Documents/Downloads/iCloud Drive/cloud storage/volumes (any letter case) are
 judged by syntax alone — never looked up, so the terminal gets no privacy prompt for a hint; other
 paths get a note only if they exist. Unquoted paths with plain spaces (Finder's Copy as Pathname,
-screenshot names) are read whole (`PromptPaths`). `--ref` on a file the terminal may not open
+screenshot names) are read whole when the words say where they end — an image name ("Screenshot
+2026-11-15 at 10.41.23.png", "heron copy 2.png") or a folder name ending in "/" (not the shorthand
+"w/"); otherwise the mention is the shorter path with the longer readings to the end of its clause
+(`PromptPaths`): a path that may be looked up gets its note from the reading that exists
+(`resolveReadings`; "~/Pictures/Summer Trip for the palette" → `--ref '~/Pictures/Summer Trip'`), and a
+protected one, which can't be looked up, says to quote the whole path. `--ref` on a file the terminal may not open
 (Files and Folders access) says so (`ReferenceError.notPermitted`) rather than "doesn't exist".
 
 **Resemblance** (`ReferenceResemblance.swift`; only when `CheckOptions.reference` is set: LivePaper's
@@ -685,15 +690,18 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   at it per harness and which attachment is which, the table of sizes/brightness/palette, and for
   animate: open it first, the cover-fit rules worded by the picture's orientation, brightness per
   screen shape, and what goes behind transparent areas); attached paths typed into the prompt read
-  `references/ref-NN…` there (`PromptPaths.rewrite`, no file-system access: the mentions, and every
-  literal occurrence of an attached file's path — as given, real, `~/…`, with `\ ` escapes, as a file
-  URL), others are named as not attached. When the harness exits LivePaper puts the picture back if it changed (and says
+  `references/ref-NN…` there (`PromptPaths.rewrite`, no file-system access: the mentions or one of their
+  longer readings, and every literal occurrence of an attached file's path or of a folder it came from
+  below the home folder — as given, real, `~/…`, with `\ ` escapes, as a file URL, a folder with or
+  without its "/" — so "use ~/Desktop/Summer Trip for the palette" reads `references/` (ref-01 …)),
+  others are named as not attached. When the harness exits LivePaper puts the picture back if it changed (and says
   so), and the final check compares the stills with it (`CheckOptions.reference`, kept in memory — the
   index in the workspace is in the agent's reach). Nothing is fetched or uploaded; pasted or dropped
   image data stays in memory — LivePaper writes no temporary files (a drop that macOS hands over as a
   file, such as a Photos file promise, is read from macOS's own temporary copy, size-checked first,
-  which macOS deletes as soon as it has been read); names and paths never reach the workspace, logs or
-  history.
+  which macOS deletes as soon as it has been read); the attached images' names and paths never reach
+  the workspace, logs or history (a path typed into the prompt that names nothing attached stays as
+  typed, and TASK.md says it wasn't attached).
 * **What an agent may run** (`AISessionPolicy`): every harness process carries
   `LIVEPAPER_AI_SESSION`, `LIVEPAPER_AI_WORKSPACE` and `LIVEPAPER_RENDER_SPOOL` (and not
   `LIVEPAPER_CLI`/`LIVEPAPER_RENDERD`). The shim sets them again and passes on only `check`,
@@ -769,8 +777,12 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     (`~/Library/CloudStorage`)/volumes, in any letter case, aren't looked at until clicked, so typing
     never raises a privacy prompt. A click LivePaper isn't allowed to follow (access to that folder
     declined) gets a note saying what works instead (drag it in, Add Images…, or Files and Folders in
-    System Settings), not "wasn't found". Unquoted paths with plain spaces (screenshot names) are
-    read whole (`PromptPaths`). In the prompt box Tab moves to the next control and quotes and dashes
+    System Settings), not "wasn't found". Unquoted paths with plain spaces are read whole when the
+    words say where they end (screenshot and other image names, a folder name ending in "/");
+    otherwise the chip names the shorter path, and the lookup — while typing for unprotected paths,
+    on the click for protected ones — tries the longer readings word by word, and the shorter one
+    when a longer reading isn't there (`PromptPaths.resolveReadings`: "~/Desktop/Summer Trip for the
+    palette" attaches the folder "Summer Trip"). In the prompt box Tab moves to the next control and quotes and dashes
     stay as typed (paths and code survive). `ReferencePasteRules` decides whether a paste is images
     (a screenshot, Finder copies of images or folders, Safari's Copy Image) or text and what it
     holds; `ReferenceDropReader` turns drops into files, image data or — for web URLs — a note

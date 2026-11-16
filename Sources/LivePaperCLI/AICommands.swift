@@ -162,27 +162,35 @@ enum AICommands {
 
     /// Notes for paths in the prompt the agent won't be able to open (no --ref / --animate given).
     /// Paths in privacy-protected folders (Desktop, Documents, …) aren't looked up: the note is
-    /// syntax-based there, so the terminal never gets a privacy prompt for a hint.
+    /// syntax-based there, so the terminal never gets a privacy prompt for a hint (and says to quote
+    /// the whole path when an unquoted one may go on past a space). Others get a note when they, or a
+    /// longer reading of an unquoted path ("~/Pictures/Summer Trip for the palette"), exist.
     static func pathHints(_ prompt: String) -> [String] {
-        PromptPaths.mentions(in: prompt).prefix(3).compactMap { m -> String? in
+        PromptPaths.mentions(in: prompt).prefix(3).compactMap { mention -> String? in
+            var m = mention
             let kind: PromptPathMention.Kind
+            var mayGoOn = false
             if PromptPaths.isPrivacyProtected(m.url) {
                 kind = m.kind
+                mayGoOn = m.alternatives.contains { $0.text.count > m.text.count }
             } else {
-                switch PromptPaths.resolve(m) {
+                let (found, resolution) = PromptPaths.resolveReadings(m)
+                switch resolution {
                 case .image: kind = .image
                 case .folder: kind = .folder
                 case .missing, .notAnImage, .notPermitted: return nil
                 }
+                m = found
             }
             let typed = m.text.replacingOccurrences(of: "\\ ", with: " ")
             let arg = shellQuoted(typed.hasPrefix("file://") ? m.url.path : typed)
+            let quote = mayGoOn ? " If its name goes on after the space, quote the whole path." : ""
             if kind == .folder {
                 return "livepaper ai: the prompt mentions \(typed) (a folder). The agent can't open files outside its workspace; " +
-                    "add --ref \(arg) to attach copies (or --animate <image> to animate one exactly)."
+                    "add --ref \(arg) to attach copies (or --animate <image> to animate one exactly).\(quote)"
             }
             return "livepaper ai: the prompt mentions \(typed) (an image). The agent can't open files outside its workspace; " +
-                "add --ref \(arg) to attach a copy (or --animate \(arg) to animate it exactly)."
+                "add --ref \(arg) to attach a copy (or --animate \(arg) to animate it exactly).\(quote)"
         }
     }
 
