@@ -1,6 +1,6 @@
-// PlaylistView — what the screen saver plays: which scenes, in what order, how often it changes,
-// the clock, multiple displays (DisplaysSection) and the performance profile. Edits are a draft until
-// "Save & Publish".
+// PlaylistView — what the screen saver plays: which scenes (every scene, the ones chosen here, or a
+// collection, followed as it changes), in what order, how often it changes, the clock, multiple
+// displays (DisplaysSection) and the performance profile. Edits are a draft until "Save & Publish".
 import LivePaperCore
 import SwiftUI
 
@@ -47,10 +47,14 @@ struct PlaylistView: View {
 
     private var available: [String] { model.availableSceneIDs }
 
-    /// The draft as it stands (unsaved changes included): its scenes, order, clock and profile.
-    private var canPreview: Bool { !draft.effectiveSceneIDs(available: available).isEmpty }
+    /// The draft as it plays (unsaved changes included, a followed collection as it is now).
+    private var playing: PlaylistDraft { PlaylistDraft(draft.settings.following(model.collections)) }
+    private var followed: SceneCollection? { draft.settings.collectionID.flatMap { model.collection(id: $0) } }
 
-    private func previewPlaylist() { FullScreenPreviewLauncher.previewPlaylist(draft.settings, model: model) }
+    /// The draft as it stands (unsaved changes included): its scenes, order, clock and profile.
+    private var canPreview: Bool { !playing.effectiveSceneIDs(available: available).isEmpty }
+
+    private func previewPlaylist() { FullScreenPreviewLauncher.previewPlaylist(playing.settings, model: model) }
 
     // MARK: skipped scenes
 
@@ -93,16 +97,31 @@ struct PlaylistView: View {
 
     private var scenesSection: some View {
         Section {
-            Toggle(isOn: Binding(get: { draft.includesAllScenes },
-                                 set: { draft.setIncludesAllScenes($0, available: available) })) {
-                Text("Play all scenes")
-                Text("New scenes join automatically.")
+            Picker("Play", selection: Binding(get: { draft.source },
+                                              set: { draft.setSource($0, available: available, collections: model.collections) })) {
+                Text("All scenes").tag(PlaylistSource.all)
+                Text("Scenes you choose").tag(PlaylistSource.chosen)
+                if !model.collections.isEmpty {
+                    Section("Collections") {
+                        ForEach(model.collections) { c in
+                            Text(c.name).tag(PlaylistSource.collection(c.id))
+                        }
+                    }
+                }
+                if case .collection(let id) = draft.source, model.collection(id: id) == nil {
+                    Text("A deleted collection").tag(draft.source)
+                }
             }
-            if draft.includesAllScenes {
+            switch draft.source {
+            case .all:
+                Text("New scenes join automatically.")
+                    .font(.callout).foregroundStyle(.secondary)
                 ForEach(model.entries) { entry in
                     PlaylistSceneRow(entry: entry)
                 }
-            } else {
+            case .collection:
+                collectionRows
+            case .chosen:
                 ForEach(draft.settings.sceneIDs, id: \.self) { id in
                     if let entry = model.entry(id: id) {
                         PlaylistSceneRow(entry: entry) {
@@ -134,10 +153,35 @@ struct PlaylistView: View {
         } header: {
             Text("Scenes")
         } footer: {
-            if !draft.includesAllScenes && draft.settings.sceneIDs.count > 1 {
+            if draft.source == .chosen && draft.settings.sceneIDs.count > 1 {
                 Text("Drag to change the order, or use the context menu.")
                     .font(.callout).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    /// The followed collection's scenes, in its order (edited on the collection's screen).
+    @ViewBuilder
+    private var collectionRows: some View {
+        if let c = followed {
+            HStack(alignment: .firstTextBaseline) {
+                Label(CollectionText.followsNote(c.name), systemImage: "link")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer()
+                Button("Edit Collection") { model.showCollection(c.id) }
+            }
+            let entries = model.collectionEntries(c.id)
+            if entries.isEmpty {
+                Text("\u{201C}\(c.name)\u{201D} is empty, so the screen saver plays every scene.")
+                    .font(.callout).foregroundStyle(.orange)
+            }
+            ForEach(entries) { entry in
+                PlaylistSceneRow(entry: entry)
+            }
+        } else {
+            Text("The collection was deleted. The screen saver plays the scenes it had: choose what to play instead.")
+                .font(.callout).foregroundStyle(.orange)
         }
     }
 
@@ -201,7 +245,7 @@ struct PlaylistView: View {
             }
             .buttonStyle(.borderedProminent)
             .keyboardShortcut("s")
-            .disabled(!hasChanges || model.isPublishing || draft.effectiveSceneIDs(available: available).isEmpty)
+            .disabled(!hasChanges || model.isPublishing || playing.effectiveSceneIDs(available: available).isEmpty)
         }
         .padding(.horizontal, 20)
         .padding(.vertical, 12)
@@ -210,8 +254,8 @@ struct PlaylistView: View {
     }
 
     private var statusText: String {
-        if hasChanges { return "Unsaved changes \u{2014} " + PlaylistDraft.summary(draft.settings, available: available, names: model.sceneNames,
-                                                                                   displays: model.displays) }
+        if hasChanges { return "Unsaved changes \u{2014} " + PlaylistDraft.summary(playing.settings, available: available, names: model.sceneNames,
+                                                                                   displays: model.displays, collection: followed) }
         if let result = model.lastPublishResult {
             let n = result.playlist.scenes.count + result.playlist.displayScenes.count
             let left = result.skipped.count

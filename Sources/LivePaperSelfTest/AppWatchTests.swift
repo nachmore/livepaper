@@ -89,7 +89,7 @@ extension SelfTests {
             // A burst (signals 30 ms apart) fires once, after it ends, with the union.
             try expectEqual(burst(6, spacing: 0.03) { $0 == 3 ? .playlist : .library }, 0)
             waitFor(1)
-            try expectEqual(fired.values, [.all])
+            try expectEqual(fired.values, [[.library, .playlist]])
             // Nothing pending: nothing fires; an empty signal is ignored.
             queue.async { debouncer.signal([]) }
             Thread.sleep(forTimeInterval: 0.5)

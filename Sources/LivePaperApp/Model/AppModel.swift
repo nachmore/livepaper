@@ -113,6 +113,23 @@ final class AppModel {
     enum Section: Hashable {
         case library, create, playlist
         case session(String)
+        /// A collection's scenes (its id).
+        case collection(String)
+    }
+
+    /// A collection action that needs a sheet (sidebar, menus, the collection screen, drops).
+    enum CollectionAction: Identifiable, Equatable {
+        /// A new collection, with these scenes in it (none: an empty one, shown once created).
+        case new(sceneIDs: [String])
+        case rename(String)
+        case delete(String)
+        var id: String {
+            switch self {
+            case .new(let ids): return "new:" + ids.joined(separator: ",")
+            case .rename(let s): return "rename:" + s
+            case .delete(let s): return "delete:" + s
+            }
+        }
     }
 
     /// Detail-only facts loaded on demand (they need disk reads).
@@ -149,9 +166,21 @@ final class AppModel {
     let banners = BannerCenter()
 
     // Navigation
-    var section: Section? = .library
+    var section: Section? = .library {
+        didSet {
+            // Another screen: a scene opened in a collection and the grid's selection don't come along.
+            guard section != oldValue else { return }
+            if !collectionPath.isEmpty { collectionPath = [] }
+            if !selection.isEmpty { selection.clear() }
+        }
+    }
     /// Scene ids pushed onto the library's navigation stack.
     var libraryPath: [String] = []
+    /// Scene ids pushed onto a collection screen's navigation stack.
+    var collectionPath: [String] = []
+    /// Cards chosen in the library or collection grid (⌘-click, ⇧-click).
+    var selection = LibrarySelection()
+    var collectionAction: CollectionAction?
     var showOnboarding = false
     var sceneAction: SceneAction?
 
@@ -189,6 +218,12 @@ final class AppModel {
     @ObservationIgnored private var diskRefresh: Task<Void, Never>?
     /// Passes refreshFromDisk has made (diagnostics, tests).
     @ObservationIgnored private(set) var diskRefreshCount = 0
+
+    // Collections (collections.json; CollectionServicing)
+    /// Every collection, by name (set only by loadCollections and the edits in AppModel+Collections).
+    var collections: [SceneCollection] = []
+    @ObservationIgnored var collectionsReadSeq = 0
+    @ObservationIgnored var collectionsAppliedSeq = 0
 
     // Screen saver, lock, system
     private(set) var playlist = PlaylistSettings()
@@ -273,7 +308,8 @@ final class AppModel {
         async let lib: Void = reloadLibrary()
         async let pl: Void = loadPlaylist()
         async let st: Void = refreshInstallStatus()
-        _ = await (lib, pl, st)
+        async let col: Void = loadCollections()
+        _ = await (lib, pl, st, col)
         // Alongside the rest: waiting for publish.lock (another process publishing) mustn't hold
         // up the launch.
         let update = beginSaverUpdateIfNeeded()
@@ -346,9 +382,11 @@ final class AppModel {
         fileStamps = stamps
         if detailsChanged { detailsRevision += 1 }
         if fresh != entries { entries = fresh }
-        // Drop navigation to scenes that no longer exist.
+        // Drop navigation to scenes that no longer exist, and their selection.
         let ids = Set(entries.map(\.id))
         if libraryPath.contains(where: { !ids.contains($0) }) { libraryPath.removeAll { !ids.contains($0) } }
+        if collectionPath.contains(where: { !ids.contains($0) }) { collectionPath.removeAll { !ids.contains($0) } }
+        if selection.ids.contains(where: { !ids.contains($0) }) { selection.retain(Array(ids)) }
     }
 
     func showScene(_ id: String) {
@@ -470,7 +508,7 @@ final class AppModel {
     }
 
     func delete(_ id: String) async {
-        let library = services.library
+        let library = services.library, collectionService = services.collections
         let name = entry(id: id)?.manifest.name ?? id
         // A display it was chosen for keeps the choice (the Screen Saver screen shows "Scene deleted")
         // and plays the playlist once the saver is published without it.
@@ -478,15 +516,20 @@ final class AppModel {
         do {
             try await offMain { try library.delete(id: id) }
             libraryPath.removeAll { $0 == id }
+            collectionPath.removeAll { $0 == id }
+            // It leaves every collection (a failure here only leaves an id that is skipped everywhere).
+            let leftCollections = (try? await offMain { try collectionService.removeSceneEverywhere(id) }) ?? []
+            await loadCollections()
             await reloadLibrary()
-            if !PlaylistDraft(playlist).includesAllScenes && playlist.sceneIDs.contains(id) {
-                var s = playlist
-                s.sceneIDs.removeAll { $0 == id }
-                await savePlaylist(s, announce: false)
+            // An explicit playlist loses it; one that follows a collection gets the collection's new scenes.
+            var next = playlist.following(collections)
+            if !PlaylistDraft(next).includesAllScenes { next.sceneIDs.removeAll { $0 == id } }
+            if next != playlist {
+                await savePlaylist(next, announce: false)
             } else if assigned {
                 await republishQuietly()
             }
-            banners.post(.success, "Deleted \u{201C}\(name)\u{201D}")
+            banners.post(.success, "Deleted \u{201C}\(name)\u{201D}", message: CollectionText.removedFromCollections(leftCollections))
         } catch {
             banners.error("Couldn't delete \u{201C}\(name)\u{201D}", error)
         }
@@ -571,7 +614,7 @@ final class AppModel {
     }
 
     /// Publishes the current settings again, quietly, when the saver is installed.
-    private func republishQuietly() async {
+    func republishQuietly() async {
         if !installStatusLoaded { await refreshInstallStatus() }
         guard installStatus.saverInstalled else { return }
         await savePlaylist(playlist, announce: false)
@@ -658,6 +701,7 @@ final class AppModel {
                 self.pendingDiskChanges = []
                 self.diskRefreshCount += 1
                 if next.contains(.playlist) { await self.loadPlaylist() }
+                if next.contains(.collections) { await self.loadCollections() }
                 if next.contains(.library) {
                     await self.reloadLibrary(quiet: true)
                     // A scene added by the CLI has no thumbnail yet; rendering one mustn't hold up
@@ -674,12 +718,19 @@ final class AppModel {
     // MARK: - Playlist / publishing
 
     var playlistSummary: String {
-        PlaylistDraft.summary(playlist, available: availableSceneIDs, names: sceneNames, displays: displays)
+        PlaylistDraft.summary(effectivePlaylist, available: availableSceneIDs, names: sceneNames, displays: displays,
+                              collection: followedCollection)
     }
+
+    /// The playlist as the saver plays it: the scenes of the collection it follows, if any.
+    var effectivePlaylist: PlaylistSettings { playlist.following(collections) }
+
+    /// The collection the screen saver plays ("Use as Screen Saver" on a collection), if it exists.
+    var followedCollection: SceneCollection? { playlist.collectionID.flatMap { collection(id: $0) } }
 
     /// Whether the saver will play this scene as part of the playlist with the current settings.
     func isInPlaylist(_ id: String) -> Bool {
-        PlaylistDraft(playlist).effectiveSceneIDs(available: availableSceneIDs).contains(id)
+        PlaylistDraft(effectivePlaylist).effectiveSceneIDs(available: availableSceneIDs).contains(id)
     }
 
     /// Whether the saver has this scene: in the playlist, or chosen for a display ("Choose per
@@ -789,6 +840,11 @@ final class AppModel {
     }
 
     func addToPlaylist(_ id: String) async {
+        // The playlist is the collection it follows: the scene joins the collection (and so the playlist).
+        if let followed = followedCollection {
+            await addToCollection([id], followed.id, playlistNote: true)
+            return
+        }
         var draft = PlaylistDraft(playlist)
         guard draft.add(id) else {
             banners.post(.info, "\u{201C}\(entry(id: id)?.manifest.name ?? id)\u{201D} is already in the playlist")
@@ -797,11 +853,12 @@ final class AppModel {
         await savePlaylist(draft.settings)
     }
 
-    var canAdvanceScene: Bool { PlaylistDraft.advanced(playlist, available: availableSceneIDs) != nil }
+    /// Not while the playlist follows a collection: its order is the collection's.
+    var canAdvanceScene: Bool { followedCollection == nil && PlaylistDraft.advanced(playlist, available: availableSceneIDs) != nil }
 
     /// Menu-bar "Next scene".
     func advanceScene() async {
-        guard let next = PlaylistDraft.advanced(playlist, available: availableSceneIDs) else { return }
+        guard canAdvanceScene, let next = PlaylistDraft.advanced(playlist, available: availableSceneIDs) else { return }
         await savePlaylist(next, announce: false)
     }
 

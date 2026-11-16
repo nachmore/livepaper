@@ -1,0 +1,1 @@
+../../LivePaperApp/Model/AppModel+Collections.swift
