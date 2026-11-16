@@ -240,8 +240,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     // MARK: - Status
 
-    /// Blocking (runs `sysadminctl` and `launchctl print`, both read-only, ≤ 10 s each): call it
-    /// off the main thread.
+    /// Blocking (runs `sysadminctl` and `launchctl print`, both read-only, ≤ 10 s each, and checks the
+    /// running helper's code signature): call it off the main thread.
     public func status() -> InstallStatus {
         let installedVersion = FileOps.bundleInfo(paths.installedSaver, "CFBundleVersion")
         let templateVersion = FileOps.bundleInfo(paths.saverTemplate, "CFBundleVersion")
@@ -586,10 +586,12 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     private func runRegisteredHelper(automatic: Bool) throws -> HelperRecoveryOutcome {
         let current = lookup(helperService)
         let assessment = assessLoginJob(current)
-        func reregister(_ why: String) throws -> HelperRecoveryOutcome {
+        /// `cannotStart`: launchd reports it can't start the helper — a repair left to another copy
+        /// is then still a failure to report.
+        func reregister(_ why: String, cannotStart: Bool) throws -> HelperRecoveryOutcome {
             if automatic, let blocker = automaticRepairBlocker(loginRegistration()) {
                 record(Self.recoverHelperTitle, .skipped(blocker))
-                if case .cannotStart = assessment.problem { throw InstallError.helperCannotStart("\(why); \(blocker)") }
+                if cannotStart { throw InstallError.helperCannotStart("\(why); \(blocker)") }
                 return .notNeeded(blocker)
             }
             return try reregisterLoginItem(because: why)
@@ -599,7 +601,13 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             record("Start the helper (\(helperService))", .skipped(why))
             return .notNeeded(why)
         case .reregister(let why):
-            return try reregister(why)
+            // Unregistering ends a helper that still works: not for a registration that would fail.
+            if runningHelper(current) != nil, probe.signatureIsValid(paths.appBundle) != true {
+                let blocker = "this LivePaper's code signature doesn't check out, so registering it would fail; the running helper keeps going"
+                record(Self.reregisterLoginItemTitle, .skipped(blocker))
+                return .notNeeded(blocker)
+            }
+            return try reregister(why, cannotStart: assessment.problem?.cannotStart == true)
         case .start, .restart:
             let restart = assessment.action == .restart
             let title = restart ? "Restart the helper with this build (\(helperService))" : "Start the helper (\(helperService))"
@@ -614,9 +622,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             case .running:
                 return .started
             case .cannotStart(let why):
-                return try reregister("launchd couldn't start it: \(why)")
+                return try reregister("launchd couldn't start it: \(why)", cannotStart: true)
             case .notLoaded:
-                return try reregister("launchd no longer has its job")
+                return try reregister("launchd no longer has its job", cannotStart: false)
             case .notRunning:
                 // Nothing says why, so registering again would rest on nothing: say so instead.
                 let failure = InstallError.helperNotRunning("launchd reported no running helper after `launchctl kickstart`")

@@ -382,7 +382,9 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
     recorded the same Team ID; a stopped job is started (`launchctl kickstart`) when the recorded
     signature still covers this helper, and registered again when it doesn't (without a record: when an
     older build registered it). A start or restart that launchd then refuses is registered again; one
-    that just doesn't show a running helper is reported, not registered again. Registering again:
+    that just doesn't show a running helper is reported, not registered again, and a helper that still
+    runs is never ended for a registration this copy's own signature would make fail (a quick
+    `SecStaticCodeCheckValidity` of the app). Registering again:
     unregister, waiting for its completion, then register, as SMAppService.h asks for after the
     executable changed — retried once when SMAppService still has the item (a late unregister), then
     waiting up to 10 s for smd to submit the job (the fallback: plist rewritten, bootout + bootstrap).

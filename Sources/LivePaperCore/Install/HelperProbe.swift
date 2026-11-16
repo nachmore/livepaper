@@ -31,6 +31,9 @@ public protocol HelperProcessProbing: Sendable {
     func runsCodeOnDisk(_ pid: Int32) -> Bool?
     /// The signature of the code at `url` (nil: unsigned or unreadable).
     func signature(at url: URL) -> CodeSignature?
+    /// The app bundle at `url` passes a quick signature check (its executable and sealed Info.plist,
+    /// not every resource): false when SMAppService would refuse to register it; nil: can't tell.
+    func signatureIsValid(_ url: URL) -> Bool?
     /// This user's processes whose executable is at `path`.
     func processes(running path: String) -> [Int32]
 }
@@ -70,6 +73,12 @@ public struct SystemHelperProbe: HelperProcessProbing {
               let dict = info as? [String: Any], let unique = dict[kSecCodeInfoUnique as String] as? Data else { return nil }
         return CodeSignature(cdhash: unique.map { String(format: "%02x", $0) }.joined(),
                              teamID: dict[kSecCodeInfoTeamIdentifier as String] as? String)
+    }
+
+    public func signatureIsValid(_ url: URL) -> Bool? {
+        var code: SecStaticCode?
+        guard SecStaticCodeCreateWithPath(url as CFURL, [], &code) == errSecSuccess, let code else { return nil }
+        return SecStaticCodeCheckValidity(code, SecCSFlags(rawValue: kSecCSDoNotValidateResources), nil) == errSecSuccess
     }
 
     public func processes(running path: String) -> [Int32] {

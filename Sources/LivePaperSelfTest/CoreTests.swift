@@ -431,6 +431,13 @@ private final class FakeProbe: HelperProcessProbing, @unchecked Sendable {
     }
     func runsCodeOnDisk(_ pid: Int32) -> Bool? { lock.withLock { procs[pid]?.current ?? nil } }
     func signature(at url: URL) -> CodeSignature? { lock.withLock { signatures[url.path] } }
+    /// App bundles whose signature doesn't check out.
+    var invalidApps: Set<String> {
+        get { lock.withLock { invalid } }
+        set { lock.withLock { invalid = newValue } }
+    }
+    private var invalid: Set<String> = []
+    func signatureIsValid(_ url: URL) -> Bool? { lock.withLock { !invalid.contains(url.path) } }
     func processes(running path: String) -> [Int32] {
         lock.withLock { procs.filter { $0.value.path.map(resolvedPath) == resolvedPath(path) }.map(\.key) }
     }
@@ -2477,6 +2484,8 @@ extension SelfTests {
             let helper = app.appendingPathComponent("H")
             try FileManager.default.copyItem(at: dir.appendingPathComponent("a"), to: helper)
             let a = try unwrap(probe.signature(at: dir.appendingPathComponent("a"))), b = try unwrap(probe.signature(at: dir.appendingPathComponent("b")))
+            try expectEqual(probe.signatureIsValid(dir.appendingPathComponent("a")), true)
+            try expectEqual(probe.signatureIsValid(dir.appendingPathComponent("a.c")), false)
             try expect(a.isAdHoc && b.isAdHoc && a.cdhash != b.cdhash && a.cdhash.count == 40, "\(a) \(b)")
             let process = Process()
             process.executableURL = helper
@@ -2705,11 +2714,19 @@ extension SelfTests {
                 try expectEqual(try h.make().recoverHelper(), .notNeeded("it runs this build's helper"))
                 try expect(item.unregisterCalls == 0 && system.mutatingCommands.isEmpty, "\(system.mutatingCommands)")
 
-                // An ad-hoc helper that changed while it ran: registered again (launchd would refuse it).
+                // An ad-hoc helper that changed while it ran: registered again (launchd would refuse it) —
+                // but not while this copy's own signature doesn't check out (registering would fail,
+                // and the helper that still works would be gone).
                 probe.run(pid, h.paths.helperExecutable.path, current: false)
                 let replaced = "this LivePaper's helper was replaced while it ran"
                 try expectEqual(h.make().status().helperProblem, .outdated(replaced))
                 probe.sign(h.paths.helperExecutable, CodeSignature(cdhash: "b2"))
+                probe.invalidApps = [h.paths.appBundle.path]
+                guard case .notNeeded(let why) = try h.make().recoverHelper(), why.contains("signature doesn't check out") else {
+                    throw TestFailure(description: "registered an app whose signature doesn't check out")
+                }
+                try expect(item.unregisterCalls == 0 && probe.isAlive(pid))
+                probe.invalidApps = []
                 try expectEqual(try h.make().recoverHelper(), .reregistered)
                 try expect(item.unregisterCalls == 1 && item.registerCalls == 2)
                 try expectEqual(try h.record().helper, CodeSignature(cdhash: "b2"))
@@ -2792,6 +2809,18 @@ extension SelfTests {
                 try expect(item.unregisterCalls == 0 && item.registerCalls == 1)
                 try expectEqual(try installed.make().recoverHelper(), .reregistered)
                 try expectEqual(try installed.record().app, installed.paths.appBundle.path)
+                // The installed copy's job is stopped: the download may start it (that starts the
+                // installed copy's helper), but when launchd refuses, it leaves registering it again to
+                // that copy — and says so.
+                let now = try unwrap(system.pids[label])
+                probe.end(now); system.pids[label] = nil; system.stopped = [label]; system.breaksOnStart = [label]
+                do { _ = try download.make().recoverHelper(); throw TestFailure(description: "repaired from the download") }
+                catch InstallError.helperCannotStart(let detail) {
+                    try expect(detail.contains("launchd couldn't start it") && detail.contains("belongs to the LivePaper at"), detail)
+                }
+                try expectEqual(item.registerCalls, 2)
+                try expect(system.mutatingCommands.contains(["/bin/launchctl", "kickstart", installed.service]))
+                system.breaksOnStart = []
                 // Without a record, a copy outside /Applications leaves it too; one in /Applications repairs.
                 try FileManager.default.removeItem(at: installed.paths.helperRegistration)
                 system.broken = [label]
