@@ -160,3 +160,29 @@ struct LineSplitter {
         return s
     }
 }
+
+/// An agent an earlier LivePaper spawned (a recovered session's): not this process's child, so it
+/// can't be waited for, and its pid may have been given to another process since. It is signalled
+/// only while it provably is the recorded process — same pid, start time and group.
+final class AttachedAgent: @unchecked Sendable {
+    let recorded: LPProcessFacts
+
+    init(_ recorded: LPProcessFacts) { self.recorded = recorded }
+
+    /// The recorded process still runs (not just some process with its pid).
+    var isRunning: Bool { recorded.isSameProcess(as: ProcessProbe.facts(recorded.pid)) }
+
+    /// SIGTERM to its group, then SIGKILL after `grace` seconds for anything still in it — only if
+    /// it is still the recorded agent.
+    func terminateGroup(grace: TimeInterval = 3) {
+        guard isRunning else { return }
+        _ = killpg(recorded.group, SIGTERM)
+        let recorded = self.recorded
+        DispatchQueue.global().asyncAfter(deadline: .now() + grace) {
+            // Seconds after it was verified: whatever is in its group now is still the agent's (a
+            // group id isn't reused while anything is in it), unless its pid leads another process.
+            if let live = ProcessProbe.facts(recorded.pid), !recorded.isSameProcess(as: live) { return }
+            if killpg(recorded.group, 0) == 0 { _ = killpg(recorded.group, SIGKILL) }
+        }
+    }
+}

@@ -111,6 +111,18 @@ enum SnapshotHarness {
         shoot("session-running-dark", main, dark: true, MainWindowView())
         if let done { model.section = .session(done.id) }
         shoot("session-done-light", main, dark: false, MainWindowView())
+        // A session an earlier LivePaper left behind, its agent still running: "Recovered" in the
+        // sidebar and the header, its stills only.
+        if let ai = services.ai as? MockAIService {
+            let recovered = ai.recoveredRunningSession(prompt: "Embers drifting over a dark field after the harvest", harness: harness,
+                                                       model: "opus", startedAgo: 7 * 60)
+            model.adoptRecovered([recovered])
+            waitUntil { (model.session(id: recovered.record.id)?.state.stills.count ?? 0) >= 3 }
+            clearBanners(model)
+            model.section = .session(recovered.record.id)
+            shoot("session-recovered-dark", main, dark: true, MainWindowView())
+            if let session = model.session(id: recovered.record.id) { model.discard(session) }
+        }
 
         // Reference images: the Describe-it card and the Modify sheet with images attached (one to
         // animate, one that couldn't be added, a note, a path typed into the prompt), and a session

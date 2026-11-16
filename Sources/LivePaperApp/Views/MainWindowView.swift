@@ -98,7 +98,10 @@ private struct SessionSidebarRow: View {
         HStack(spacing: 8) {
             SessionPhaseIcon(phase: session.state.phase, resolution: session.resolution)
             VStack(alignment: .leading, spacing: 1) {
-                Text(session.title).lineLimit(1)
+                HStack(spacing: 5) {
+                    Text(session.title).lineLimit(1)
+                    if session.isRecovered { RecoveredBadge() }
+                }
                 Text(session.state.lastStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -106,6 +109,22 @@ private struct SessionSidebarRow: View {
             }
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+/// "Recovered": a session LivePaper picked up again after it quit, crashed or was restarted while
+/// the session ran (sidebar, session header).
+struct RecoveredBadge: View {
+    var body: some View {
+        Text("Recovered")
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(.orange)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .background(.orange.opacity(0.16), in: Capsule())
+            .fixedSize()
+            .help("LivePaper quit while this session ran and picked it up again when it started.")
+            .accessibilityLabel("Recovered")
     }
 }
 

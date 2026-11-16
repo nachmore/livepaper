@@ -51,6 +51,7 @@ private struct SessionHeader: View {
                     .lineLimit(1)
                     .help(session.prompt)
                 HStack(spacing: 6) {
+                    if session.isRecovered { RecoveredBadge() }
                     Text(session.harness.uiTitle)
                     if let m = session.model { Text("\u{00B7}"); Text(m) }
                     if let source = session.clonedFrom { Text("\u{00B7}"); Text("copy of \(source)") }
@@ -469,7 +470,9 @@ private struct SessionDecisionBar: View {
                 Button("Close Session") { model.discard(session) }.buttonStyle(.link)
             }
         default:
-            Text("The agent is working. You can switch to other screens; LivePaper lets you know when the scene is ready.")
+            Text(session.isRecovered
+                 ? "LivePaper quit while this session ran, and the agent kept working. What it wrote before then went to the earlier LivePaper, so only its renders show here; LivePaper checks the scene when the agent finishes, then you can review it."
+                 : "The agent is working. You can switch to other screens; LivePaper lets you know when the scene is ready.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

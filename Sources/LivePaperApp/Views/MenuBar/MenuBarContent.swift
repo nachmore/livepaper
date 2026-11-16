@@ -52,7 +52,7 @@ struct MenuBarContent: View {
                 Text(running.count == 1 ? "1 AI job running" : "\(running.count) AI jobs running")
             }
             ForEach(running + waiting) { session in
-                Button("\(session.title) \u{2014} \(session.state.lastStatus)") {
+                Button(session.menuTitle) {
                     model.section = .session(session.id)
                     openMain()
                 }

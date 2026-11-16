@@ -619,3 +619,24 @@ begins; §2: display-sleep locks aren't covered by `immediateLockLaunchesScreenS
   * whether `CGEventSourceSecondsSinceLastEventType` works in the LaunchAgent without Input Monitoring
     (Inferred: it reports only times; it was read from a terminal process here);
   * whether the dim really starts at the `UserIsActive` timeout (the 10 s gap is Inferred to be it).
+
+## 8. An agent whose app went away (session recovery, ARCHITECTURE §10)
+
+An AI agent runs in a process group of its own (`POSIX_SPAWN_SETPGROUP`), so it doesn't die with
+LivePaper. What a later LivePaper can know about it (Verified 2026-11-16 on 26.7 with a small test
+program and the self-tests' orphaned agents — a shell's `set -m` background job, which leads its own
+group, left behind by its exiting shell):
+
+* An orphaned agent is adopted by launchd (ppid 1) and keeps its process group (pgid = its pid).
+* `proc_pidinfo(pid, PROC_PIDTBSDINFO)` answers for any of the user's processes, also ones this
+  process didn't start: `pbi_start_tvsec`/`pbi_start_tvusec` (the start time, to the microsecond) and
+  `pbi_pgid`. For another user's process (launchd, pid 1) it fails without privileges, and for a pid
+  that doesn't exist it fails. A pid can be reused once its process is gone; pid + start time + group
+  together identify the process.
+* `DispatchSource.makeProcessSource(identifier:eventMask: .exit)` on a pid that isn't this process's
+  child fires when it exits (within milliseconds), and fires at once — data `NOTE_EXIT` — for a pid that
+  doesn't exist, so a watch set up just after the process exited isn't missed. The exit status isn't
+  available (only the parent gets it).
+* A process group's id is its creator's pid, and it isn't given to another group while any member is
+  left; once the leader has exited, signalling the group reaches only its leftovers (Inferred from the
+  POSIX rules; matches what the self-tests see).

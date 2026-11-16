@@ -1,6 +1,8 @@
 // AISessionModel — one AI create/modify job as the UI sees it. Consumes the AISessionHandle's
 // event stream on the main actor, enforces the user's timeout, and remembers what the user decided
-// (accepted / discarded). Foundation + Observation only (also compiled into LivePaperSelfTest).
+// (accepted / discarded). A recovered session (one an earlier run left behind, AppModel.recoverSessions)
+// is the same, marked `isRecovered`, with the times and settings it started with.
+// Foundation + Observation only (also compiled into LivePaperSelfTest).
 import Foundation
 import Observation
 import LivePaperCore
@@ -28,6 +30,15 @@ final class AISessionModel: Identifiable {
     let timeout: TimeInterval
     /// Built-in scene that was cloned so it could be modified (shown in the header).
     let clonedFrom: String?
+    /// The feedback of earlier attempts, oldest first (already part of the prompt); Try Again with
+    /// Feedback adds to it.
+    let feedback: [String]
+    /// Taken over from an earlier run of LivePaper (it quit, crashed or was restarted while the
+    /// session ran): no transcript from before, marked "Recovered" in the sidebar and the menu bar.
+    let isRecovered: Bool
+    /// The time limit applies (not to a recovered session whose agent had already finished: only
+    /// LivePaper's check is left to run).
+    private let enforcesTimeLimit: Bool
 
     private(set) var state = AISessionState()
     private(set) var finishedAt: Date?
@@ -47,8 +58,10 @@ final class AISessionModel: Identifiable {
     var targetSceneID: String? { if case .modify(let id, _) = request { return id } else { return nil } }
     /// nil without reference images.
     var referenceCounts: ReferenceCounts? { references.isEmpty ? nil : ReferenceCounts(roles: references.map(\.role)) }
+    /// - Parameter now: when the session started (a recovered one: in the earlier run).
     init(handle: AISessionHandle, request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness, model: String?,
-         timeout: TimeInterval, clonedFrom: String? = nil, now: Date = Date()) {
+         timeout: TimeInterval, clonedFrom: String? = nil, feedback: [String] = [], now: Date = Date(), recovered: Bool = false,
+         enforcesTimeLimit: Bool = true) {
         self.id = handle.id
         self.handle = handle
         self.request = request
@@ -57,7 +70,25 @@ final class AISessionModel: Identifiable {
         self.model = model
         self.timeout = timeout
         self.clonedFrom = clonedFrom
+        self.feedback = feedback
         self.startedAt = now
+        self.isRecovered = recovered
+        self.enforcesTimeLimit = enforcesTimeLimit
+    }
+
+    /// A session an earlier run left behind, as AIServicing.recoverSessions handed it over (already
+    /// watching its agent or checking its scene). The time limit counts from when it started.
+    convenience init(recovered r: RecoveredAISession) {
+        self.init(handle: r.handle, request: r.record.request, references: r.references, harness: r.record.harness.harness,
+                  model: r.record.model, timeout: r.record.timeout, clonedFrom: r.record.clonedFrom, feedback: r.record.feedback,
+                  now: r.record.startedAt, recovered: true, enforcesTimeLimit: r.agentRunning)
+    }
+
+    /// "Embers drifting… — Still working (recovered)", for the menu bar's AI jobs.
+    var menuTitle: String {
+        let status = state.lastStatus
+        let mark = isRecovered && status.range(of: "recovered", options: .caseInsensitive) == nil ? " (recovered)" : ""
+        return "\(title) \u{2014} \(status)\(mark)"
     }
 
     /// `refs` holding only what a session still needs: a reference image's master (≤ 3840 px, several
@@ -90,9 +121,12 @@ final class AISessionModel: Identifiable {
             self.state.streamEnded()
             self.finish(onFinish)
         }
+        guard enforcesTimeLimit else { return }
         let limit = timeout
+        // From the start (for a recovered session: in the earlier run, so it gets what is left).
+        let wait = max(0, startedAt.addingTimeInterval(limit).timeIntervalSinceNow)
         watchdog = Task { @MainActor [weak self] in
-            try? await Task.sleep(nanoseconds: UInt64(limit * 1_000_000_000))
+            try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
             guard !Task.isCancelled, let self, self.isRunning else { return }
             self.handle.cancel()
             let minutes = max(1, Int((limit / 60).rounded()))
