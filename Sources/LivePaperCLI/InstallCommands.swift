@@ -125,12 +125,16 @@ enum InstallCommands {
                 "screen saver doesn't lock the Mac and LivePaper's lock shortcut and Lock Now refuse to run. " +
                 (status.passwordManagedByMDM ? "A configuration profile enforces it." : "Set it in System Settings › Lock Screen."))
         }
-        let lockKeys = (CLIServices.preferences.value(domain: InstallService.lockTakeoverDomain, key: InstallService.lockTakeoverKey,
+        let lockKeys = (CLIServices.preferences.value(domain: InstallService.lockKeysDomain, key: InstallService.lockKeysKey,
                                                       currentHost: false) as? NSNumber)?.boolValue == true
         add(lock, "lock keys", lockKeys ? .ok : .warning, lockKeys
-            ? "on: ⌃⌘Q, Lock Screen and the Touch ID / lock key show the scene (\(InstallService.lockTakeoverDomain) \(InstallService.lockTakeoverKey))"
+            ? "on: ⌃⌘Q, Lock Screen and the Touch ID / lock key show the scene (\(InstallService.lockKeysDomain) \(InstallService.lockKeysKey))"
             : "off: ⌃⌘Q, Lock Screen and the Touch ID / lock key lock straight to the wallpaper. Turn it on in LivePaper › Settings › Lock (\u{201C}Use ⌃⌘Q and the lock key for LivePaper lock\u{201D}).")
-        add(lock, "idle timeout", .info, "unchanged; macOS starts the screen saver after the idle time set in System Settings › Lock Screen")
+        add(lock, "idle timeout", .info, idleTimeoutDetail(status.screenTimers))
+        add(lock, "screens off", .info, screensOffDetail(status.screenTimers))
+        let beforeScreensOff = preSleepCheck(enabled: LPSharedState.load(from: LPPaths.stateFile).lock.showSceneBeforeDisplaySleep,
+                                             status: status)
+        add(lock, "before screens off", beforeScreensOff.status, beforeScreensOff.detail)
         let helper = helperCheck(status)
         add(lock, "helper", helper.status, helper.detail)
         if FileManager.default.fileExists(atPath: paths.fallbackAgentPlist.path) {
@@ -216,6 +220,52 @@ enum InstallCommands {
             return (.problem, "LivePaper isn't the selected screen saver, so the lock screen won't show your scenes. Run " +
                     "`livepaper select` (or open LivePaper and follow the setup), or choose it in System Settings › Wallpaper › Screen Saver." + byItself)
         }
+    }
+
+    /// The "idle timeout" row: when macOS starts the screen saver (LivePaper never changes it).
+    static func idleTimeoutDetail(_ timers: LPScreenTimers) -> String {
+        guard let idle = timers.screenSaverIdle else {
+            return "unchanged; macOS starts the screen saver after the idle time set in System Settings › Lock Screen"
+        }
+        let when = idle.seconds == 0 ? "never (the screen saver doesn't start by itself)"
+                                     : "screen saver after \(LPPreSleepStatus.duration(idle.seconds))"
+        let source: String
+        switch idle.source {
+        case .managed: source = "set by a configuration profile"
+        case .user: source = "System Settings › Lock Screen"
+        case .systemDefault: source = "macOS's default"
+        }
+        return "\(when) (\(source)); LivePaper never changes it"
+    }
+
+    /// The "screens off" row: each power source's display-sleep time, the one in use marked.
+    static func screensOffDetail(_ timers: LPScreenTimers) -> String {
+        let sources = LPPowerSource.allCases.filter { timers.displaySleep[$0] != nil }
+        guard !sources.isEmpty else { return "unknown (`pmset -g custom` gave nothing LivePaper could read)" }
+        return sources.map { source in
+            let seconds = timers.displaySleep[source] ?? 0
+            let after = seconds == 0 ? "never" : "after \(LPPreSleepStatus.duration(seconds))"
+            return "\(source.phrase) \(after)\(source == timers.currentSource ? " (in use)" : "")"
+        }.joined(separator: ", ")
+    }
+
+    /// The "before screens off" row: the option (state.json) and whether it has anything to do.
+    static func preSleepCheck(enabled: Bool, status: InstallStatus) -> (status: Check.Status, detail: String) {
+        let timers = status.screenTimers
+        let text = LPPreSleepStatus.text(passwordImmediately: status.passwordImmediately, timers: timers)
+        let applies = status.passwordImmediately && !LPPreSleepStatus.applicableSources(timers).isEmpty
+        guard enabled else {
+            let hint = applies ? " Turn on \u{201C}Show your scene when the screens turn off first\u{201D} in LivePaper › Settings › Lock " +
+                "so the lock when the screens turn off shows your scene too." : ""
+            return (.info, "off. \(text).\(hint)")
+        }
+        let now: String
+        if let source = timers.currentSource, let applying = LPPreSleepPolicy.applies(on: source, timers: timers) {
+            now = applying && status.passwordImmediately ? " Active now (\(source.phrase))." : " Not active now (\(source.phrase))."
+        } else {
+            now = ""
+        }
+        return (applies ? .ok : .info, "on. \(text).\(now)")
     }
 
     /// The helper row: running, running an older build or another copy's, can't start or left

@@ -1,10 +1,12 @@
 // HelperStateReader — reads the part of state.json (ARCHITECTURE §4.4) the helper acts on: the
-// LivePaper lock shortcut, `lock.hotkey`.
+// LivePaper lock shortcut, `lock.hotkey`, and "show your scene when the screens turn off first",
+// `lock.showSceneBeforeDisplaySleep`.
 //
 // state.json is decoded through LPSharedState's own Codable conformance first. If that fails — for
-// example because an app of a different version renamed or added a non-optional field — the hotkey
-// is read from the documented `lock.hotkey` path directly, so a schema change elsewhere in the
-// file can neither silently re-enable a shortcut the user turned off nor drop one they set.
+// example because an app of a different version renamed or added a non-optional field — both are
+// read from their documented paths directly, so a schema change elsewhere in the file can neither
+// silently re-enable a shortcut the user turned off nor drop one they set. The display-sleep option
+// is only ever on when the file says `true`: absent, null or anything else is off.
 //
 // Pure logic (Foundation + LivePaperCore), also compiled into LivePaperSelfTest.
 import Foundation
@@ -26,16 +28,22 @@ struct HelperLockConfig: Equatable, Sendable {
 
     /// LivePaper's own lock shortcut; nil = off.
     var hotkey: LPHotkey?
+    /// Start the screen saver shortly before the displays turn off (LPPreSleepPolicy).
+    var showSceneBeforeDisplaySleep: Bool
     var source: Source
     /// Human-readable reasons the file wasn't decoded normally (empty when it was).
     var problems: [String]
 
-    init(hotkey: LPHotkey?, source: Source, problems: [String] = []) {
-        self.hotkey = hotkey; self.source = source; self.problems = problems
+    init(hotkey: LPHotkey?, showSceneBeforeDisplaySleep: Bool = false, source: Source, problems: [String] = []) {
+        self.hotkey = hotkey; self.showSceneBeforeDisplaySleep = showSceneBeforeDisplaySleep
+        self.source = source; self.problems = problems
     }
 
     /// LPSharedState's defaults.
-    static var defaults: HelperLockConfig { HelperLockConfig(hotkey: LPSharedState().lock.hotkey, source: .defaults) }
+    static var defaults: HelperLockConfig {
+        let lock = LPSharedState().lock
+        return HelperLockConfig(hotkey: lock.hotkey, showSceneBeforeDisplaySleep: lock.showSceneBeforeDisplaySleep, source: .defaults)
+    }
 }
 
 enum HelperStateReader {
@@ -55,7 +63,8 @@ enum HelperStateReader {
         let decodeError: Error
         do {
             let state = try SceneManifest.decoder().decode(LPSharedState.self, from: data)
-            return HelperLockConfig(hotkey: state.lock.hotkey, source: .stateFile)
+            return HelperLockConfig(hotkey: state.lock.hotkey, showSceneBeforeDisplaySleep: state.lock.showSceneBeforeDisplaySleep,
+                                    source: .stateFile)
         } catch {
             decodeError = error
         }
@@ -66,13 +75,21 @@ enum HelperStateReader {
         guard let lock = root["lock"] as? [String: Any] else {
             return keep(previous, problem: "\(why); it has no \"lock\" object")
         }
+        let beforeDisplaySleep = fallbackShowSceneBeforeDisplaySleep(lock: lock)
         switch fallbackHotkey(lock: lock) {
         case .success(let hotkey):
-            return HelperLockConfig(hotkey: hotkey, source: .fallback, problems: [why])
+            return HelperLockConfig(hotkey: hotkey, showSceneBeforeDisplaySleep: beforeDisplaySleep, source: .fallback, problems: [why])
         case .failure(let failure):
             // A hotkey is present but malformed: turn it off rather than guess.
-            return HelperLockConfig(hotkey: nil, source: .fallback, problems: [why, failure.message])
+            return HelperLockConfig(hotkey: nil, showSceneBeforeDisplaySleep: beforeDisplaySleep, source: .fallback,
+                                    problems: [why, failure.message])
         }
+    }
+
+    /// `lock.showSceneBeforeDisplaySleep` without LPSharedState: on only for a JSON `true`.
+    static func fallbackShowSceneBeforeDisplaySleep(lock: [String: Any]) -> Bool {
+        guard let number = lock["showSceneBeforeDisplaySleep"] as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return false }
+        return number.boolValue
     }
 
     struct FallbackFailure: Error, Equatable { var message: String }
@@ -103,7 +120,8 @@ enum HelperStateReader {
             config.problems = [problem + "; using the defaults"]
             return config
         }
-        return HelperLockConfig(hotkey: previous.hotkey, source: .previous, problems: [problem + "; keeping the previous shortcut"])
+        return HelperLockConfig(hotkey: previous.hotkey, showSceneBeforeDisplaySleep: previous.showSceneBeforeDisplaySleep,
+                                source: .previous, problems: [problem + "; keeping the previous settings"])
     }
 
     /// A short description of a DecodingError (the default one is a wall of text).

@@ -14,6 +14,14 @@ enum HelperLockTrigger: String, Sendable {
     case hotkey
     /// LPNotification.lockNow (the app's menu-bar "Lock Now").
     case lockNowNotification
+    /// "Show your scene when the screens turn off first": the displays are about to turn off
+    /// (PreSleepWatcher, LPPreSleepPolicy).
+    case beforeDisplaySleep
+
+    /// The user asked for this lock: a refusal is shown to them (LPNotification.lockRefused, opening
+    /// the app if needed). The display-sleep start is LivePaper's own idea, so it never opens the
+    /// app or posts anything — a refusal is only logged.
+    var reportsRefusal: Bool { self != .beforeDisplaySleep }
 }
 
 /// The facts the lock decision depends on.

@@ -846,6 +846,22 @@ final class AppModel {
         syncLockKeysMirror()
     }
 
+    /// "Show your scene when the screens turn off first" (state.json, read by the helper).
+    var showSceneBeforeDisplaySleep: Bool { sharedState.lock.showSceneBeforeDisplaySleep }
+
+    func setShowSceneBeforeDisplaySleep(_ on: Bool) {
+        updateLock { $0.showSceneBeforeDisplaySleep = on }
+    }
+
+    /// Settings › Lock's line under that toggle, from the same facts the helper decides by
+    /// (LPPreSleepStatus): "Applies on battery: screens off after 5 min, screen saver after 15 min",
+    /// "Not needed: …", "Off: your password isn't required immediately …". nil until the install
+    /// status has been read (the Lock pane reads it when it appears).
+    var preSleepStatus: String? {
+        guard installStatusLoaded else { return nil }
+        return LPPreSleepStatus.text(passwordImmediately: installStatus.passwordImmediately, timers: installStatus.screenTimers)
+    }
+
     /// state.json carries the lock-keys state for the helper; the system preference is the truth
     /// (the user may also have changed it with `defaults`).
     private func syncLockKeysMirror() {

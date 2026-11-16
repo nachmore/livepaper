@@ -16,7 +16,7 @@ enum MockServices {
             library: library,
             publish: MockPublishService(root: root, library: library, pace: pace),
             ai: MockAIService(library: library, workspaces: root.appendingPathComponent("Workspaces"), pace: pace),
-            install: MockInstallService(),
+            install: MockInstallService(status: InstallStatus(screenTimers: MockInstallService.sampleScreenTimers)),
             render: render,
             checker: MockSceneChecker(pace: pace),
             compiler: compiler)
@@ -342,6 +342,11 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     init(status: InstallStatus = InstallStatus()) {
         current = status
     }
+
+    /// A laptop on its power adapter whose screens turn off after 5 min on battery and 20 on the
+    /// adapter, with the screen saver after 15 min set by a configuration profile.
+    static let sampleScreenTimers = LPScreenTimers(displaySleep: [.battery: 300, .ac: 1200], currentSource: .ac,
+                                                   screenSaverIdle: LPScreenSaverIdle(seconds: 900, source: .managed))
 
     private func mutate(_ f: (inout InstallStatus) -> Void) { lock.lock(); f(&current); lock.unlock() }
 

@@ -444,6 +444,48 @@ extension SelfTests {
             r = try sb.run(["doctor", "--no-ai"])
             try expect(r.out.contains("LivePaper doctor") && r.out.contains("problem"), r.out)
         },
+        cliTest("cli.doctor-before-screens-off") { sb in
+            // The stand-in system's timers (LIVEPAPER_SELFTEST_SCREEN_TIMERS): the owner's MacBook.
+            let timers = LPScreenTimers(displaySleep: [.battery: 300, .ac: 1200], currentSource: .ac,
+                                        screenSaverIdle: LPScreenSaverIdle(seconds: 900, source: .managed))
+            let env = ["LIVEPAPER_SELFTEST_SCREEN_TIMERS": String(decoding: try JSONEncoder().encode(timers), as: UTF8.self)]
+            func rows(_ env: [String: String]) throws -> [String: (status: String?, detail: String)] {
+                let out = try sb.run(["doctor", "--no-ai", "--json"], extraEnv: env).out
+                let checks = (try CLITestSupport.jsonObject(out)["checks"] as? [[String: Any]]) ?? []
+                var result: [String: (status: String?, detail: String)] = [:]
+                for check in checks where check["section"] as? String == "Lock screen" {
+                    result[check["name"] as? String ?? ""] = (check["status"] as? String, check["detail"] as? String ?? "")
+                }
+                return result
+            }
+            var lock = try rows(env)
+            try expectEqual(lock["idle timeout"]?.detail, "screen saver after 15 min (set by a configuration profile); LivePaper never changes it")
+            try expectEqual(lock["screens off"]?.detail, "on battery after 5 min, on power adapter after 20 min (in use)")
+            // Off by default (no state.json yet). Whether it would apply depends on the password
+            // setting, which the sandbox reads from this Mac's configuration profiles, if any.
+            var row = try unwrapRow(lock["before screens off"])
+            try expectEqual(row.status, "info")
+            try expect(row.detail.hasPrefix("off. "), row.detail)
+            try expect(row.detail.contains("Applies on battery: screens off after 5 min, screen saver after 15 min") ||
+                       row.detail.contains("password isn\u{2019}t required immediately"), row.detail)
+            // Turned on in state.json (what the app writes).
+            var state = LPSharedState()
+            state.lock.showSceneBeforeDisplaySleep = true
+            try FileManager.default.createDirectory(at: sb.support, withIntermediateDirectories: true)
+            try SceneManifest.encoder().encode(state).write(to: sb.support.appendingPathComponent("state.json"))
+            lock = try rows(env)
+            row = try unwrapRow(lock["before screens off"])
+            try expect(row.detail.hasPrefix("on. "), row.detail)
+            if row.detail.contains("Applies on battery") {
+                try expectEqual(row.status, "ok")
+                try expect(row.detail.hasSuffix("Not active now (on power adapter)."), row.detail)
+            } else {
+                try expectEqual(row.status, "info")
+            }
+            // Nothing known about the timers (any stand-in without the hook).
+            lock = try rows([:])
+            try expectEqual(lock["screens off"]?.detail, "unknown (`pmset -g custom` gave nothing LivePaper could read)")
+        },
         cliTest("cli.select") { sb in
             // `livepaper select` on a store shaped like the one that showed macOS's default on four of
             // six displays (RealShapedStore), in the sandbox's scratch store.
@@ -1035,6 +1077,12 @@ extension SelfTests {
     ] }
 
     /// A command test with a fresh sandbox; skipped (with a note) when the binary isn't usable.
+    private static func unwrapRow(_ row: (status: String?, detail: String)?, file: String = #fileID, line: Int = #line) throws
+        -> (status: String?, detail: String) {
+        guard let row else { throw TestFailure(description: "\(file):\(line) no such doctor row") }
+        return row
+    }
+
     private static func cliTest(_ name: String, _ body: @escaping (CLISandbox) throws -> Void) -> TestCase {
         TestCase(name: name) {
             guard let binary = try CLITestSupport.binary() else { return }

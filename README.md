@@ -14,6 +14,8 @@ battery use before it ever reaches your lock screen.
 * Reference images: paste, drop or pick images or folders as a starting point — or have the agent
   animate one exact picture.
 * Your usual lock keys (⌃⌘Q, Apple menu › Lock Screen, the Touch ID / lock key) can show the scene.
+* Optionally, the scene also shows when your screens turn off before the screen saver would start
+  (typical on battery).
 * One-step uninstall that puts everything back.
 
 Requires macOS 14 or later; the lock-screen behaviour described below is macOS 26 (Tahoe).
@@ -45,7 +47,15 @@ desktop picture. LivePaper builds on exactly that:
   user-level preference `com.apple.loginwindow immediateLockLaunchesScreenSaver`: no
   Accessibility or other permissions, effective immediately, and it fails safe (if the saver
   can't run, the Mac still locks). LivePaper remembers the previous value and uninstall restores
-  it. Closing the lid or letting the display sleep still locks to the wallpaper.
+  it. Closing the lid still locks to the wallpaper.
+* **Screens turning off first** (optional, off by default). If your screens turn off before the
+  screen saver starts (say after 5 minutes on battery, with the screen saver at 15), macOS locks when
+  they go dark and the lock screen shows the wallpaper. With *Show your scene when the screens turn
+  off first* on (Settings › Lock, which also says whether your settings need it), the helper starts
+  the screen saver about 8 seconds before the screens would dim, so the lock screen shows your scene.
+  It only acts when your password is required immediately and nothing (a call, a video) keeps the
+  screens on, and nothing runs while it's off. The trade-off: moving the mouse in those last seconds
+  asks for your password.
 * **The helper.** A small login item (`LivePaperHelper`) provides an optional extra lock shortcut
   of your choice and the menu bar's *Lock now*. Both start the screen saver and let it lock, which
   only locks with *Require password after screen saver begins: Immediately*. Otherwise they refuse

@@ -44,6 +44,15 @@ struct HelperPasswordPolicy: Equatable, Sendable, Codable {
         self.requirement = requirement; self.delaySeconds = delaySeconds; self.source = source
     }
 
+    /// Whether starting the screen saver locks right away (nil: unknown), as LPPreSleepPolicy takes it.
+    var immediately: Bool? {
+        switch requirement {
+        case .immediate: return true
+        case .delayed, .off: return false
+        case .unknown: return nil
+        }
+    }
+
     /// What to tell the user when the LivePaper lock won't lock; nil when it will (or when nothing
     /// is known — the lock then refuses too, see HelperLockPolicy).
     var warning: String? {

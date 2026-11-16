@@ -133,7 +133,24 @@ private struct LockSettingsTab: View {
             } header: {
                 Text("Lock keys")
             } footer: {
-                Text("macOS normally locks straight to the wallpaper. With this on it starts your screen saver first, so the lock screen shows your scene. Closing the lid or letting the display sleep still shows the wallpaper. No permissions are needed, and uninstalling LivePaper restores the previous behaviour.")
+                Text("macOS normally locks straight to the wallpaper. With this on it starts your screen saver first, so the lock screen shows your scene. Closing the lid still shows the wallpaper; for the screens turning off, see below. No permissions are needed, and uninstalling LivePaper restores the previous behaviour.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Section {
+                Toggle(isOn: Binding(get: { model.showSceneBeforeDisplaySleep }, set: { model.setShowSceneBeforeDisplaySleep($0) })) {
+                    Text("Show your scene when the screens turn off first")
+                    Text("If your screens turn off before the screen saver starts, LivePaper starts the screen saver a few seconds before they do, so the lock screen shows your scene instead of the wallpaper.")
+                }
+                if let status = model.preSleepStatus {
+                    Text(status)
+                        .font(.callout).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } header: {
+                Text("Screens turning off")
+            } footer: {
+                Text("Trade-off: moving the mouse in the last few seconds before the screens turn off then asks for your password.")
                     .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
@@ -166,6 +183,8 @@ private struct LockSettingsTab: View {
         }
         .formStyle(.grouped)
         .frame(minHeight: 440)
+        // The status line follows the energy settings, the power source and the password setting.
+        .task { await model.refreshInstallStatus() }
     }
 }
 

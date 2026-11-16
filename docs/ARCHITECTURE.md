@@ -29,6 +29,13 @@ This document is the contract between components. Keep it current when interface
   **Verified live on 26.7, takes effect without logout, password prompt still required.** Not
   covered: lid close / display-sleep locks (still the wallpaper). Idle-timeout path unchanged.
   ⇒ This is LivePaper's "lock keys show the scene" toggle: no Accessibility/Input Monitoring needed.
+* **Display sleep before the screen saver** (docs/RESEARCH.md §7): when `pmset displaysleep` of the
+  power source in use is shorter than the screen saver's idle time (managed here: screens off after
+  5 min on battery, saver after 15), macOS locks at display sleep with no saver running → the desktop
+  picture. The displays dim when the last `UserIsActive` assertion times out (they carry the
+  display-sleep time and are re-armed by activity) and turn off ~10 s later (pmset log). ⇒ LivePaper's
+  optional "Show your scene when the screens turn off first" starts the saver 8 s before the dim
+  (§7).
 * **Prewarm:** after every unlock WallpaperAgent spawns a hidden, never-presented saver instance.
   With WebKit occlusion detection disabled it would animate forever (~45 % of a core). Non-preview
   instances must render nothing until a saver is actually up — the session is locked
@@ -88,9 +95,12 @@ Package.swift                     SwiftPM (tools 6.0, Swift 6 toolchain, languag
 Sources/LivePaperCore/            models, paths, the playlist contract, library, compile/check, publish,
                                   AI sessions + harness adapters, install manager, wallpaper-store access.
                                   Foundation plus AVFoundation / CoreGraphics / ImageIO /
-                                  UniformTypeIdentifiers (video import) and ServiceManagement (helper
-                                  login item) — never AppKit or WebKit: the CLI links it.
+                                  UniformTypeIdentifiers (video import), ServiceManagement (helper
+                                  login item) and IOKit (power sources, assertions) — never AppKit or
+                                  WebKit: the CLI links it.
   Services/ServiceProtocols.swift the service API the app and CLI program against (+ LivePaperServices.live())
+  Power/                          display-sleep timers, screen-saver idle time, assertions and the
+                                  "before screens off" decision, schedule and status text (§7)
   Playlist/PlaylistModel.swift    Codable playlist + notification names, compiled into BOTH Core and the
                                   saver (keep it Foundation-only and self-contained)
   Playlist/DisplayLayout.swift    display keys, arrangement, main display, virtual canvas (also in the saver)
@@ -269,7 +279,8 @@ published *into* it.)
 ### 4.4 `state.json` (app → helper)
 ```json
 { "schema": 1,
-  "lock": { "hotkey": {"keyCode": 37, "modifiers": ["control","command"]}, "lockKeysShowScene": true },
+  "lock": { "hotkey": {"keyCode": 37, "modifiers": ["control","command"]}, "lockKeysShowScene": true,
+            "showSceneBeforeDisplaySleep": false },
   "installedAt": "…", "appVersion": "0.1.0" }
 ```
 * `hotkey`: LivePaper's own lock shortcut (absent = none). Default ⌃⌘L.
@@ -277,6 +288,10 @@ published *into* it.)
   changes the preference through `InstallServicing.setLockKeysShowScene`. Informational: loginwindow
   acts on the system preference by itself. Files from before the single toggle carry
   `takeOverSystemLock` / `takeOverLockKey`; they decode as `lockKeysShowScene = either`.
+* `showSceneBeforeDisplaySleep`: "Show your scene when the screens turn off first" (§7), **off by
+  default**; the helper acts on it. Always written; absent (files from before the option), `null` or
+  anything but a Bool decodes as off — in LPSharedState and in the helper's fallback reader, which
+  only turns it on for a JSON `true`.
 
 The app writes it and posts `com.nachmore.livepaper.stateChanged` (distributed); the helper reloads.
 
@@ -504,10 +519,57 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
     describe the new file), restarts only a Team ID-signed login item, never starts a stopped ad-hoc
     one, and says when launching the app is needed (with `--launch` it waits up to 30 s for the new
     helper to run).
+* **Before screens off** (`state.lock.showSceneBeforeDisplaySleep`, off by default;
+  `Agent/PreSleepWatcher.swift` over Core's `Power/` — `LPPreSleepPolicy`, `LPPreSleepSchedule`,
+  `LPPowerProbe`; docs/RESEARCH.md §7). When the displays are set to turn off before the screen saver
+  would start, macOS locks at display sleep with no saver running (desktop picture). With the option
+  on, the helper starts the saver through the **lock flow** (`HelperLockTrigger.beforeDisplaySleep`:
+  same `HelperLockPolicy.decide`, so the saver locks and its run gate opens) `lead` = **8 s** before
+  the displays would dim; macOS then dims them and turns them off on its own schedule (the saver holds
+  no display assertion) and the saver resumes by itself after the wake (Saver/README.md). A refusal is
+  only logged (never `lockRefused`, never opens the app).
+  * **Only when** (`LPPreSleepPolicy.decide`): the option is on; the session is unlocked; no screen
+    saver runs; the password is required immediately (`HelperPasswordPolicy`, read at every
+    evaluation — otherwise starting early changes nothing security-wise and only shows the saver
+    sooner than expected); the power source in use (`IOPSGetProvidingPowerSourceType`) has a
+    non-zero display-sleep time (`pmset -g custom`, else /Library/Preferences/com.apple.PowerManagement.plist)
+    **shorter** than the screen saver's idle time (loginwindow's: a profile's forced `idleTime`, the
+    user's current-host / any-host value, else EngineDefaults.plist's, else 1200 s; 0 = never counts
+    as longer); and nothing keeps the displays on — an untimed `PreventUserIdleDisplaySleep`,
+    `NoDisplaySleepAssertion` or `InternalPreventDisplaySleep` (a call) means `.blocked`: look again
+    after one threshold and when powerd's assertion summary changes. Timed preventers (powerd's
+    5-minute "delay display off" after such an assertion ends) only move the moment.
+  * **When** (`LPPreSleepSchedule.next`): the displays dim at max(display sleep − HID idle time
+    (`CGEventSourceSecondsSinceLastEventType(.hidSystemState, any input)`), the end of the last
+    `UserIsActive` assertion, the end of the last timed preventer) — assertions from
+    `IOPMCopyAssertionsByProcess` (`AssertTimeoutUpdateTime` + `AssertTimeoutTimeLeft`), so apps that
+    declare user activity (rcd, Bluetooth HID, capture apps) push it later. More than `lead` + 1 s
+    away → arm the timer for (that − `lead`); within [−4 s, `lead` + 1 s] → start; later → "missed"
+    (the displays may already be off): don't start, look again after one threshold
+    (display sleep − `lead`, the earliest the idle time can reach it again).
+  * **Battery:** nothing at all runs while the option is off (no observers, no timer). While on, one
+    one-shot `DispatchSource` timer (strict, 0.5 s leeway); when it fires the facts are read again
+    (sysadminctl + `pmset -g custom`, ~40 ms, off the main thread) and after activity it is armed
+    again — about once per display-sleep period while the Mac is in use, never per second. Disarmed
+    while the displays or the Mac sleep, while the session is locked (`com.apple.screenIsLocked` —
+    observed only for this, never to start a saver) or switched out; re-evaluated on the screens /
+    Mac waking, unlock, session switch-in, power-source change (`kIOPSNotifyPowerSource`), energy
+    settings change (`com.apple.system.powermanagement.prefschange`), the option, and — only while
+    `.blocked` — `com.apple.system.powermanagement.assertions` (checked with a cheap assertion read
+    first). Evaluations that overlap are merged; one that started before a disarm is dropped.
+  * **Logged** (os_log category `helper`, "before screens off (<event>): …"): state changes, every
+    start and every "missed" at notice level with the numbers (power source, display sleep, idle time
+    and its source, HID idle, when user activity / prevention ends, who keeps the displays on);
+    routine re-arms at info: `/usr/bin/log show --info --last 2h --predicate 'subsystem ==
+    "com.nachmore.livepaper" && category == "helper"' | grep 'before screens off'`.
+  * `--print-config` reports `preSleep` {enabled, appliesOn, status, now, powerSource,
+    displaySleepSeconds, screenSaverIdleSeconds/Source, leadSeconds, preventedBy}; `--self-check`
+    prints a "before screens off" line.
 * **Uninstall:** if `LPPaths.uninstallMarker` exists at launch, the agent exits 0 before it creates
   anything (launchd's KeepAlive restarts it only after a crash).
 * Watches `state.json` / `stateChanged`; relays `openApp` from the saver.
-* Idle footprint: zero timers; wakes only on events.
+* Idle footprint: zero timers and no power observers unless "before screens off" is on; otherwise
+  it wakes only on events.
 
 ## 8. RenderService (`Sources/LivePaperRenderKit`)
 JSON-lines protocol over `~/Library/Application Support/LivePaper/render.sock` (one request per
@@ -610,6 +672,10 @@ mode but published only with `--displays choose` (a note on stderr says so when 
 `--json` adds `displays {mode, onBattery, assignments}` (as published), `displayScenes` and
 `spanScenes`; the human summary names the display mode and the battery behaviour when they aren't the
 defaults.
+`doctor`'s Lock screen section also reports the screen saver's idle time and where it comes from
+("idle timeout"), each power source's display-sleep time ("screens off") and "before screens off":
+the option from state.json and `LPPreSleepStatus`'s line (OK when on and it applies somewhere, info
+otherwise, with a hint to turn it on when it would apply).
 `check` = compile → stills at 1512×982@2 for t = 0, 4, 12, 30, 90, 240, 600, plus 32:9 (2560×720
 @1, t = 12/90/600), 5:4 (1280×1024 @1, t = 12/90) and thumbnail size (320×200 @2, t = 12) →
 JS-error check → motion at 1280×720@0.5 and 1024×820@0.5 (t = 3, 17, 41, 120; gaps 0.5/2/5 s;
@@ -1024,8 +1090,14 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
 * *Settings* — Screen Saver (status — every display, not on N of M displays, not selected — and setup),
   Lock (**one** toggle "Use ⌃⌘Q and the lock key for LivePaper lock" + the optional extra shortcut
   recorder + helper status with Start Helper / Repair Helper / Open Login Items, or Use This Copy's
-  Helper while another copy's runs), Performance (profile), AI (default agent, per-agent model, time
-  limit, custom command), About (+ Uninstall).
+  Helper while another copy's runs; "Screens turning off": the toggle "Show your scene when the
+  screens turn off first" (state.json, off by default, §7) with its one-line trade-off — moving the
+  mouse in the last few seconds before the screens turn off then asks for the password — and a status
+  line from `InstallStatus.screenTimers` + `passwordImmediately` through `LPPreSleepStatus`, the
+  helper's own facts: "Applies on battery: screens off after 5 min, screen saver after 15 min" / "Not
+  needed: the screen saver starts before the screens turn off" / "Off: your password isn't required
+  immediately …"; the pane re-reads the install status when it appears), Performance (profile), AI
+  (default agent, per-agent model, time limit, custom command), About (+ Uninstall).
 * **Onboarding** (first launch; re-runnable, every step idempotent and showing live status), 4
   steps: Welcome → Screen saver (install, select — with backup, or a guided one-click step in
   System Settings) → Locking (lock keys toggle, "require password immediately", helper login item,
@@ -1079,6 +1151,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
 * Budgets enforced by `livepaper check` (§9), shown in the UI as energy badges.
 * Automatic profile: 60 fps full-res on AC; 30 fps @ 75 % on battery / Low Power Mode.
 * Pause when displays sleep; exit the saver host on willstop; video scenes use hardware decode.
+* The helper's "before screens off" (off by default) arms one one-shot timer per display-sleep
+  period while on, and nothing while off (§7).
 * Governor steps render scale down (to 0.6) if frame time stays over budget for 2 s (off while a
   scene spans displays: every display must draw the same).
 * Multiple displays on battery or in Low Power Mode: the displays other than the main one show the

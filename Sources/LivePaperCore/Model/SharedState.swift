@@ -36,13 +36,19 @@ public struct LPLockSettings: Codable, Sendable, Equatable {
     /// changes the preference through `InstallServicing.setLockKeysShowScene`. Informational: the
     /// system preference is the source of truth and loginwindow acts on it by itself.
     public var lockKeysShowScene: Bool
+    /// "Show your scene when the screens turn off first" (off by default): when the displays turn
+    /// off before the screen saver would start, the helper starts the screen saver a few seconds
+    /// before they do, so the lock screen shows the scene instead of the desktop picture
+    /// (LPPreSleepPolicy; ARCHITECTURE §7). Files from before the option decode as off.
+    public var showSceneBeforeDisplaySleep: Bool
 
-    public init(hotkey: LPHotkey? = .controlCommandL, lockKeysShowScene: Bool = false) {
+    public init(hotkey: LPHotkey? = .controlCommandL, lockKeysShowScene: Bool = false, showSceneBeforeDisplaySleep: Bool = false) {
         self.hotkey = hotkey; self.lockKeysShowScene = lockKeysShowScene
+        self.showSceneBeforeDisplaySleep = showSceneBeforeDisplaySleep
     }
 
     private enum CodingKeys: String, CodingKey {
-        case hotkey, lockKeysShowScene
+        case hotkey, lockKeysShowScene, showSceneBeforeDisplaySleep
         // Before the single toggle: two flags for the same preference.
         case takeOverSystemLock, takeOverLockKey
     }
@@ -58,12 +64,15 @@ public struct LPLockSettings: Codable, Sendable, Equatable {
             let key = try c.decodeIfPresent(Bool.self, forKey: .takeOverLockKey) ?? false
             lockKeysShowScene = system || key
         }
+        // Absent, null or not a Bool (another version's file) = off: it must never turn itself on.
+        showSceneBeforeDisplaySleep = (try? c.decodeIfPresent(Bool.self, forKey: .showSceneBeforeDisplaySleep)) ?? false
     }
 
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encodeIfPresent(hotkey, forKey: .hotkey)
         try c.encode(lockKeysShowScene, forKey: .lockKeysShowScene)
+        try c.encode(showSceneBeforeDisplaySleep, forKey: .showSceneBeforeDisplaySleep)
     }
 }
 

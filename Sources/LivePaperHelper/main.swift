@@ -6,7 +6,7 @@
 // an accessory (LSUIElement-style) NSApplication: no Dock icon, no menu bar, no windows, and it never
 // activates itself, so starting it can't take focus from the user.
 //
-// What it does — event-driven only (no timers, no polling), so it costs nothing while idle:
+// What it does — event-driven (no polling), so it costs nothing while idle:
 //  • LivePaper's optional lock shortcut (state.json `lock.hotkey`) through Carbon's
 //    RegisterEventHotKey, which needs no TCC permission. Re-read on LPNotification.stateChanged;
 //    suspended while the app's shortcut recorder is active (LPNotification.hotkeyRecording,
@@ -21,6 +21,13 @@
 //    it isn't running). It never falls back to private lock APIs.
 //  • LPNotification.openApp, posted by the sandboxed saver's "Open LivePaper…" button (sandboxed
 //    code can't launch apps): opens the app that contains this helper.
+//  • Optional, off by default (state.json `lock.showSceneBeforeDisplaySleep`, PreSleepWatcher): when
+//    the displays are set to turn off before the screen saver would start, the same lock flow starts
+//    the saver a few seconds before they do, so the lock at display sleep shows the scene. While it
+//    is on, one one-shot timer is armed for the moment the idle time would reach that point (about
+//    once per display-sleep period while the Mac is in use); while it is off nothing is observed or
+//    timed at all. It observes com.apple.screenIsLocked / screenIsUnlocked only to pause and resume
+//    that timer.
 // ⌃⌘Q, Apple menu › Lock Screen and the Touch ID / lock key are not handled here: the app sets
 // `com.apple.loginwindow immediateLockLaunchesScreenSaver`, so loginwindow itself starts the saver
 // before it locks.
@@ -32,8 +39,8 @@
 // A saver started after the lock is discarded by loginwindow: it is never shown, it only runs
 // invisibly behind the shield — and with WebKit's occlusion detection disabled (which LivePaper's
 // saver needs to draw at all) it keeps animating there, burning CPU and battery for nothing. So the
-// order is always "start the saver first; the saver locks", and the helper doesn't observe the lock
-// notifications at all.
+// order is always "start the saver first; the saver locks", and the helper never starts a saver in
+// response to a lock notification (PreSleepWatcher observes them only to stop and re-arm its timer).
 //
 // Uninstall: when LPPaths.uninstallMarker exists the agent exits 0 at launch, before it creates
 // anything (HelperLaunchPolicy). A clean exit isn't restarted by launchd's KeepAlive.

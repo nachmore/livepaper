@@ -505,7 +505,7 @@ private struct LockPage: View {
                 }
                 .accessibilityElement(children: .combine)
             }
-            Text("Closing the lid or letting the display sleep still locks to the wallpaper. Nothing here needs special permissions, and Uninstall puts the lock keys back as they were.")
+            Text("Closing the lid or letting the display sleep still locks to the wallpaper (Settings \u{203A} Lock can show your scene when the screens turn off first). Nothing here needs special permissions, and Uninstall puts the lock keys back as they were.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
