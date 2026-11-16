@@ -140,7 +140,7 @@ private struct LockSettingsTab: View {
             Section {
                 Toggle(isOn: Binding(get: { model.showSceneBeforeDisplaySleep }, set: { model.setShowSceneBeforeDisplaySleep($0) })) {
                     Text("Show your scene when the screens turn off first")
-                    Text("If your screens turn off before the screen saver starts, LivePaper starts it a few seconds earlier, so the lock screen shows your scene instead of the wallpaper.")
+                    Text("If your screens turn off before the screen saver starts, LivePaper starts the screen saver a few seconds before they do, so the lock screen shows your scene instead of the wallpaper.")
                 }
                 if let status = model.preSleepStatus {
                     Text(status)

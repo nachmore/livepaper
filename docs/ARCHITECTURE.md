@@ -488,7 +488,8 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
   * **Logged** (os_log category `helper`, "before screens off (<event>): …"): state changes, every
     start and every "missed" at notice level with the numbers (power source, display sleep, idle time
     and its source, HID idle, when user activity / prevention ends, who keeps the displays on);
-    routine re-arms at info.
+    routine re-arms at info: `/usr/bin/log show --info --last 2h --predicate 'subsystem ==
+    "com.nachmore.livepaper" && category == "helper"' | grep 'before screens off'`.
   * `--print-config` reports `preSleep` {enabled, appliesOn, status, now, powerSource,
     displaySleepSeconds, screenSaverIdleSeconds/Source, leadSeconds, preventedBy}; `--self-check`
     prints a "before screens off" line.
