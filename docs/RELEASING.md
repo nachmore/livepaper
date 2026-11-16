@@ -140,8 +140,9 @@ in the background"). Until then the lock shortcut doesn't work. An update whose 
 byte-identical is never registered again: the running helper is left alone (after Finder's Replace,
 which leaves it running from the Trash, it is restarted from the new copy). A copy opened from
 Downloads, a disk image or a build folder never takes the login item over by itself (Settings › Lock ›
-Repair Helper in that copy does, or Use This Copy's Helper while the other copy's helper runs). The ad-hoc release notes say this under
-*Updating*, and `livepaper doctor` reports the state ("can't start: launchd reports …"). The same
+Repair Helper in that copy does, or Use This Copy's Helper while the other copy's helper runs). The
+ad-hoc release notes say this under *Updating*, and `livepaper doctor` reports the state ("can't
+start: launchd reports …"). The same
 applies to nightlies and betas and to `scripts/dev-install.sh`, which compares the new helper with the
 one that runs and says when launching the app is needed. With Developer ID the recorded requirement
 should name the team rather than a cdhash (Inferred, docs/RESEARCH.md §6), so LivePaper only restarts
