@@ -75,6 +75,31 @@ final class MockAIService: AIServicing, @unchecked Sendable {
                     pace: pace, holdAfter: holdAfterSteps)
         return session
     }
+
+    /// Snapshot hook: a session an earlier LivePaper left behind whose agent still runs — only its
+    /// stills show, and it keeps "running" until cancelled.
+    func recoveredRunningSession(prompt: String, harness: AIHarness, model: String?, startedAgo: TimeInterval) -> RecoveredAISession {
+        let id = "session-" + UUID().uuidString.prefix(8).lowercased()
+        let workspace = workspaces.appendingPathComponent(id)
+        let stills = workspace.appendingPathComponent("scene/.check")
+        try? FileManager.default.createDirectory(at: stills, withIntermediateDirectories: true)
+        let request = AISessionRequest.create(prompt: prompt)
+        let style = MockAIScript(request: request, harness: harness, model: model, base: nil, workspace: workspace).style
+        let seed = MockArtwork.stableHash(id)
+        var steps = [MockAIScript.Step(delay: 0) { .status(AISession.recoveredRunningStatus) }]
+        for (i, t) in [4.0, 12, 30].enumerated() {
+            steps.append(MockAIScript.Step(delay: 0) {
+                let url = stills.appendingPathComponent("1512x982@2-t\(Int(t)).png")
+                MockArtwork.writeImage(style: style, seed: seed &+ UInt64(i), width: 480, height: 300, t: t, to: url)
+                return .stillRendered(url)
+            })
+        }
+        let session = MockAISession(id: id, workspace: workspace)
+        session.run(steps: steps, pace: pace, hold: true)
+        let record = AISessionRecord(id: id, origin: .app, runner: nil, request: request, harness: harness, model: model,
+                                     timeout: loadSettings().timeout, startedAt: Date().addingTimeInterval(-startedAgo))
+        return RecoveredAISession(record: record, handle: session, references: [], agentRunning: true)
+    }
 }
 
 final class MockAISession: AISessionHandle, @unchecked Sendable {
@@ -92,15 +117,20 @@ final class MockAISession: AISessionHandle, @unchecked Sendable {
     }
 
     func run(_ script: MockAIScript, pace: Double, holdAfter: Int? = nil) {
+        let steps = script.steps()
+        run(steps: Array(steps.prefix(holdAfter ?? steps.count)), pace: pace, hold: holdAfter != nil)
+    }
+
+    /// Plays `steps`; `hold`: then stays "running" until cancelled.
+    func run(steps: [MockAIScript.Step], pace: Double, hold: Bool) {
         let continuation = self.continuation
         let t = Task.detached {
             do {
-                let steps = script.steps()
-                for step in steps.prefix(holdAfter ?? steps.count) {
+                for step in steps {
                     try await MockServices.pause(step.delay, pace: pace)
                     if let event = try step.make() { continuation.yield(event) }
                 }
-                if holdAfter != nil {
+                if hold {
                     // Stay "running" until cancelled (the stream is finished by cancel()).
                     while !Task.isCancelled { try await Task.sleep(nanoseconds: 1_000_000_000) }
                 }

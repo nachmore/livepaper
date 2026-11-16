@@ -427,6 +427,8 @@ extension SelfTests {
                                               model: nil, timeout: 60)
                 settled.resolution = .accepted(sceneID: "x")
                 try store.create(settled, copies: ["ref-01.jpg": Data("jpg".utf8)])
+                // As old as its record says, even when something touched its workspace since.
+                let (touched, _) = try leftBehind(ai, id: "s-touched") { $0.startedAt = Date().addingTimeInterval(-9 * 86_400) }
                 // A record whose workspace is gone goes too.
                 try store.create(AISessionRecord(id: "s-orphan-record", origin: .app, runner: nil, request: .create(prompt: "x"),
                                                  harness: fakeHarness, model: nil, timeout: 60))
@@ -435,6 +437,7 @@ extension SelfTests {
                 try expect(FileManager.default.fileExists(atPath: running.root.path) && store.load("s-running") != nil, "in use")
                 try expect(store.load("s-settled") != nil && store.copy(named: "ref-01.jpg", for: "s-settled") == nil)
                 try expect(!FileManager.default.fileExists(atPath: store.folder(for: "s-orphan-record").path))
+                try expect(!FileManager.default.fileExists(atPath: touched.root.path) && store.load("s-touched") == nil)
                 // Once its agent is gone, it goes too.
                 ai.workspaceBuilder.pruneWorkspaces(probe: { _ in nil })
                 try expect(!FileManager.default.fileExists(atPath: running.root.path) && store.load("s-running") == nil)

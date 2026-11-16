@@ -1,9 +1,11 @@
-// AICommands — `livepaper ai create|modify|harnesses`: AI-authored scenes from the terminal.
+// AICommands — `livepaper ai create|modify|harnesses|sessions`: AI-authored scenes from the terminal.
 //
 // Same pipeline as the app (ARCHITECTURE §10): AIService builds a workspace and runs the agent;
 // its events are streamed here; LivePaper runs `check` itself when the agent exits; a passing
 // candidate is added to the library (create) or replaces the scene (modify, previous version kept
-// in history/) after the user accepts it — or straight away with --yes.
+// in history/) after the user accepts it — or straight away with --yes. Each session keeps the same
+// record as the app's (AISessionRecord), so a session whose CLI was killed is offered for review the
+// next time the app starts; `ai sessions` lists them.
 //
 // Reference images: `--ref <image|folder>` (repeatable) and `--animate <image>` are expanded,
 // checked and re-encoded here (ReferenceFolders / ReferenceImporter) before the session starts;
@@ -15,7 +17,7 @@ import LivePaperCore
 enum AICommands {
     static var all: [CLICommand] {
         [CLICommand(name: "ai",
-                    synopsis: "create [\"<prompt>\"] | modify <scene-id> [\"<prompt>\"] | harnesses   " +
+                    synopsis: "create [\"<prompt>\"] | modify <scene-id> [\"<prompt>\"] | harnesses | sessions   " +
                               "[--ref <image|folder>]… [--animate <image>] " +
                               "[--harness claude|codex|kiro|custom] [--command <template>] [--model <name>] " +
                               "[--timeout <minutes>] [--yes] [--json]",
@@ -30,7 +32,7 @@ enum AICommands {
     static func ai(_ argv: [String]) async throws -> Int32 {
         var args = try Arguments(argv, flags: flags, options: options)
         guard let action = args.positional.first else {
-            throw UsageError("missing action: create, modify or harnesses")
+            throw UsageError("missing action: create, modify, harnesses or sessions")
         }
         args.positional.removeFirst()
         // With images the prompt may be left out (ReferencePrompts.defaultPrompt).
@@ -62,9 +64,59 @@ enum AICommands {
         case "harnesses":
             guard args.positional.isEmpty else { throw UsageError("ai harnesses takes no arguments") }
             return await harnesses(json: args.flag("json"))
+        case "sessions":
+            guard args.positional.isEmpty else { throw UsageError("ai sessions takes no arguments") }
+            return sessions(json: args.flag("json"))
         default:
-            throw UsageError("unknown action '\(action)' (expected create, modify or harnesses)")
+            throw UsageError("unknown action '\(action)' (expected create, modify, harnesses or sessions)")
         }
+    }
+
+    // MARK: - Sessions
+
+    /// The sessions LivePaper has records of (the app's and the CLI's, newest first), with what
+    /// became of each: running, recovered, orphaned (the agent runs, nobody watches it), unreviewed,
+    /// accepted, discarded, failed, cancelled. Workspaces and records are kept for a week.
+    static func sessions(json: Bool) -> Int32 {
+        let store = AISessionRecordStore(workspacesDirectory: LPPaths.workspaces)
+        let records = store.records()
+        let rows = records.map { ($0, AISessionRecovery.state(of: $0)) }
+        if json {
+            struct Row: Encodable {
+                var id: String; var state: String; var origin: String; var startedAt: Date; var finishedAt: Date?
+                var request: String; var sceneID: String?; var prompt: String; var feedback: [String]; var references: Int
+                var harness: String; var harnessName: String; var model: String?; var workspace: String
+                var agentPID: Int32?; var outcome: String?; var message: String?; var acceptedID: String?
+            }
+            printJSONObject(rows.map { r, state -> Row in
+                var accepted: String?
+                if case .accepted(let id)? = r.resolution { accepted = id }
+                return Row(id: r.id, state: state.rawValue, origin: r.origin.rawValue, startedAt: r.startedAt, finishedAt: r.finishedAt,
+                           request: r.sceneID == nil ? "create" : "modify", sceneID: r.sceneID, prompt: r.prompt, feedback: r.feedback,
+                           references: r.references.count, harness: r.harness.kind, harnessName: r.harness.name, model: r.model,
+                           workspace: LPPaths.workspaces.appendingPathComponent(r.id).path,
+                           agentPID: state == .running || state == .recovered || state == .orphaned ? r.agent?.pid : nil,
+                           outcome: r.outcome?.status.rawValue, message: r.outcome?.message, acceptedID: accepted)
+            })
+            return ExitCode.ok
+        }
+        guard !rows.isEmpty else {
+            print("No AI sessions in the last week.")
+            return ExitCode.ok
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        printTable(header: ["STATE", "STARTED", "AGENT", "REQUEST", "PROMPT", "SESSION"], rows: rows.map { r, state in
+            let request = r.sceneID.map { "modify \($0)" } ?? "create"
+            let prompt = r.prompt.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            return [state.rawValue, formatter.string(from: r.startedAt), r.harness.name, request,
+                    prompt.count > 40 ? String(prompt.prefix(39)) + "\u{2026}" : prompt, r.id]
+        })
+        if rows.contains(where: { $0.1 == .unreviewed || $0.1 == .orphaned }) {
+            print("")
+            print("LivePaper offers unreviewed and orphaned sessions for review the next time it starts (orphaned ones once their agent finishes).")
+        }
+        return ExitCode.ok
     }
 
     // MARK: - Harness selection
@@ -221,7 +273,8 @@ enum AICommands {
         let prompt = typed.isEmpty ? (ReferencePrompts.defaultPrompt(roles: references.map(\.role), modify: modify) ?? typed) : typed
         let request = make(prompt)
 
-        let session = try ai.start(request, references: references, harness: harness, model: model?.isEmpty == false ? model : nil)
+        let session = try ai.start(request, references: references, harness: harness, model: model?.isEmpty == false ? model : nil,
+                                   details: AISessionDetails(origin: .cli))
         out.started(session: session, harness: harness, model: model, request: request, references: references)
 
         // Ctrl-C cancels the agent (its whole process group); a second Ctrl-C quits at once, and
@@ -251,11 +304,13 @@ enum AICommands {
             out.failed(failure ?? "the session ended without a result", workspace: session.workspace, checked: report != nil)
             return ExitCode.failed
         }
-        return try accept(package, request: request, yes: args.flag("yes"), out: out)
+        return try accept(package, request: request, sessionID: session.id, ai: ai, yes: args.flag("yes"), out: out)
     }
 
-    /// Adds (create) or replaces (modify) after confirmation.
-    static func accept(_ package: URL, request: AISessionRequest, yes: Bool, out: SessionPrinter) throws -> Int32 {
+    /// Adds (create) or replaces (modify) after confirmation, through AICandidate.accept like the
+    /// app (a created scene is named after itself), and records the decision.
+    static func accept(_ package: URL, request: AISessionRequest, sessionID: String, ai: AIServicing, yes: Bool,
+                       out: SessionPrinter) throws -> Int32 {
         let library = CLIServices.live.library
         let name = (try? SceneManifest.load(package: package))?.name ?? "the new scene"
         let question: String
@@ -264,16 +319,15 @@ enum AICommands {
         case .modify(let id, _): question = "Replace \(id) with this version? (the current one is kept in its history)"
         }
         guard yes || CLIEnvironment.confirm(question) else {
+            // Declined: never offered for review again.
+            ai.recordResolution(.discarded, sessionID: sessionID)
             out.note("not added; the candidate stays in \(displayPath(package)) " +
                      "(add it later with `livepaper import \(shellQuoted(displayPath(package)))`)")
             out.result(accepted: false, item: nil)
             return ExitCode.failed
         }
-        let item: SceneItem
-        switch request {
-        case .create: item = try library.importPackage(at: package)
-        case .modify(let id, _): item = try library.replaceContents(id: id, with: package)
-        }
+        let item = try AICandidate.accept(package, request: request, library: library)
+        ai.recordResolution(.accepted(sceneID: item.id), sessionID: sessionID)
         if case .modify = request { out.result(accepted: true, item: item, replaced: true) } else { out.result(accepted: true, item: item) }
         return ExitCode.ok
     }

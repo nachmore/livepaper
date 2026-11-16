@@ -274,6 +274,8 @@ final class AppModel {
         async let pl: Void = loadPlaylist()
         async let st: Void = refreshInstallStatus()
         _ = await (lib, pl, st)
+        // Sessions an earlier run left behind (it crashed, was force quit or restarted while they ran).
+        await recoverSessions()
         // Alongside the rest: waiting for publish.lock (another process publishing) mustn't hold
         // up the launch.
         let update = beginSaverUpdateIfNeeded()
@@ -649,6 +651,7 @@ final class AppModel {
     /// safety net when LivePaper becomes active or the main window opens. Quiet (see
     /// reloadLibrary(quiet:)) and coalesced: requests arriving while a pass runs share one more pass.
     func refreshFromDisk(_ changes: DiskChanges = .all) async {
+        expireOldSessions()
         pendingDiskChanges.formUnion(changes)
         if let running = diskRefresh { await running.value; return }
         let pass = Task { @MainActor [weak self] in
@@ -1298,8 +1301,11 @@ final class AppModel {
         await selectionReapply?.value
         let install = services.install
         // Agents work inside the support directory this deletes: they must be gone first — also the
-        // ones whose sessions are still being started — and no new ones start meanwhile.
+        // ones whose sessions are still being started, and orphans no session watches (their app or
+        // CLI went away since this launch) — and no new ones start meanwhile.
         await stopAllAgents()
+        let ai = services.ai
+        _ = try? await offMain { ai.stopOrphanedAgents(grace: AgentShutdown.grace) }
         let steps = (try? await offMain { install.performUninstall(removeLibrary: !keepScenes) }) ?? []
         let report = UninstallReport.make(steps)
         await refreshInstallStatus()
@@ -1391,19 +1397,22 @@ final class AppModel {
     /// the SDK and writes the images, and the picture to animate is decoded for its fingerprint and
     /// re-encoded when it doesn't fit the scene's asset budget (up to about a second for a large
     /// transparent picture), so that runs off the main thread. `isStartingSession` is true meanwhile.
+    /// `feedback`: the feedback of earlier attempts (already in the request's prompt), for the
+    /// session's record.
     @discardableResult
     func startSession(_ request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness, model: String?,
-                      clonedFrom: String? = nil) async -> AISessionModel? {
+                      clonedFrom: String? = nil, feedback: [String] = []) async -> AISessionModel? {
         let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let chosen = (trimmed?.isEmpty == false ? trimmed : nil) ?? defaultModel(for: harness)
         let ai = services.ai
         guard !refusesNewSessions else { return nil }   // quitting or uninstalling
         startingSessions += 1
         defer { startingSessions -= 1 }
+        let details = AISessionDetails(origin: .app, feedback: feedback, clonedFrom: clonedFrom)
         do {
-            let handle = try await offMain { try ai.start(request, references: references, harness: harness, model: chosen) }
+            let handle = try await offMain { try ai.start(request, references: references, harness: harness, model: chosen, details: details) }
             let session = AISessionModel(handle: handle, request: request, references: references, harness: harness, model: chosen,
-                                         timeout: aiSettings.timeout, clonedFrom: clonedFrom)
+                                         timeout: aiSettings.timeout, clonedFrom: clonedFrom, feedback: feedback)
             sessions.insert(session, at: 0)
             session.start { [weak self] s in self?.sessionDidFinish(s) }
             if refusesNewSessions {
@@ -1452,18 +1461,18 @@ final class AppModel {
         }
     }
 
-    /// Accept → library (create) or Replace (modify).
+    /// Accept → library (create) or Replace (modify), for every session — recovered ones too —
+    /// through AICandidate.accept (a created scene is named after itself, never the template).
     @discardableResult
     func accept(_ session: AISessionModel) async -> SceneItem? {
         guard let package = session.state.package, session.resolution == nil else { return nil }
-        let library = services.library
-        let request = session.request
+        let library = services.library, ai = services.ai
+        let request = session.request, id = session.id
         do {
             let item = try await offMain { () -> SceneItem in
-                switch request {
-                case .create: return try library.importPackage(at: package)
-                case .modify(let id, _): return try library.replaceContents(id: id, with: package)
-                }
+                let item = try AICandidate.accept(package, request: request, library: library)
+                ai.recordResolution(.accepted(sceneID: item.id), sessionID: id)
+                return item
             }
             session.resolution = .accepted(sceneID: item.id)
             // Try Again is gone for an accepted session: its full-size picture isn't needed any more.
@@ -1494,9 +1503,10 @@ final class AppModel {
         case .modify(let id, _): request = .modify(sceneID: id, prompt: prompt)
         }
         if session.isRunning { session.cancel() }
-        if session.resolution == nil { session.resolution = .discarded }
+        if session.resolution == nil { markDiscarded(session) }
+        let trimmed = feedback.trimmingCharacters(in: .whitespacesAndNewlines)
         let next = await startSession(request, references: session.references, harness: session.harness, model: session.model,
-                                      clonedFrom: session.clonedFrom)
+                                      clonedFrom: session.clonedFrom, feedback: session.feedback + (trimmed.isEmpty ? [] : [trimmed]))
         if next != nil { sessions.removeAll { $0 === session } }
         return next
     }
@@ -1504,8 +1514,73 @@ final class AppModel {
     /// Discard: stops the agent if needed and removes the session from the sidebar.
     func discard(_ session: AISessionModel) {
         if session.isRunning { session.cancel() }
-        if session.resolution == nil { session.resolution = .discarded }
+        if session.resolution == nil { markDiscarded(session) }
         sessions.removeAll { $0 === session }
         if section == .session(session.id) { section = .create }
+    }
+
+    /// The user is done with a session without keeping its result (its record says so, so it is
+    /// never offered again, and LivePaper's copies of its images go).
+    private func markDiscarded(_ session: AISessionModel) {
+        session.resolution = .discarded
+        let ai = services.ai, id = session.id
+        Task.detached(priority: .utility) { ai.recordResolution(.discarded, sessionID: id) }
+    }
+
+    // MARK: - Recovered sessions
+
+    /// Takes over the sessions an earlier run left behind (AIServicing.recoverSessions: LivePaper
+    /// crashed, was force quit or restarted while they ran): an agent still running is watched and
+    /// checked when it exits; a scene left behind is checked now; both end in the normal review.
+    /// They join the sidebar's AI sessions marked "Recovered". Quitting meanwhile waits for this and
+    /// stops their agents too.
+    func recoverSessions() async {
+        guard !refusesNewSessions else { return }
+        let ai = services.ai
+        startingSessions += 1
+        defer { startingSessions -= 1 }
+        let found = (try? await offMain { ai.recoverSessions() }) ?? []
+        adoptRecovered(found)
+        expireOldSessions()
+    }
+
+    /// Adds recovered sessions to the sidebar and says so (a banner, unless there are none).
+    func adoptRecovered(_ found: [RecoveredAISession]) {
+        guard !found.isEmpty else { return }
+        let adopted = found.map(AISessionModel.init(recovered:))
+        for session in adopted {
+            sessions.append(session)
+            session.start { [weak self] s in self?.sessionDidFinish(s) }
+        }
+        if refusesNewSessions {
+            // Quitting began while they were picked up: their agents stop with the others'.
+            Task { await AgentShutdown.stop(adopted) }
+            return
+        }
+        let first = adopted[0]
+        let running = found.filter(\.agentRunning).count
+        let title = adopted.count == 1 ? "Recovered an AI session" : "Recovered \(adopted.count) AI sessions"
+        let message: String
+        if adopted.count == 1 {
+            message = running == 1
+                ? "\u{201C}\(first.title)\u{201D} was still running when LivePaper quit. Its agent kept working; LivePaper checks the scene when it finishes."
+                : "\u{201C}\(first.title)\u{201D} finished while LivePaper wasn't running. LivePaper is checking the scene so you can review it."
+        } else {
+            message = "LivePaper quit while they ran. They\u{2019}re under AI Sessions, marked Recovered; LivePaper checks each scene before you review it."
+        }
+        banners.post(.info, title, message: message,
+                     actions: [.init(title: "Show") { [weak self] in self?.section = .session(first.id) }])
+    }
+
+    /// Sessions nobody looked at within the workspace retention (`WorkspaceBuilder.retention`)
+    /// leave the sidebar, and their workspaces and records are pruned (an app that runs for weeks
+    /// keeps unreviewed recovered sessions no longer than a relaunch would).
+    func expireOldSessions(now: Date = Date()) {
+        let expired = sessions.filter { !$0.isRunning && now.timeIntervalSince($0.startedAt) > WorkspaceBuilder.retention }
+        guard !expired.isEmpty else { return }
+        sessions.removeAll { s in expired.contains { $0 === s } }
+        if case .session(let id)? = section, expired.contains(where: { $0.id == id }) { section = .create }
+        let ai = services.ai
+        Task.detached(priority: .utility) { ai.pruneSessions() }
     }
 }

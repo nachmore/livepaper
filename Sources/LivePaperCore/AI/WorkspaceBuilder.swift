@@ -163,7 +163,8 @@ public final class WorkspaceBuilder: @unchecked Sendable {
 
     /// Deletes workspaces older than `retention` and the check output (stills) and reference copies
     /// of those older than `checkRetention`, by the workspace directory's modification date (which
-    /// the partial clean-up keeps, so a workspace still goes after `retention`). A session's record
+    /// the partial clean-up keeps, so a workspace still goes after `retention`) or, when that is
+    /// older, the start its session's record gives. A session's record
     /// (AISessionRecord) goes with its workspace — an unreviewed recovered session included — and a
     /// workspace whose session still runs (its agent, or the app or CLI running it) is never deleted.
     /// - Parameter probe: the process now running as a pid (tests inject theirs).
@@ -178,7 +179,9 @@ public final class WorkspaceBuilder: @unchecked Sendable {
                                                         options: [.skipsHiddenFiles]) else { return }
         for url in entries {
             guard let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate else { continue }
-            let age = now.timeIntervalSince(date)
+            // A session is as old as its workspace or its record says, whichever is older.
+            let started = records.load(url.lastPathComponent)?.startedAt
+            let age = max(now.timeIntervalSince(date), started.map { $0.timeIntervalSince1970 > 0 ? now.timeIntervalSince($0) : 0 } ?? 0)
             if age > retention {
                 guard !inUse(url.lastPathComponent) else { continue }
                 try? fm.removeItem(at: url)
