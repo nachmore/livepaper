@@ -319,6 +319,9 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
 
     /// Test hook: how often a saver was put in place (installSaver, updateSaver).
     private(set) var installCount = 0
+    /// Test hook: how often updateSaver was asked at all (whether or not it replaced anything).
+    var updateCalls: Int { lock.lock(); defer { lock.unlock() }; return updateRequests }
+    private var updateRequests = 0
 
     @discardableResult func installSaver() throws -> PublishResult? {
         mutate { $0.saverInstalled = true; $0.saverUpToDate = true; $0.saverNewerInstalled = false; installCount += 1 }
@@ -328,6 +331,7 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     /// InstallService's rules, minus the files: only an older installed build is replaced.
     func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome {
         lock.lock(); defer { lock.unlock() }
+        updateRequests += 1
         guard current.saverUpdateAvailable else {
             return .skipped(current.saverInstalled ? (current.saverNewerInstalled ? "a newer build is installed" : "already this build")
                                                    : "not installed")

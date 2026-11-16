@@ -1127,6 +1127,7 @@ extension SelfTests {
             let outdated = InstallStatus(saverInstalled: true, saverUpToDate: false)
             try withInstallModel("update-locked", status: outdated, locked: true) { model, install, lock in
                 try expectEqual(install.installCount, 0)
+                try expect(install.updateCalls == 0, "the model itself doesn't start an update while locked")
                 try expect(model.installStatus.saverUpdateAvailable, "still to do")
                 lock.isLocked = false
                 try awaitMain { await model.updateInstalledSaverIfNeeded() }
@@ -1170,6 +1171,41 @@ extension SelfTests {
                     try awaitMain(until: { !reports.values.isEmpty && !started.values.isEmpty })
                     try expectEqual(gated.events, ["update", "updated", "uninstall"])
                     try expect(!model.isInstallBusy)
+                }
+            }
+        },
+        TestCase(name: "app.model.saver-update-locked-while-waiting") {
+            // The Mac locks after the launch-time update started but before the swap (it waits on
+            // publish.lock): the model hands its own lock probe to the service, which checks it again
+            // right before the swap, so the bundle under the running lock screen stays.
+            try withScratchPaths("update-locks-late") { root in
+                let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let base = MockInstallService(status: InstallStatus(saverInstalled: true, saverUpToDate: false))
+                let gated = GatedInstall(base: base)
+                let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: gated,
+                                                 render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
+                let lock = LockFlag(false)
+                try MainActor.assumeIsolated {
+                    var env = testEnvironment(root: root, saved: SavedStates())
+                    env.isSessionLocked = { lock.isLocked }
+                    let model = AppModel(services: services, environment: env)
+                    let started = WatchLog<Bool>()
+                    Task { @MainActor in await model.start(); started.append(true) }
+                    try awaitMain(until: { gated.isHolding })
+                    lock.isLocked = true
+                    gated.release()
+                    try awaitMain(until: { !started.values.isEmpty })
+                    try expect(gated.lockProbes == [true], "the service sees the model's lock probe: \(gated.lockProbes)")
+                    try expectEqual(base.installCount, 0)
+                    try expect(!model.installStatus.saverUpToDate && model.installStatus.saverUpdateAvailable, "still to do")
+                    try expect(!model.isInstallBusy)
+                    // Unlocked again, the next update goes ahead.
+                    lock.isLocked = false
+                    gated.release()
+                    try awaitMain { await model.updateInstalledSaverIfNeeded() }
+                    try expectEqual(gated.lockProbes, [true, false])
+                    try expectEqual(base.installCount, 1)
+                    try expect(model.installStatus.saverUpToDate)
                 }
             }
         },
@@ -1700,17 +1736,19 @@ extension SelfTests {
     }
 
     /// Forwards to a MockInstallService, but holds every saver update until `release()`, and logs
-    /// the order of updates and uninstalls.
+    /// the order of updates and uninstalls, and what the caller's lock probe answered once released.
     final class GatedInstall: InstallServicing, @unchecked Sendable {
         let base: MockInstallService
         private let lock = NSLock()
         private let gate = DispatchSemaphore(value: 0)
         private var log: [String] = []
+        private var probes: [Bool] = []
         private var holding = false
 
         init(base: MockInstallService) { self.base = base }
 
         var events: [String] { lock.lock(); defer { lock.unlock() }; return log }
+        var lockProbes: [Bool] { lock.lock(); defer { lock.unlock() }; return probes }
         var isHolding: Bool { lock.lock(); defer { lock.unlock() }; return holding }
         func release() { gate.signal() }
         private func note(_ event: String, holding: Bool? = nil) {
@@ -1723,6 +1761,8 @@ extension SelfTests {
             note("update", holding: true)
             gate.wait()
             defer { note("updated", holding: false) }
+            let locked = isSessionLocked()
+            lock.lock(); probes.append(locked); lock.unlock()
             return try base.updateSaver(isSessionLocked: isSessionLocked)
         }
         func selectSaver() throws -> Bool { try base.selectSaver() }
