@@ -137,7 +137,11 @@ public protocol RenderClienting: AnyObject, Sendable {
 public struct CheckOptions: Sendable {
     public var quick: Bool
     public var power: Bool
-    public init(quick: Bool = false, power: Bool = false) { self.quick = quick; self.power = power }
+    /// For "animate this exact image" sessions: the picture the stills must show (resemblance step).
+    public var reference: ReferenceTarget?
+    public init(quick: Bool = false, power: Bool = false, reference: ReferenceTarget? = nil) {
+        self.quick = quick; self.power = power; self.reference = reference
+    }
 }
 
 public struct CheckReport: Codable, Sendable, Equatable {
@@ -161,10 +165,13 @@ public struct CheckReport: Codable, Sendable, Equatable {
     public var checkedAt: Date
     /// How alive the scene is, per analysed size (MotionAnalysis); nil when motion wasn't measured.
     public var motion: [MotionSummary]?
+    /// How much the stills look like the picture to animate (ReferenceResemblance); nil for other scenes.
+    public var reference: ReferenceCheckSummary?
     public init(passed: Bool, problems: [String] = [], warnings: [String] = [], jsErrors: [String] = [], stills: [Still] = [],
-                benchMs: [String: Double] = [:], energyMw: Double? = nil, checkedAt: Date = Date(), motion: [MotionSummary]? = nil) {
+                benchMs: [String: Double] = [:], energyMw: Double? = nil, checkedAt: Date = Date(), motion: [MotionSummary]? = nil,
+                reference: ReferenceCheckSummary? = nil) {
         self.passed = passed; self.problems = problems; self.warnings = warnings; self.jsErrors = jsErrors; self.stills = stills
-        self.benchMs = benchMs; self.energyMw = energyMw; self.checkedAt = checkedAt; self.motion = motion
+        self.benchMs = benchMs; self.energyMw = energyMw; self.checkedAt = checkedAt; self.motion = motion; self.reference = reference
     }
 }
 
@@ -275,10 +282,21 @@ public protocol AIServicing: AnyObject, Sendable {
     /// Installed harnesses (login-shell PATH), plus the custom command when one is configured.
     func detectHarnesses() async -> [AIHarness]
     /// `model` nil = the model configured in the settings for that harness (else its default).
-    func start(_ request: AISessionRequest, harness: AIHarness, model: String?) throws -> AISessionHandle
+    /// `references`: prepared images (ReferenceImporter) the agent gets copies of, in order; at most
+    /// `ReferenceLimits.maxImages`, one of them to animate (numbered ref-01). Blocking: it builds the
+    /// workspace, which decodes the picture to animate for its fingerprint and re-encodes it when it
+    /// doesn't fit the scene's asset budget (up to about a second) — call it off the main thread.
+    func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?) throws -> AISessionHandle
     /// The stored settings, or defaults when there are none (never throws: a damaged file reads as defaults).
     func loadSettings() -> AISettings
     func saveSettings(_ settings: AISettings) throws
+}
+
+public extension AIServicing {
+    /// A session without reference images.
+    func start(_ request: AISessionRequest, harness: AIHarness, model: String?) throws -> AISessionHandle {
+        try start(request, references: [], harness: harness, model: model)
+    }
 }
 
 // MARK: - Install / system integration

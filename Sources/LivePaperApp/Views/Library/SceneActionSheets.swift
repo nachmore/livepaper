@@ -5,6 +5,9 @@ import SwiftUI
 
 struct SceneActionSheet: View {
     let action: AppModel.SceneAction
+    /// The snapshot harness starts the Modify sheet with images attached.
+    var modifyTray: ReferenceTray?
+    var modifyPrompt = ""
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
 
@@ -12,7 +15,7 @@ struct SceneActionSheet: View {
         if let entry = model.entry(id: action.sceneID) {
             switch action {
             case .clone: CloneSheet(entry: entry)
-            case .modify: ModifySheet(entry: entry)
+            case .modify: ModifySheet(entry: entry, tray: modifyTray, prompt: modifyPrompt)
             case .delete: DeleteSheet(entry: entry)
             }
         } else {
@@ -101,10 +104,19 @@ private struct ModifySheet: View {
     let entry: LibraryEntry
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
-    @State private var prompt = ""
+    @State private var prompt: String
     @State private var harnessID: String?
     @State private var modelName = ""
     @State private var busy = false
+    @State private var tray: ReferenceTray
+    @State private var dropTargeted = false
+
+    @MainActor
+    init(entry: LibraryEntry, tray: ReferenceTray?, prompt: String) {
+        self.entry = entry
+        _tray = State(initialValue: tray ?? ReferenceTray())
+        _prompt = State(initialValue: prompt)
+    }
 
     var body: some View {
         SheetScaffold(symbol: "wand.and.stars", title: "Modify \u{201C}\(entry.manifest.name)\u{201D} with AI",
@@ -112,30 +124,51 @@ private struct ModifySheet: View {
                           ? "Built-in scenes are read-only, so LivePaper modifies a copy. You review the result before it's saved."
                           : "The agent edits a copy; you review the result before it replaces this scene.") {
             VStack(alignment: .leading, spacing: 12) {
-                PromptEditor(text: $prompt, placeholder: "What should change? For example: \u{201C}Slower, with a warmer palette and fewer particles.\u{201D}")
-                    .frame(height: 110)
+                VStack(alignment: .leading, spacing: 8) {
+                    PromptEditor(text: $prompt, placeholder: "What should change? For example: \u{201C}Slower, with a warmer palette and fewer particles.\u{201D}",
+                                 onImages: { inputs, notes in tray.add(inputs); tray.addNotes(notes) },
+                                 onDropTargeted: { dropTargeted = $0 })
+                        .frame(height: 110)
+                    ReferenceSuggestionBar(tray: tray)
+                }
+                ReferenceTrayView(tray: tray, compact: true, dropTargeted: dropTargeted)
                 HarnessPickerRow(harnessID: $harnessID, modelName: $modelName)
             }
         } buttons: {
+            if let preparing = ReferenceTrayText.preparing(tray.preparingCount, busy: tray.isBusy) {
+                Text(preparing).font(.callout).foregroundStyle(.secondary)
+            }
             Button("Cancel", role: .cancel) { dismiss() }
                 .keyboardShortcut(.cancelAction)
             Button("Start", action: start)
                 .keyboardShortcut(.defaultAction)
-                .disabled(!PromptComposer.isUsable(prompt) || selectedHarness == nil || busy)
+                .disabled(!canStart)
         }
+        .referenceDropTarget(tray, isTargeted: $dropTargeted, cornerRadius: 10)
         .onAppear {
             harnessID = model.preferredHarness?.id
+        }
+        .task(id: prompt) {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            await tray.updateSuggestions(for: prompt)
         }
     }
 
     private var selectedHarness: AIHarness? { model.availableHarnesses.first { $0.id == harnessID } }
 
+    private var canStart: Bool {
+        !busy && !tray.isBusy && selectedHarness != nil && PromptComposer.isUsable(prompt, hasReferences: !tray.references.isEmpty)
+    }
+
     private func start() {
-        guard let harness = selectedHarness, PromptComposer.isUsable(prompt), !busy else { return }
+        guard let harness = selectedHarness, canStart else { return }
         busy = true
+        let references = tray.references
+        let request = PromptComposer.effectivePrompt(prompt, roles: references.map(\.role), modify: true)
         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
         Task {
-            let session = await model.startModify(sceneID: entry.id, prompt: prompt, harness: harness,
+            let session = await model.startModify(sceneID: entry.id, prompt: request, references: references, harness: harness,
                                                   model: trimmed.isEmpty ? nil : trimmed)
             busy = false
             if session != nil { dismiss() }
@@ -173,15 +206,16 @@ private struct DeleteSheet: View {
 
 // MARK: - Shared AI inputs
 
-/// A multi-line prompt box with a placeholder (TextEditor has none of its own).
+/// A multi-line prompt box with a placeholder. With `onImages`, ⌘V of an image and image drops
+/// onto the text attach them (PromptTextView) instead of doing nothing.
 struct PromptEditor: View {
     @Binding var text: String
     let placeholder: String
+    var onImages: (([ReferenceInput], [String]) -> Void)?
+    var onDropTargeted: ((Bool) -> Void)?
 
     var body: some View {
-        TextEditor(text: $text)
-            .font(.body)
-            .scrollContentBackground(.hidden)
+        PromptTextView(text: $text, hint: placeholder, onImages: onImages, onDropTargeted: onDropTargeted)
             .padding(8)
             .background(.background, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(alignment: .topLeading) {
@@ -191,11 +225,10 @@ struct PromptEditor: View {
                         .padding(.horizontal, 13)
                         .padding(.vertical, 8)
                         .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
             }
             .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous).strokeBorder(.separator))
-            .accessibilityLabel("Prompt")
-            .accessibilityHint(placeholder)
     }
 }
 

@@ -25,11 +25,13 @@ public struct SceneHistoryEntry: Codable, Sendable, Equatable {
     public var summary: String?
     /// For `replace`: the `history/<timestamp>` directory holding the previous version.
     public var previous: String?
+    /// For AI actions with reference images: how many of each role (never names or paths).
+    public var references: ReferenceCounts?
 
     public init(date: Date = Date(), action: Action?, harness: String? = nil, model: String? = nil,
-                prompt: String? = nil, summary: String? = nil, previous: String? = nil) {
+                prompt: String? = nil, summary: String? = nil, previous: String? = nil, references: ReferenceCounts? = nil) {
         self.date = date; self.action = action; self.harness = harness; self.model = model
-        self.prompt = prompt; self.summary = summary; self.previous = previous
+        self.prompt = prompt; self.summary = summary; self.previous = previous; self.references = references
     }
 
     // Tolerant decoding: unknown actions from newer versions must not hide the rest of the line.
@@ -42,6 +44,7 @@ public struct SceneHistoryEntry: Codable, Sendable, Equatable {
         prompt = try? c.decodeIfPresent(String.self, forKey: .prompt)
         summary = try? c.decodeIfPresent(String.self, forKey: .summary)
         previous = try? c.decodeIfPresent(String.self, forKey: .previous)
+        references = try? c.decodeIfPresent(ReferenceCounts.self, forKey: .references)
     }
 }
 

@@ -42,7 +42,7 @@ enum MockServices {
         try enc.encode(report).write(to: dir.appendingPathComponent("report.json"), options: .atomic)
     }
 
-    static func appendHistory(_ lines: [[String: String]], package: URL) throws {
+    static func appendHistory(_ lines: [[String: Any]], package: URL) throws {
         guard !lines.isEmpty else { return }
         let url = package.appendingPathComponent(ProvenanceLog.fileName)
         var data = (try? Data(contentsOf: url)) ?? Data()

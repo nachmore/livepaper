@@ -15,6 +15,10 @@
 //   * The V3 engine ignores `toolsSettings` and reads `permissions.rules` instead: the same commands
 //     as globs (V3 parses a command line and judges each command in it), everything else in the
 //     shell denied, writes allowed under scene/**, reads allowed.
+//   * Reference images (references/**, scene/assets/reference.*), in sessions that have them, are never writable: V2
+//     `deniedPaths` (present in the 3.3 binary), V3 an `exclude` on the write rule (unverified;
+//     LivePaper restores the picture to animate after the session, which is the real guarantee).
+//     Kiro sees the images through its read tool in Image mode, which TASK.md asks for.
 //
 // No MCP servers (`includeMcpJson: false` also keeps the user's own out), no hooks, no resources.
 // Anything else a tool asks for needs approval, which a non-interactive session can't give.
@@ -50,8 +54,23 @@ public enum KiroAgentConfig {
         return (["scene/**"] + roots.map { ($0 as NSString).appendingPathComponent("scene/**") }).filter { seen.insert($0).inserted }
     }
 
-    public static func json(for workspace: AIWorkspace) throws -> Data {
+    /// Files the agent may read but never write even inside scene/: the reference images and the
+    /// picture to animate (V2 `deniedPaths`, V3 an `exclude` on the write rule). LivePaper puts the
+    /// picture back after the session anyway; this keeps the agent from trying.
+    static func protectedPatterns(for workspace: AIWorkspace) -> [String] {
+        let relative = [ReferenceWorkspace.directoryName + "/**", "scene/" + SceneCompiler.assetsDirectory + "/" + ReferenceWorkspace.assetBaseName + ".*"]
+        var roots = [workspace.root.standardizedFileURL.path]
+        if let real = AISessionPolicy.realPath(workspace.root.path) { roots.append(real) }
+        var seen = Set<String>()
+        return (relative + roots.flatMap { root in relative.map { (root as NSString).appendingPathComponent($0) } })
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// - Parameter protectingReferences: the session has reference images (only then do the write
+    ///   rules carry `deniedPaths` / `exclude`, so sessions without keep the config validated before).
+    public static func json(for workspace: AIWorkspace, protectingReferences: Bool = false) throws -> Data {
         let writable = writablePatterns(for: workspace)
+        let protected = protectingReferences ? protectedPatterns(for: workspace) : []
         let config: [String: Any] = [
             "name": name,
             "description": "LivePaper scene session: edits ./scene and runs only the livepaper scene commands",
@@ -63,7 +82,7 @@ public enum KiroAgentConfig {
             "resources": [String](),
             "hooks": [String: Any](),
             "toolsSettings": [
-                "write": ["allowedPaths": writable],
+                "write": protected.isEmpty ? ["allowedPaths": writable] : ["allowedPaths": writable, "deniedPaths": protected],
                 "shell": ["allowedCommands": shellRegexes, "denyByDefault": true],
             ],
             "includeMcpJson": false,
@@ -71,16 +90,17 @@ public enum KiroAgentConfig {
             "permissions": ["rules": [
                 ["capability": "shell", "match": shellGlobs, "effect": "allow"],
                 ["capability": "shell", "match": ["*"], "exclude": shellGlobs, "effect": "deny"],
-                ["capability": "fs_write", "match": writable, "effect": "allow"],
+                protected.isEmpty ? ["capability": "fs_write", "match": writable, "effect": "allow"]
+                    : ["capability": "fs_write", "match": writable, "exclude": protected, "effect": "allow"],
                 ["capability": "fs_read", "effect": "allow"],
             ]],
         ]
         return try JSONSerialization.data(withJSONObject: config, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])
     }
 
-    public static func write(in workspace: AIWorkspace) throws {
+    public static func write(in workspace: AIWorkspace, protectingReferences: Bool = false) throws {
         let url = url(in: workspace)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try (json(for: workspace) + Data("\n".utf8)).write(to: url, options: .atomic)
+        try (json(for: workspace, protectingReferences: protectingReferences) + Data("\n".utf8)).write(to: url, options: .atomic)
     }
 }

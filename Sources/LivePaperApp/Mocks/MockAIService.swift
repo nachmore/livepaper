@@ -1,7 +1,9 @@
 // MockAIService — a believable stand-in for an AI agent session: detects three harnesses and
 // streams the kind of event sequence a real agent produces (reading the SDK, writing the scene,
 // running `livepaper check`, fixing a budget problem, rendering stills), then hands back a real
-// candidate package on disk. A prompt containing "fail" exercises the failure path.
+// candidate package on disk. A prompt containing "fail" exercises the failure path. Reference
+// images are copied into the mock workspace's references/ like the real service does (the
+// picture to animate also into the candidate's assets/), and the script "looks" at each one.
 import Foundation
 import LivePaperCore
 
@@ -13,6 +15,11 @@ final class MockAIService: AIServicing, @unchecked Sendable {
     /// Snapshot/test hook: sessions stop after this many scripted steps and keep "running" until
     /// cancelled, which freezes the UI in its mid-session state.
     var holdAfterSteps: Int?
+    /// Test hook: for every `start`, whether it ran on the main thread (it must not: the real one
+    /// builds the workspace, which can take a second).
+    var startsOnMainThread: [Bool] { lock.lock(); defer { lock.unlock() }; return mainThreadStarts }
+    private var mainThreadStarts: [Bool] = []
+    private let lock = NSLock()
 
     init(library: MockLibraryService, workspaces: URL, pace: Double) {
         self.library = library
@@ -41,7 +48,9 @@ final class MockAIService: AIServicing, @unchecked Sendable {
         ]
     }
 
-    func start(_ request: AISessionRequest, harness: AIHarness, model: String?) throws -> AISessionHandle {
+    func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?) throws -> AISessionHandle {
+        lock.lock(); mainThreadStarts.append(Thread.isMainThread); lock.unlock()
+        try ReferencePrompts.validate(references)
         let id = "session-" + UUID().uuidString.prefix(8).lowercased()
         let workspace = workspaces.appendingPathComponent(id)
         try FileManager.default.createDirectory(at: workspace.appendingPathComponent("scene"), withIntermediateDirectories: true)
@@ -50,9 +59,20 @@ final class MockAIService: AIServicing, @unchecked Sendable {
             guard let item = try library.scene(id: sceneID) else { throw LibraryError.notFound(sceneID) }
             base = item
         }
+        // The copies the agent works from, named like the real workspace's (never the originals' names).
+        var files: [MockAIScript.Reference] = []
+        if !references.isEmpty {
+            let dir = workspace.appendingPathComponent(ReferenceWorkspace.directoryName)
+            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+            for (i, ref) in ReferenceWorkspace.numbered(references).enumerated() {   // ref-01 = the picture to animate
+                let rel = ReferenceWorkspace.relativeImagePath(index: i + 1, format: ref.vision.format)
+                try ref.vision.data.write(to: workspace.appendingPathComponent(rel), options: .atomic)
+                files.append(.init(path: rel, role: ref.role, data: ref.vision.data, format: ref.vision.format))
+            }
+        }
         let session = MockAISession(id: id, workspace: workspace)
-        session.run(MockAIScript(request: request, harness: harness, model: model, base: base, workspace: workspace), pace: pace,
-                    holdAfter: holdAfterSteps)
+        session.run(MockAIScript(request: request, harness: harness, model: model, base: base, workspace: workspace, references: files),
+                    pace: pace, holdAfter: holdAfterSteps)
         return session
     }
 }
@@ -108,11 +128,22 @@ struct MockAIScript: Sendable {
         var make: @Sendable () throws -> AISessionEvent?
     }
 
+    /// A reference image copied into the mock workspace.
+    struct Reference: Sendable {
+        var path: String
+        var role: AIReferenceRole
+        var data: Data
+        var format: EncodedReferenceImage.Format
+    }
+
     let request: AISessionRequest
     let harness: AIHarness
     let model: String?
     let base: SceneItem?
     let workspace: URL
+    var references: [Reference] = []
+
+    var animated: Reference? { references.first { $0.role == .animate } }
 
     var prompt: String { PromptComposer.prompt(of: request) }
     var shouldFail: Bool { prompt.range(of: "fail", options: .caseInsensitive) != nil }
@@ -171,6 +202,14 @@ struct MockAIScript: Sendable {
             say(0.6, .toolUse(name: "Read", detail: "sdk/SCENE_API.md")),
             say(0.4, .toolUse(name: "Read", detail: "sdk/livepaper.d.ts")),
             say(0.4, .toolUse(name: "Read", detail: "scene/scene.js")),
+        ]
+        if !references.isEmpty {
+            s += references.map { say(0.4, .toolUse(name: "Read", detail: $0.path)) }
+            s.append(say(1.2, .assistantText(animated != nil
+                ? "I looked at the picture to animate: I'll draw it cover-fit as the base of every frame and add slow mist, a gentle shimmer and a very slow camera drift."
+                : "I looked at the \(references.count == 1 ? "reference image" : "\(references.count) reference images"): I'll take the palette and the composition from them and paint the layers procedurally.")))
+        }
+        s += [
             say(2.0, .assistantText(isModify
                 ? "Plan: keep the palette and composition, apply the requested change in update(), and avoid new per-frame allocations."
                 : "Plan: a gradient sky, three slow layers with parallax, and a calm area at the top so the clock stays readable. Everything is driven by lp.t so stills are deterministic.")),
@@ -211,11 +250,23 @@ struct MockAIScript: Sendable {
         try manifest.write(package: sceneDir)
         try Data(MockSampleData.sceneJS.utf8).write(to: sceneDir.appendingPathComponent("scene.js"))
         MockArtwork.writeImage(style: style, seed: seed, width: 640, height: 400, t: 12, to: sceneDir.appendingPathComponent("thumbnail.jpg"))
-        try MockServices.appendHistory([[
+        if let animated {
+            // The real service writes a full-resolution copy; the mock reuses the vision copy.
+            let assets = sceneDir.appendingPathComponent(SceneCompiler.assetsDirectory)
+            try fm.createDirectory(at: assets, withIntermediateDirectories: true)
+            try animated.data.write(to: assets.appendingPathComponent(ReferenceWorkspace.assetBaseName + "." + animated.format.fileExtension),
+                                    options: .atomic)
+        }
+        var line: [String: Any] = [
             "date": ISO8601DateFormatter().string(from: Date()), "action": base == nil ? "create" : "modify",
             "harness": harness.uiTitle, "model": model ?? "", "prompt": prompt,
             "summary": "Layered scene with cached static layers; 1.6 ms/frame.",
-        ]], package: sceneDir)
+        ]
+        if !references.isEmpty {
+            let counts = ReferenceCounts(roles: references.map(\.role))
+            line["references"] = ["reference": counts.reference, "animate": counts.animate]
+        }
+        try MockServices.appendHistory([line], package: sceneDir)
         let report = CheckReport(passed: true, warnings: ["Scene is a little bright at t=600 (mean luminance 71); fine for most wallpapers."],
                                  benchMs: ["1512x982@2 t=14": 1.6, "5120x1440@1 t=14": 2.4], energyMw: 72)
         try MockServices.writeReport(report, package: sceneDir)

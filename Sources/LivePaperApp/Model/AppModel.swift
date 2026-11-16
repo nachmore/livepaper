@@ -1132,6 +1132,11 @@ final class AppModel {
 
     var runningSessions: [AISessionModel] { sessions.filter(\.isRunning) }
 
+    /// Sessions being started (their workspaces are built off the main thread): Generate, Start
+    /// and Try Again wait meanwhile.
+    private(set) var startingSessions = 0
+    var isStartingSession: Bool { startingSessions > 0 }
+
     /// Stops every AI agent and waits (at most `AgentShutdown.limit`) until their processes are
     /// gone: before LivePaper quits, and before uninstalling deletes their workspaces.
     func stopAllAgents() async { await AgentShutdown.stop(sessions) }
@@ -1147,13 +1152,21 @@ final class AppModel {
     }
 
     /// Starts an AI session and navigates to it. `model` nil = the default from Settings › AI.
+    /// `references` are already prepared (ReferenceTray), but building the workspace still copies
+    /// the SDK and writes the images, and the picture to animate is decoded for its fingerprint and
+    /// re-encoded when it doesn't fit the scene's asset budget (up to about a second for a large
+    /// transparent picture), so that runs off the main thread. `isStartingSession` is true meanwhile.
     @discardableResult
-    func startSession(_ request: AISessionRequest, harness: AIHarness, model: String?, clonedFrom: String? = nil) -> AISessionModel? {
+    func startSession(_ request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness, model: String?,
+                      clonedFrom: String? = nil) async -> AISessionModel? {
         let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let chosen = (trimmed?.isEmpty == false ? trimmed : nil) ?? defaultModel(for: harness)
+        let ai = services.ai
+        startingSessions += 1
+        defer { startingSessions -= 1 }
         do {
-            let handle = try services.ai.start(request, harness: harness, model: chosen)
-            let session = AISessionModel(handle: handle, request: request, harness: harness, model: chosen,
+            let handle = try await offMain { try ai.start(request, references: references, harness: harness, model: chosen) }
+            let session = AISessionModel(handle: handle, request: request, references: references, harness: harness, model: chosen,
                                          timeout: aiSettings.timeout, clonedFrom: clonedFrom)
             sessions.insert(session, at: 0)
             session.start { [weak self] s in self?.sessionDidFinish(s) }
@@ -1167,7 +1180,8 @@ final class AppModel {
 
     /// "Modify with AI". Built-in scenes are read-only, so a copy is modified instead.
     @discardableResult
-    func startModify(sceneID: String, prompt: String, harness: AIHarness, model: String?) async -> AISessionModel? {
+    func startModify(sceneID: String, prompt: String, references: [PreparedReference] = [], harness: AIHarness,
+                     model: String?) async -> AISessionModel? {
         guard let entry = entry(id: sceneID) else { return nil }
         var target = sceneID
         var clonedFrom: String?
@@ -1177,7 +1191,8 @@ final class AppModel {
             target = copy.id
             clonedFrom = entry.manifest.name
         }
-        return startSession(.modify(sceneID: target, prompt: prompt), harness: harness, model: model, clonedFrom: clonedFrom)
+        return await startSession(.modify(sceneID: target, prompt: prompt), references: references, harness: harness, model: model,
+                                  clonedFrom: clonedFrom)
     }
 
     private func sessionDidFinish(_ session: AISessionModel) {
@@ -1208,6 +1223,8 @@ final class AppModel {
                 }
             }
             session.resolution = .accepted(sceneID: item.id)
+            // Try Again is gone for an accepted session: its full-size picture isn't needed any more.
+            session.releasePictureToAnimate()
             await didChangeContents(of: item)
             let verb = session.isModify ? "Updated" : "Added"
             banners.post(.success, "\(verb) \u{201C}\(item.manifest.name)\u{201D}",
@@ -1223,9 +1240,10 @@ final class AppModel {
         }
     }
 
-    /// "Try again with feedback": a new session with the original prompt plus the feedback.
+    /// "Try again with feedback": a new session with the original prompt plus the feedback, and
+    /// the same reference images (same ids and roles; nothing is read from disk again).
     @discardableResult
-    func retry(_ session: AISessionModel, feedback: String) -> AISessionModel? {
+    func retry(_ session: AISessionModel, feedback: String) async -> AISessionModel? {
         let prompt = PromptComposer.retry(original: session.prompt, feedback: feedback)
         let request: AISessionRequest
         switch session.request {
@@ -1234,7 +1252,8 @@ final class AppModel {
         }
         if session.isRunning { session.cancel() }
         if session.resolution == nil { session.resolution = .discarded }
-        let next = startSession(request, harness: session.harness, model: session.model, clonedFrom: session.clonedFrom)
+        let next = await startSession(request, references: session.references, harness: session.harness, model: session.model,
+                                      clonedFrom: session.clonedFrom)
         if next != nil { sessions.removeAll { $0 === session } }
         return next
     }

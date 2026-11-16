@@ -76,6 +76,19 @@ public enum AISessionPolicy {
         defer { free(p) }
         return String(cString: p)
     }
+
+    /// The real path, or why there is none: `denied` when macOS refused access (EPERM / EACCES:
+    /// a privacy-protected folder such as the Desktop that this process may not read), as opposed
+    /// to the path not existing.
+    static func lookUp(_ path: String) -> (real: String?, denied: Bool) {
+        errno = 0
+        guard let p = Darwin.realpath(path, nil) else {
+            let e = errno
+            return (nil, e == EPERM || e == EACCES)
+        }
+        defer { free(p) }
+        return (String(cString: p), false)
+    }
 }
 
 /// A request the AI-session policy refuses (a usage error for the CLI: exit status 2).

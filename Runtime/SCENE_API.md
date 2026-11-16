@@ -312,6 +312,108 @@ first: `#` moves at most sampled moments, `+` at some, `.` never — and `heatma
 frame with moving tiles tinted (amber: most of the time, blue: sometimes, grey: still; red outline:
 flicker), also as `.check/previews/motion-<size>.jpg`.
 
+### Animating a still picture
+
+Sometimes the user hands you a photo or painting and asks you to *animate this exact image*
+(TASK.md › Reference images says so, and LivePaper has put a full-resolution copy in
+`scene/assets/reference.jpg` — `.png` when it has transparency). The scene must show **that
+picture**, recognisably the same, on every screen shape — and bring it to life subtly:
+
+* **Cover-fit, every frame.** `s = Math.max(lp.w / img.width, lp.h / img.height)`, centred: the
+  picture fills 16:10, 32:9 (a horizontal band of it) and 5:4 (the sides of a landscape picture
+  cropped, the top and bottom of a portrait one) with no bars, stretching or mirroring. Draw it once
+  per frame with the 9-argument `drawImage` as the base layer.
+* **Keep it the same picture.** Composition, colours and details stay; don't redraw, restyle,
+  recolour or replace it. If it is too bright for the budgets (TASK.md gives its brightness and a
+  `darkenTo` factor, which covers the clock at every screen shape — on 32:9 it sits lower on the
+  picture), darken it *evenly* (black at a low alpha over it) and/or add a soft dark gradient behind
+  the clock — the check compares structure and hue, so even darkening is fine; desaturating or tinting
+  it warns.
+* **Transparent pictures** (a cut-out, `reference.png`): fill a backdrop every frame first —
+  whatever fits the picture; a dark one keeps the clock readable — then draw the picture over it.
+  The check compares only the picture's opaque parts, so any backdrop is fine. (The example below
+  never clears the canvas because its opaque picture covers it; a cut-out would smear trails.)
+* **Motion that belongs to what it shows:** water shimmering (horizontal strips of the picture,
+  each offset by smooth noise), clouds, mist or fog drifting (soft low-alpha layers), foliage
+  swaying (strips or cut-outs), particles that fit (snow, rain, dust, fireflies, embers), slow light
+  changes (a glint, a glow — never flashing), and a slow Ken Burns camera (≤ 6 % zoom/pan,
+  periods ≥ 60 s, seamless sin/cos), which moves every textured part of the picture at once.
+* **Everywhere, cheaply.** The camera reaches the detailed parts; smooth areas (sky, still water,
+  shadows) need local motion of their own (mist, shimmer, motes) — the motion check counts regions.
+  One `drawImage` of the picture plus ≤ 40 strips, layers pre-rendered in `resize()`, no per-frame
+  `getImageData`/`filter`/`shadowBlur`, and fewer strips and particles when `lp.quality < 1`.
+* **Leave the asset alone.** Don't edit, re-encode, rename or delete `assets/reference.jpg`;
+  LivePaper puts it back when the session ends and checks the scene with it. A 3840-px picture is
+  about 40 MB once decoded, so draw it, don't copy it into more canvases than you need.
+
+`livepaper check` then also compares its stills with the picture (cover-fit, allowing for the
+slow camera; §14): a scene that doesn't load it, or whose stills don't show it, fails.
+
+The pattern, complete (a lake photo: Ken Burns camera, shimmering water in the lower part, even
+darkening and a soft shade behind the clock, two mist layers, motes — 0.4 ms per frame, motion in all
+nine regions at 16:9 and 5:4, similarity to the picture about 0.9 at every size; LivePaper's
+self-test runs exactly this code through the check):
+
+```js
+const U = LivePaper.util;
+const R = U.mulberry32(5);
+const MOTES = Array.from({ length: 80 }, () => [R(), R(), 0.5 + R(), R() * U.TAU]);   // x0, y0, speed, phase
+let img, mist, shade;
+
+LivePaper.scene({
+  setup() { img = LivePaper.image('reference.jpg'); },     // decoded before setup runs
+  resize(lp) {
+    mist = U.layer(lp.w * 2, lp.h * 0.4, lp.dpr);           // two screens wide, seamless at its ends
+    for (let i = 0; i < 36; i++) {
+      const x = (i / 36) * mist.w, y = mist.h * (0.3 + 0.4 * U.noise1(i * 0.9));
+      for (const dx of [0, mist.w, -mist.w]) U.glow(mist.ctx, x + dx, y, lp.h * 0.14, '#c8d2e0', 0.12);
+    }
+    shade = U.layer(lp.w, lp.h, lp.dpr);                    // dark gradient behind the clock
+    const g = shade.ctx.createLinearGradient(0, 0, 0, lp.h * 0.45);
+    g.addColorStop(0, 'rgba(0,0,0,0.45)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+    shade.ctx.fillStyle = g; shade.ctx.fillRect(0, 0, lp.w, lp.h * 0.45);
+  },
+  draw(lp) {
+    const c = lp.ctx, t = lp.t;
+    // Cover-fit with a slow Ken Burns camera: zoom 1–5 %, panning only within the margin the zoom
+    // adds, so the view never leaves the cover-fit framing (at 32:9 that framing is a narrow band).
+    const fit = Math.max(lp.w / img.width, lp.h / img.height), z = 1.025 + 0.025 * Math.sin(t * U.TAU / 97);
+    const s = fit * z, w = img.width * s, h = img.height * s;
+    const x = (lp.w - w) / 2 + (w - img.width * fit) * 0.4 * Math.sin(t * U.TAU / 131);
+    const y = (lp.h - h) / 2 + (h - img.height * fit) * 0.4 * Math.sin(t * U.TAU / 113);
+    c.drawImage(img, 0, 0, img.width, img.height, x, y, w, h);
+    // Water shimmer: strips of the picture's lower part (image coordinates), each nudged ≤ 2 CSS px.
+    const y0 = img.height * 0.62, n = Math.round(32 * lp.quality), sh = (img.height - y0) / n;
+    for (let i = 0; i < n; i++) {
+      const sy = y0 + i * sh, off = (U.noise1(i * 0.37 + t * 0.6) - 0.5) * 4;
+      c.drawImage(img, 0, sy, img.width, sh, x + off, y + sy * s, w, sh * s + 1);
+    }
+    // Brightness budgets: an even darkening (TASK.md's darkenTo) and the shade behind the clock,
+    // under the effects so they stay visible.
+    c.fillStyle = 'rgba(0,0,0,0.15)'; c.fillRect(0, 0, lp.w, lp.h);
+    c.drawImage(shade.canvas, 0, 0, lp.w, lp.h);
+    // Two mist layers at different heights and speeds.
+    for (const [my, speed, alpha] of [[0, 4, 0.9], [0.45, 9, 0.7]]) {
+      const mx = -((t * speed) % mist.w);
+      c.globalAlpha = alpha;
+      c.drawImage(mist.canvas, mx, lp.h * my, mist.w, mist.h);
+      c.drawImage(mist.canvas, mx + mist.w, lp.h * my, mist.w, mist.h);
+    }
+    c.globalAlpha = 1;
+    // Motes drifting everywhere; fewer when the governor lowers lp.quality.
+    for (let i = 0; i < Math.floor(MOTES.length * lp.quality); i++) {
+      const [x0, y0m, sp, ph] = MOTES[i];
+      U.glow(c, (x0 * lp.w + t * 5 * sp) % lp.w, y0m * lp.h + Math.sin(t * 0.4 + ph) * 8, 2.5 + 1.5 * sp, '#fff4dc', 0.35);
+    }
+  }
+});
+```
+
+Adapt the regions to the picture (where its water, sky or foliage is), not the numbers to the
+example. In WebGL, upload the picture once as a texture and offset the lookup in the shader with a
+masked noise (`uv += mask(uv) * (noise(uv * k + t * s) - 0.5) * amp`) for water and heat haze; the
+same rules apply.
+
 ## 8. The clock
 
 LivePaper draws an Apple-style lock-screen clock (date above a large time, SF font) over the scene.
@@ -418,6 +520,12 @@ vert, frag, bin. Limits: 4 MB per file, 8 MB in total — and every byte is load
 starts, so prefer drawing procedurally. Text assets (SVG, JSON, shaders) must not reference external
 URLs either.
 
+**The picture to animate.** A scene made to animate one of the user's pictures has it as
+`assets/reference.jpg` (`reference.png` when it has transparency), written by LivePaper at up to
+3840 px and sized to fit these limits next to the scene's other assets; load it with
+`LivePaper.image('reference.jpg')` and leave the file as it is (§7, "Animating a still picture").
+It makes the compiled scene a few MB larger, and the screen saver holds it decoded (about 40 MB).
+
 ## 12. WebGL scenes
 
 ```js
@@ -453,7 +561,10 @@ LivePaper.scene({
   the screen saver. Derive everything from `lp.t` and seeds.
 * **One classic script.** No ES modules, no extra script files, no workers loaded from files.
 * **Original work only.** Scenes are shared publicly: no copyrighted characters, logos, artwork,
-  photos, fonts or text you don't have the rights to. Procedural art is ideal.
+  photos, fonts or text you don't have the rights to. Procedural art is ideal. The one exception is
+  the user's own pictures: reference images they attached to an AI session are a brief to work from
+  (draw procedurally), and the one picture they asked to animate is shown as
+  `assets/reference.jpg`. Add no other third-party material.
 * **Don't touch the page around you.** No DOM elements, CSS or event listeners of your own: the
   runtime owns the page (and there is no input — the screen saver never receives clicks or keys).
 
@@ -473,7 +584,9 @@ clock hidden), measures how alive the scene is (motion coverage, spread, busynes
   fixed), `warnings` (advice), `jsErrors`, `stills` (path, size, t, `meanLuma`, `clockLuma`),
   `benchMs` (`"1512x982@2 t=30": 1.4`; entries ending in ` probe` are short runs that only locate the
   heaviest moment), `energyMw`, `motion` (§7: `coverage5s`, `coverage2s`, `spread`, `regions`,
-  `stillRegions`, `busy`, `flicker`, `map`, `heatmap` per size).
+  `stillRegions`, `busy`, `flicker`, `map`, `heatmap` per size), and for a scene animating the
+  user's picture `reference` (`asset`, `assetIntact`, `referencedInScene`, `similarity` per still,
+  `median`).
 * `<scene-dir>/.check/motion-<W>x<H>@<dpr>.png` — the motion heat maps (also in `previews/` as JPEGs).
 * `<scene-dir>/.check/<W>x<H>@<dpr>-t<T>.png` — the stills. Look at them: they are what users see.
   `<scene-dir>/.check/previews/<W>x<H>@<dpr>-t<T>.jpg` are the same stills as small JPEGs (at most
@@ -493,6 +606,17 @@ Thresholds: frame brightness ≤ 165/255 on average; behind the clock ≤ 120/25
 sampled time; not black at t = 600 when earlier stills aren't; motion within 5 s over ≥ 25 % of the
 frame and in ≥ 5 of its 9 regions; ≤ 50 % of the frame changing strongly within 0.5 s; ≤ 30 %
 changing sharply within a fraction of a second (flicker, §7).
+
+**Animating a picture.** In an AI session that animates one of the user's pictures, the check also
+compares 7 stills (1512×982 at t = 4, 12, 90, 600; 2560×720 at t = 12, 90; 1280×1024 at t = 12; the
+quick check: 3) with the cover-fit picture on a coarse grid, allowing a slow camera (zoom ≤ 16 %,
+offset ≤ 6 %) and ignoring the clock, even darkening and — for a transparent picture — whatever is
+behind its transparent parts: similarity 0–1, where the picture shown as described in §7 scores about
+0.8–1. It **fails** when scene.js never loads `reference.jpg`, or when the median similarity is below
+0.35 (the stills don't show the picture, or are darkened or fogged until they are flat); it **warns**
+below 0.70 at 16:10, when 32:9 or 5:4 fall far below 16:10 (stretched or letterboxed instead of
+cover-fit), when the picture's colours are gone (desaturated, tinted), and when `assets/reference.jpg`
+was changed. `livepaper check` prints a `picture` line.
 
 ## 15. Host bridge (for host developers)
 

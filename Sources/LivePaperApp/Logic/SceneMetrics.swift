@@ -113,6 +113,14 @@ enum LPFormat {
         return mw < 1000 ? String(format: "%.0f mW", mw) : String(format: "%.1f W", mw / 1000)
     }
 
+    /// A check's resemblance to the picture to animate: "0.92", "not shown (scene.js never loads it)",
+    /// or "not compared" (a picture with too little detail).
+    static func resemblance(_ r: ReferenceCheckSummary) -> String {
+        if !r.referencedInScene { return "not shown (scene.js never loads it)" }
+        guard let median = r.median, median.isFinite else { return "not compared" }
+        return String(format: "%.2f", median)
+    }
+
     /// Elapsed time as "0:07", "4:05" or "1:02:03".
     static func elapsed(_ seconds: TimeInterval) -> String {
         let s = max(0, Int(seconds.rounded(.down)))
