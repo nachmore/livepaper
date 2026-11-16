@@ -110,6 +110,42 @@ enum SnapshotHarness {
         if let done { model.section = .session(done.id) }
         shoot("session-done-light", main, dark: false, MainWindowView())
 
+        // Reference images: the Describe-it card and the Modify sheet with images attached (one to
+        // animate, one that couldn't be added, a note, a path typed into the prompt), and a session
+        // that was given images. The pictures are generated; the Desktop path is never looked at.
+        let pictures = root.appendingPathComponent("pictures")
+        try? fm.createDirectory(at: pictures, withIntermediateDirectories: true)
+        func picture(_ name: String, _ style: MockArtwork.Style, seed: UInt64, _ w: Int = 1600, _ h: Int = 1000) -> URL {
+            let url = pictures.appendingPathComponent(name)
+            MockArtwork.writeImage(style: style, seed: seed, width: w, height: h, to: url)
+            return url
+        }
+        let harbour = picture("harbour-at-dusk.jpg", .ocean, seed: 3)
+        let dunes = picture("dunes.jpg", .dunes, seed: 5, 1000, 1400)
+        let fog = picture("morning-fog.jpg", .fog, seed: 8)
+        let lanterns = picture("lanterns.jpg", .lanterns, seed: 2)
+        let sketch = pictures.appendingPathComponent("brief.pdf")
+        try? Data("%PDF-1.4\nnot really a PDF\n".utf8).write(to: sketch)
+        let createTray = ReferenceTray()
+        createTray.addFiles([harbour, dunes, fog, sketch])
+        wait { await createTray.settled() }
+        if let first = createTray.items.first { createTray.setRole(.animate, for: first.id) }
+        createTray.addNotes(["Left out 2 files that aren\u{2019}t images."])
+        let createPrompt = "Bring the harbour to life: slow ripples and drifting mist, colours like the dunes. More in ~/Desktop/refs/"
+        wait { await createTray.updateSuggestions(for: createPrompt) }
+        shoot("create-references-light", CGSize(width: 940, height: 900), dark: false,
+              CreateView(describeTray: createTray, describePrompt: createPrompt))
+        let modifyTray = ReferenceTray()
+        modifyTray.addFiles([lanterns, fog])
+        wait { await modifyTray.settled() }
+        shoot("modify-references-dark", CGSize(width: 480, height: 500), dark: true,
+              SceneActionSheet(action: .modify("aurora-lake"), modifyTray: modifyTray, modifyPrompt: "Warmer, with lanterns like these"))
+        (services.ai as? MockAIService)?.holdAfterSteps = nil   // this one runs to the end
+        let withImages = model.startSession(.create(prompt: createPrompt), references: createTray.references, harness: harness, model: nil)
+        waitUntil { withImages?.isRunning == false }
+        if let withImages { model.section = .session(withImages.id) }
+        shoot("session-references-light", main, dark: false, MainWindowView())
+
         // An explicit playlist: per-card markers and the ordered list with remove buttons; one scene
         // is left out of the publish (PublishResult.skipped).
         (services.publish as? MockPublishService)?.simulatedSkips =
@@ -127,7 +163,7 @@ enum SnapshotHarness {
 
         let shortSheet = CGSize(width: 480, height: 170)
         shoot("sheet-clone-light", shortSheet, dark: false, SceneActionSheet(action: .clone("aurora-lake")))
-        shoot("sheet-modify-dark", CGSize(width: 480, height: 330), dark: true, SceneActionSheet(action: .modify("aurora-lake")))
+        shoot("sheet-modify-dark", CGSize(width: 480, height: 440), dark: true, SceneActionSheet(action: .modify("aurora-lake")))
         shoot("sheet-delete-light", shortSheet, dark: false, SceneActionSheet(action: .delete("neon-rain")))
         shoot("settings-saver-light", CGSize(width: 640, height: 520), dark: false, SettingsView(initialTab: .screenSaver))
         shoot("settings-lock-light", CGSize(width: 640, height: 600), dark: false, SettingsView(initialTab: .lock))

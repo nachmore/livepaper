@@ -54,6 +54,12 @@ private struct SessionHeader: View {
                     Text(session.harness.uiTitle)
                     if let m = session.model { Text("\u{00B7}"); Text(m) }
                     if let source = session.clonedFrom { Text("\u{00B7}"); Text("copy of \(source)") }
+                    if let counts = session.referenceCounts {
+                        Text("\u{00B7}")
+                        Text(counts.total == 1 ? "1 reference" : "\(counts.total) references")
+                            .help(counts.description)
+                            .accessibilityLabel(counts.description)
+                    }
                     Text("\u{00B7}")
                     Text(AISessionState.describe(session.state.phase)).lineLimit(1)
                     if session.state.toolCallCount > 0 {
@@ -236,6 +242,7 @@ private struct SessionResultPanel: View {
         VStack(alignment: .leading, spacing: 18) {
             hero(state)
             if !state.stills.isEmpty { filmstrip(state) }
+            if !session.references.isEmpty { SessionReferences(references: session.references) }
             if let report = state.report {
                 SectionBox(title: "LivePaper Check", symbol: "checklist") {
                     CheckReportSummary(report: report)
@@ -354,6 +361,48 @@ private struct SessionResultPanel: View {
     }
 }
 
+/// The images the agent was given (the prepared copies held in memory; the workspace's own copies
+/// are pruned after a day): which one it animates, and that trying again keeps them.
+private struct SessionReferences: View {
+    let references: [PreparedReference]
+
+    var body: some View {
+        SectionBox(title: "References", symbol: "photo.on.rectangle.angled") {
+            VStack(alignment: .leading, spacing: 8) {
+                ScrollView(.horizontal) {
+                    HStack(spacing: 8) {
+                        ForEach(Array(references.enumerated()), id: \.element.id) { i, reference in
+                            tile(reference, index: i)
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .scrollIndicators(.never)
+                Text(ReferenceTrayText.sessionCaption(roles: references.map(\.role)))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func tile(_ reference: PreparedReference, index: Int) -> some View {
+        let animate = reference.role == .animate
+        let shape = RoundedRectangle(cornerRadius: 6, style: .continuous)
+        return ThumbnailImage(reference: reference, maxPixel: 240)
+            .frame(width: 96, height: 60)
+            .clipShape(shape)
+            .overlay { shape.strokeBorder(animate ? Color.accentColor : Color.secondary.opacity(0.3), lineWidth: animate ? 2 : 1) }
+            .overlay(alignment: .bottomLeading) {
+                if animate { OverlayBadge(title: "Animate", symbol: "film").padding(4) }
+            }
+            .help(reference.displayName + (animate ? " \u{2014} the picture to animate" : ""))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Reference image \(index + 1) of \(references.count), \(reference.displayName), \(animate ? "animate" : "reference")")
+            .accessibilityAddTraits(.isImage)
+    }
+}
+
 // MARK: - Decision
 
 /// Accept / Replace / Try again / Discard, depending on how the session ended.
@@ -439,6 +488,9 @@ private struct SessionDecisionBar: View {
                 .lineLimit(2...4)
                 .textFieldStyle(.roundedBorder)
             Button(buttonTitle) { model.retry(session, feedback: feedback) }
+                .help(session.references.isEmpty
+                      ? "Starts a new session that keeps the prompt, with your feedback added"
+                      : "Starts a new session that keeps the prompt and reference images, with your feedback added")
         }
     }
 }

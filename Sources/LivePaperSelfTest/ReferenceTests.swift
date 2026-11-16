@@ -14,7 +14,7 @@ import LivePaperCore
 import UniformTypeIdentifiers
 
 extension SelfTests {
-    static var references: [TestCase] { referenceCore + referenceRuntime + referenceApp }
+    static var references: [TestCase] { referenceCore + referenceRuntime + referenceApp + referenceAppUI }
 
     static var referenceCore: [TestCase] { [
         TestCase(name: "core.ai.references.importer.formats") { try ReferenceTests.importerFormats() },

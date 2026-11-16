@@ -53,6 +53,11 @@ final class ReferenceTray {
     private var dismissed: Set<String> = []
     private var dataCounters: [String: Int] = [:]
     private var suggestionGeneration = 0
+    /// Batches (adds, attaches) queued or running.
+    private var pendingBatches = 0
+    /// Called with the reasons when images of one batch couldn't be prepared (the Create card posts
+    /// a banner; the tray itself marks the tiles and lists the reasons under them).
+    @ObservationIgnored var onFailures: (@MainActor ([String]) -> Void)?
 
     init(prepare: @escaping Prepare = { try ReferenceImporter.prepare($0) },
          expand: @escaping Expand = { ReferenceFolders.expand($0, capacity: $1, excluding: $2) },
@@ -67,6 +72,17 @@ final class ReferenceTray {
     var activeCount: Int { items.filter { !$0.isFailed }.count }
     var remainingCapacity: Int { max(0, ReferenceLimits.maxImages - activeCount) }
     var isPreparing: Bool { items.contains(where: \.isPreparing) }
+    var preparingCount: Int { items.filter(\.isPreparing).count }
+    /// Anything added is still being looked at: folders expanded, a suggestion resolved, images
+    /// prepared. Generate / Start wait for it (a folder's images only appear once it was expanded).
+    var isBusy: Bool { pendingBatches > 0 || isPreparing }
+    /// The reasons images couldn't be added, one per failed tile, in tray order.
+    var failures: [(id: UUID, message: String)] {
+        items.compactMap { item in
+            if case .failed(let why) = item.state { return (item.id, why) }
+            return nil
+        }
+    }
     var isEmpty: Bool { items.isEmpty }
 
     /// The prepared images, in tray order, with the roles chosen in the tray.
@@ -131,9 +147,11 @@ final class ReferenceTray {
 
     private func enqueue(_ work: @escaping @MainActor () async -> Void) {
         let previous = queue
-        let task = Task { @MainActor in
+        pendingBatches += 1
+        let task = Task { @MainActor [weak self] in
             await previous?.value
             await work()
+            self?.pendingBatches -= 1
         }
         queue = task
     }
@@ -187,15 +205,19 @@ final class ReferenceTray {
         }
         // One at a time: a photo takes a few hundred ms and up to ~100 MB while it is decoded.
         let prepare = self.prepare
+        var failed: [String] = []
         for (id, input) in added {
             guard items.contains(where: { $0.id == id }) else { continue }   // removed meanwhile
             let result = await Task.detached { Result { try prepare(input) } }.value
             guard let i = items.firstIndex(where: { $0.id == id }) else { continue }
             switch result {
             case .success(let prepared): items[i].state = .ready(prepared)
-            case .failure(let error): items[i].state = .failed(error.localizedDescription)
+            case .failure(let error):
+                items[i].state = .failed(error.localizedDescription)
+                failed.append(error.localizedDescription)
             }
         }
+        if !failed.isEmpty { onFailures?(failed) }
     }
 
     nonisolated static func realPath(_ path: String) -> String? {
@@ -284,35 +306,71 @@ enum ReferencePasteRules {
     static func imageType(in types: [String]) -> String? {
         types.first { UTType($0)?.conforms(to: .image) == true }
     }
+
+    /// What to attach from a paste (or a drop onto the prompt) that `classify` calls images: the
+    /// file URLs (folders expand in the tray, other files are counted as left out there), else the
+    /// image data of each item, read through `data(item, type)` (the AppKit side reads the
+    /// pasteboard). Data is checked against `maxBytes` once read; nothing is written anywhere.
+    static func inputs(itemTypes: [[String]], fileURLs: [URL], data: (Int, String) -> Data?,
+                       dataName: String = ReferenceTray.pastedName,
+                       maxBytes: Int = ReferenceLimits.maxFileBytes) -> (inputs: [ReferenceInput], notes: [String]) {
+        guard classify(itemTypes: itemTypes, fileURLs: fileURLs) == .images else { return ([], []) }
+        if !fileURLs.isEmpty { return (fileURLs.map { ReferenceInput.file($0) }, []) }
+        var inputs: [ReferenceInput] = [], notes: [String] = []
+        for (i, types) in itemTypes.enumerated() {
+            guard let type = imageType(in: types) else { continue }
+            guard let d = data(i, type), !d.isEmpty else {
+                notes.append("The \(dataName.lowercased()) couldn\u{2019}t be read."); continue
+            }
+            guard d.count <= maxBytes else {
+                notes.append(ReferenceError.tooLarge(name: dataName.lowercased(), bytes: d.count).localizedDescription); continue
+            }
+            inputs.append(ReferenceInput(source: .data(d, typeIdentifier: type), role: .reference, displayName: dataName))
+        }
+        return (inputs, Array(Set(notes)).sorted())
+    }
 }
 
-/// Turns dropped items into inputs: file URLs (Finder, Photos) as files, image data (a browser, an
-/// app) as data, and web URLs as a note — LivePaper never downloads anything.
+/// Turns dropped (or, with `dataName: pastedName`, pasted) items into inputs: file URLs (Finder)
+/// as files, image data (Photos, a browser, an app) as data, and web URLs as a note — LivePaper
+/// never downloads anything.
+///
+/// Image data is read through `loadFileRepresentation` where the provider offers it (Photos' file
+/// promises, large images): macOS hands over its own temporary copy, which it deletes as soon as
+/// the handler returns, so the size is checked before anything is read into memory and nothing is
+/// left behind. LivePaper itself writes no temporary files.
 enum ReferenceDropReader {
     static let acceptedTypes: [UTType] = [.fileURL, .image, .url]
+    /// What ⌘V outside the prompt box accepts (a typed path pastes as text; web URLs aren't images).
+    static let pasteTypes: [UTType] = [.fileURL, .image]
 
     static let webNote = "LivePaper doesn't download images \u{2014} save it to your Mac first, then drop the file."
 
-    static func inputs(from providers: [NSItemProvider]) async -> (inputs: [ReferenceInput], notes: [String]) {
+    static func inputs(from providers: [NSItemProvider], dataName: String = ReferenceTray.droppedName,
+                       maxBytes: Int = ReferenceLimits.maxFileBytes) async -> (inputs: [ReferenceInput], notes: [String]) {
         var inputs: [ReferenceInput] = [], notes: [String] = []
+        func note(_ text: String) { if !notes.contains(text) { notes.append(text) } }
         for provider in providers {
             if provider.hasItemConformingToTypeIdentifier(UTType.fileURL.identifier), let url = await fileURL(provider) {
                 inputs.append(.file(url))
             } else if let type = ReferencePasteRules.imageType(in: provider.registeredTypeIdentifiers) {
-                switch await data(provider, type: type) {
-                case .some(let d) where d.count <= ReferenceLimits.maxFileBytes:
-                    inputs.append(ReferenceInput(source: .data(d, typeIdentifier: type), role: .reference, displayName: ReferenceTray.droppedName))
-                case .some(let d):
-                    notes.append(ReferenceError.tooLarge(name: ReferenceTray.droppedName.lowercased(), bytes: d.count).localizedDescription)
-                case .none:
-                    notes.append("A dropped image couldn't be read.")
+                let name = provider.suggestedName.flatMap { $0.isEmpty ? nil : $0 } ?? dataName
+                switch await load(provider, type: type, maxBytes: maxBytes) {
+                case .data(let d):
+                    inputs.append(ReferenceInput(source: .data(d, typeIdentifier: type), role: .reference, displayName: name))
+                case .tooLarge(let bytes):
+                    note(ReferenceError.tooLarge(name: name == dataName ? dataName.lowercased() : name, bytes: bytes).localizedDescription)
+                case .unreadable:
+                    note("A\(dataName == ReferenceTray.pastedName ? " pasted" : " dropped") image couldn\u{2019}t be read.")
                 }
             } else if provider.hasItemConformingToTypeIdentifier(UTType.url.identifier) {
-                if !notes.contains(webNote) { notes.append(webNote) }
+                note(webNote)
             }
         }
         return (inputs, notes)
     }
+
+    private enum Loaded { case data(Data), tooLarge(Int), unreadable }
 
     private static func fileURL(_ provider: NSItemProvider) async -> URL? {
         await withCheckedContinuation { (done: CheckedContinuation<URL?, Never>) in
@@ -320,9 +378,98 @@ enum ReferenceDropReader {
         }
     }
 
-    private static func data(_ provider: NSItemProvider, type: String) async -> Data? {
-        await withCheckedContinuation { (done: CheckedContinuation<Data?, Never>) in
-            _ = provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in done.resume(returning: data) }
+    /// The image's bytes: from macOS's temporary file when there is one (size checked first), else
+    /// as data (checked once loaded).
+    private static func load(_ provider: NSItemProvider, type: String, maxBytes: Int) async -> Loaded {
+        let viaFile = await withCheckedContinuation { (done: CheckedContinuation<Loaded?, Never>) in
+            _ = provider.loadFileRepresentation(forTypeIdentifier: type) { url, _ in
+                guard let url else { done.resume(returning: nil); return }
+                // Deleted by macOS when this handler returns: check the size, then read it whole (not mapped).
+                let size = (try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey])).flatMap { v in
+                    v.isRegularFile == true ? v.fileSize : nil
+                }
+                guard let size else { done.resume(returning: nil); return }
+                if size > maxBytes { done.resume(returning: .tooLarge(size)); return }
+                let data = try? Data(contentsOf: url)
+                done.resume(returning: data.flatMap { $0.isEmpty ? nil : .data($0) })
+            }
         }
+        if let viaFile { return viaFile }
+        return await withCheckedContinuation { (done: CheckedContinuation<Loaded, Never>) in
+            _ = provider.loadDataRepresentation(forTypeIdentifier: type) { data, _ in
+                guard let data, !data.isEmpty else { done.resume(returning: .unreadable); return }
+                done.resume(returning: data.count > maxBytes ? .tooLarge(data.count) : .data(data))
+            }
+        }
+    }
+}
+
+// MARK: - Wording
+
+/// Sentences and labels of the tray, the tiles and the suggestion chips (kept here so they're tested).
+enum ReferenceTrayText {
+    /// "Reference image 2 of 4, sunset.heic, animate".
+    static func tileLabel(_ item: ReferenceTray.Item, index: Int, count: Int) -> String {
+        var parts = ["Reference image \(index + 1) of \(count)", item.displayName]
+        switch item.state {
+        case .preparing: parts.append("preparing")
+        case .failed(let why): parts.append("couldn\u{2019}t be added: \(why)")
+        case .ready: parts.append(item.role == .animate ? "animate" : "reference")
+        }
+        return parts.joined(separator: ", ")
+    }
+
+    static let referenceChoice = "Reference \u{2014} inspiration for style, colours and composition"
+    static let animateChoice = "Animate this image \u{2014} the scene shows this exact picture, brought to life"
+
+    /// The card's footer while images are being prepared ("Preparing 2 images…"; "Preparing
+    /// images…" while a folder is still being looked through), else nil.
+    static func preparing(_ n: Int, busy: Bool = false) -> String? {
+        if n > 0 { return "Preparing \(n == 1 ? "1 image" : "\(n) images")\u{2026}" }
+        return busy ? "Preparing images\u{2026}" : nil
+    }
+
+    /// " on your Desktop", " in Downloads", " in iCloud Drive", " on “Backup”", or "" — where a
+    /// mentioned path lives, for the suggestion chips.
+    static func location(of url: URL, home: URL = LPPaths.home) -> String {
+        let path = url.deletingLastPathComponent().standardizedFileURL.path
+        func under(_ rel: String) -> Bool {
+            let root = home.appendingPathComponent(rel).path
+            return path == root || path.hasPrefix(root + "/")
+        }
+        if under("Desktop") { return " on your Desktop" }
+        if under("Documents") { return " in Documents" }
+        if under("Downloads") { return " in Downloads" }
+        if under("Library/Mobile Documents") { return " in iCloud Drive" }
+        let parts = url.standardizedFileURL.pathComponents
+        if parts.count > 2, parts[1] == "Volumes" { return " on \u{201C}\(parts[2])\u{201D}" }
+        return ""
+    }
+
+    /// "The agent can't open “refs” on your Desktop. Attach copies of its images?"
+    static func suggestion(_ m: PromptPathMention, home: URL = LPPaths.home) -> String {
+        let name = m.url.lastPathComponent
+        switch m.kind {
+        case .folder: return "The agent can\u{2019}t open \u{201C}\(name)\u{201D}\(location(of: m.url, home: home)). Attach copies of its images?"
+        case .image: return "The agent can\u{2019}t open \u{201C}\(name)\u{201D}\(location(of: m.url, home: home)). Attach a copy?"
+        }
+    }
+
+    /// Under a session's references: what the agent does with them, and that trying again keeps them.
+    static func sessionCaption(roles: [AIReferenceRole]) -> String {
+        let animates = roles.contains(.animate)
+        switch (animates, roles.count) {
+        case (true, 1): return "The scene shows this picture, brought to life. Trying again keeps it."
+        case (true, _): return "The scene shows the picture marked Animate; the others are inspiration. Trying again keeps them."
+        case (false, 1): return "Inspiration for the scene. Trying again keeps it."
+        default: return "Inspiration for the scene. Trying again keeps them."
+        }
+    }
+
+    /// The Create card's banner for images that couldn't be added.
+    static func failureBanner(_ messages: [String]) -> (title: String, message: String)? {
+        guard let first = messages.first else { return nil }
+        if messages.count == 1 { return ("An image couldn\u{2019}t be added", first) }
+        return ("\(messages.count) images couldn\u{2019}t be added", first + " The others are listed under the images.")
     }
 }
