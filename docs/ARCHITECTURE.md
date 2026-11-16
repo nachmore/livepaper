@@ -415,8 +415,8 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
     error banner with Try Again. Both go once a status read shows the helper running.
   * Settings › Lock and onboarding show "LivePaper helper can't start" with **Repair Helper** (otherwise
     Start Helper): `registerHelper`, the same logic on the user's request — which may take the helper
-    over from another copy. While another copy's helper runs (the row is done), Settings › Lock says so
-    and offers **Use This Copy's Helper**: `registerHelper` then registers the login item from this
+    over from another copy. While another copy's helper runs (the row is done), Settings › Lock and
+    onboarding say so and offer **Use This Copy's Helper**: `registerHelper` then registers the login item from this
     copy (the only way to move it while that helper works; the automatic repair never does).
   * `livepaper doctor` reports "can't start: launchd reports …" or an unfinished re-registration with
     the fix (open LivePaper; else Login Items off/on or log out and in), and warns about an outdated
