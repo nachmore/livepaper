@@ -223,7 +223,8 @@ final class WebSceneHost: NSObject, SceneHost, WKNavigationDelegate, WKUIDelegat
         // Apply whatever changed while the page was loading (the config the page started with
         // only knows the state at creation time).
         run(SaverJS.lockUI(effectiveLockUI))
-        if effectivePaused { run(SaverJS.pause) }
+        // The page may have started paused (LIVEPAPER_CONFIG.paused) and the gate opened since.
+        run(effectivePaused ? SaverJS.pause : SaverJS.resume)
         if power != initialPower || profile != initialProfile {
             run(SaverJS.power(SaverPowerUpdate(power: power, profile: profile)))
         }

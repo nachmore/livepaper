@@ -69,6 +69,7 @@ enum SceneCommands {
         }
         printMotion(r, checkDir: checkDir, previews: previews)
         printReference(r)
+        printSpan(r)
         if let mw = r.energyMw {
             let p = SceneChecker.powerProfile
             print("  energy       \(fmt(mw)) mW at \(p.fps) fps, \(Int(p.scale * 100)) % scale (battery profile; budget \(fmt(budgets.energyMaxMw)))")
@@ -117,6 +118,15 @@ enum SceneCommands {
             print("               heat map \(displayPath(shown)) (amber = moves most of the time, blue = sometimes, grey = still, " +
                   "red outline = flicker)")
         }
+    }
+
+    /// "  span         across displays (B, t=12): laptop 0.19, external 0.00 /255 from the whole canvas — they line up"
+    static func printSpan(_ r: CheckReport) {
+        guard let slices = r.span, let first = slices.first else { return }
+        let parts = slices.map { s in "\(s.display) \(s.meanDiff.map { fmt($0, 2) } ?? "–")" }.joined(separator: ", ")
+        let verdict = slices.contains { $0.passed == nil } ? "not checked (render server too old)"
+            : slices.allSatisfy { $0.passed == true } ? "they line up" : "they don't line up (see problems)"
+        print("  span         across displays (\(first.arrangement), t=\(CheckFrame.num(first.t))): \(parts) /255 from the whole canvas — \(verdict)")
     }
 
     /// "  picture      like the reference: 0.93 (16:10 0.94 · 32:9 0.90 · 5:4 0.92)"

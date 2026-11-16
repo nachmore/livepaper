@@ -43,6 +43,10 @@ enum SpanRuntimeTests {
         try expectEqual(merged["still"] as? Bool, true)
         try expectEqual(merged["spanClockH"] as? Double, 982)
         try expectEqual(RenderSpan.config(["t": 1.0], span: nil).count, 1)
+        try expect(span.problem == nil)
+        try expect(RenderSpan(canvasW: .infinity, canvasH: 10, x: 0, y: 0).problem != nil)
+        try expect(RenderSpan(canvasW: 100_000, canvasH: 100, x: 0, y: 0).problem != nil)
+        try expect(RenderSpan(canvasW: 100, canvasH: 100, x: 0, y: 0, clockX: .nan).problem != nil)
         // A request without a span is unchanged on the wire (old servers decode it as before).
         let plain = String(decoding: try JSONEncoder().encode(RenderRequest(op: .still, html: "/x")), as: UTF8.self)
         try expect(!plain.contains("span"), plain)

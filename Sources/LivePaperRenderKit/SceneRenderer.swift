@@ -75,7 +75,7 @@ final class SceneRenderer {
         let html = try Self.readHTML(r)
         let clock = r.clock ?? true
         // debug: JS errors are also printed on the frame, so whoever looks at the PNG sees them.
-        let config = Self.config(["still": true, "t": r.t ?? 8, "clock": clock, "debug": true,
+        let config = try Self.config(["still": true, "t": r.t ?? 8, "clock": clock, "debug": true,
                                   "dprMax": max(2, dpr), "seed": 1], for: r)
         return try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, info in
             // A span slice's clock rect is in canvas coordinates (and usually on another slice).
@@ -115,7 +115,7 @@ final class SceneRenderer {
         let (size, dpr) = try Self.geometry(r)
         let html = try Self.readHTML(r)
         let frames = min(max(r.frames ?? 120, 1), 5000)
-        let config = Self.config(["bench": frames, "t": r.t ?? 0, "clock": false, "dprMax": max(2, dpr), "seed": 1], for: r)
+        let config = try Self.config(["bench": frames, "t": r.t ?? 0, "clock": false, "dprMax": max(2, dpr), "seed": 1], for: r)
         return try await withPage(html: html, size: size, dpr: dpr, config: config, deadline: deadline) { page, info in
             guard let ms = (info["bench"] as? NSNumber)?.doubleValue else {
                 throw PageFailure(message: "the page did not report a bench result", ready: true, errors: page.errors)
@@ -331,8 +331,9 @@ final class SceneRenderer {
     }
 
     /// The page configuration of a still/bench request: `base` plus the span keys (RenderSpan).
-    static func config(_ base: [String: Any], for r: RenderRequest) -> [String: Any] {
-        RenderSpan.config(base, span: r.span)
+    static func config(_ base: [String: Any], for r: RenderRequest) throws -> [String: Any] {
+        if let span = r.span, let problem = span.problem { throw RenderFailure(problem) }
+        return RenderSpan.config(base, span: r.span)
     }
 
     /// Copies what the page reported about span and update() from its 'ready' message.

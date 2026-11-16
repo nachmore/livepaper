@@ -31,6 +31,16 @@ public struct RenderSpan: Codable, Sendable, Equatable {
         return keys
     }
 
+    /// Why the server refuses this span, or nil: the canvas must be 16–32768 CSS px per side and
+    /// every value finite (the page's slice is limited like any page by the request's size).
+    public var problem: String? {
+        let values = [canvasW, canvasH, x, y] + [clockX, clockY, clockW, clockH].compactMap { $0 }
+        guard values.allSatisfy(\.isFinite) else { return "span values must be finite numbers" }
+        guard (16...32768).contains(canvasW), (16...32768).contains(canvasH) else { return "the span canvas must be 16–32768 CSS px per side" }
+        guard abs(x) <= 32768, abs(y) <= 32768 else { return "the span viewport must lie within ±32768 CSS px" }
+        return nil
+    }
+
     /// `config` with the span keys merged in (nothing changes without a span).
     public static func config(_ config: [String: Any], span: RenderSpan?) -> [String: Any] {
         guard let span else { return config }
