@@ -277,10 +277,16 @@ extension PlaylistDraft {
     /// (`SceneManifest.spans`: videos unless they opt out, web scenes that declare `"span": true`);
     /// the others show on every display. Ids without a manifest are left out; the order is kept.
     static func spanSupport(ids: [String], manifests: [String: SceneManifest]) -> (spanning: [String], notSpanning: [String]) {
+        spanSupport(ids: ids, spans: manifests.mapValues(\.spans))
+    }
+
+    /// The same from each scene's published span flag (`LibraryEntry.spans`, PublishedSpan: a web
+    /// scene that declares span but breaks the span rules doesn't span).
+    static func spanSupport(ids: [String], spans: [String: Bool]) -> (spanning: [String], notSpanning: [String]) {
         var spanning: [String] = [], notSpanning: [String] = []
         for id in ids {
-            guard let m = manifests[id] else { continue }
-            if m.spans { spanning.append(id) } else { notSpanning.append(id) }
+            guard let s = spans[id] else { continue }
+            if s { spanning.append(id) } else { notSpanning.append(id) }
         }
         return (spanning, notSpanning)
     }

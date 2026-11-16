@@ -706,4 +706,6 @@ lower density to stay within `MAX_VIEWPORT_DIMS`.
 1512×982 laptop bottom-aligned next to a 2560×1440 display) at t = 12 as a whole and as each
 display's slice, and fails the scene when a slice doesn't match its crop of the whole
 (`.check/span-B-t12-*.png`, `span` in `report.json`). Quick checks skip the renders but not the
-`update()`/`Math.random()` rules.
+`update()`/`Math.random()` rules. Publishing checks the claim too: a scene with `"span": true` that
+calls `Math.random()`, defines `update()` or failed its last check's span rules is published as not
+spanning, so it shows whole on every display instead of drifting apart.

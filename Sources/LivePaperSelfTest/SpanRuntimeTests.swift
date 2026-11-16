@@ -160,16 +160,21 @@ enum SpanRuntimeTests {
         try expect(fake.spanRequests.allSatisfy { $0.dpr == 1 && $0.t == 12 && $0.clock == false }, "B at 1×, t = 12, clock off")
         try expectEqual(good.span?.map(\.display), ["laptop", "external"])
         try expect(good.span?.allSatisfy { $0.passed == true && $0.path.hasSuffix(".png") } == true, "\(good.span ?? [])")
+        // The verdict publishing reads (PublishedSpan).
+        try expectEqual(good.spanPassed, true); try expectEqual(good.spanVerdict, true)
         // A scene laid out from its own page size doesn't.
         let (broken, _) = try check { $0.offsetIgnored = true }
         try expect(!broken.passed && broken.problems.contains { $0.contains("doesn't span displays") && $0.contains("innerWidth") }, "\(broken.problems)")
         try expect(broken.problems.contains { $0.contains("external") }, "names the slice: \(broken.problems)")
+        try expectEqual(broken.spanPassed, false)
         // update() and Math.random() can't span.
         let (stateful, _) = try check { $0.hasUpdate = true }
         try expect(stateful.problems.contains { $0.contains("defines update(lp, dt)") }, "\(stateful.problems)")
+        try expectEqual(stateful.spanPassed, false)
         let random = "LivePaper.scene({ draw(lp) { lp.ctx.fillStyle = Math.random() > 0.5 ? '#000' : '#111'; lp.ctx.fillRect(0, 0, lp.w, lp.h); } });\n"
         let (randomReport, _) = try check(random, quick: true)
         try expect(randomReport.problems.contains { $0.contains("Math.random()") }, "\(randomReport.problems)")
+        try expectEqual(randomReport.spanPassed, false)
         // gl_FragCoord without lp.fragOffset is a warning.
         let frag = "LivePaper.scene({ context: 'webgl', setup(lp) { this.src = 'void main(){ gl_FragColor = vec4(gl_FragCoord.xy, 0.0, 1.0); }'; }, draw(lp) {} });\n"
         let (fragReport, _) = try check(frag, quick: true)
@@ -177,12 +182,14 @@ enum SpanRuntimeTests {
         // A quick check skips the crop comparison (but not the static rules).
         let (quick, quickFake) = try check(quick: true)
         try expect(quick.passed && quickFake.spanRequests.isEmpty && quick.span == nil, "\(quick.problems)")
+        try expectEqual(quick.spanPassed, true)   // the rules it checked passed
         // An old render server (no span echo) is a warning, not a failure.
         let (old, _) = try check { $0.reportsSpan = false }
         try expect(old.passed && old.warnings.contains { $0.contains("Spanning displays was not checked") }, "\(old.warnings)")
         // Scenes that don't declare span get none of this.
         let (plain, plainFake) = try check(random, manifest: #"{"id":"spanning","name":"Plain","kind":"web"}"#) { $0.hasUpdate = true }
         try expect(plain.passed && plainFake.spanRequests.isEmpty && plain.span == nil, "\(plain.problems)")
+        try expect(plain.spanPassed == nil && plain.spanVerdict == nil)
     }
 
     // MARK: - Synthetic scenes

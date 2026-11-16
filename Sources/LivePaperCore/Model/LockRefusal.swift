@@ -40,7 +40,10 @@ public enum LPLockRefusal: String, Codable, Sendable, CaseIterable {
     }
 
     /// Short line for the menu bar, under the disabled Lock Now item.
-    public var menuNote: String { "Won\u{2019}t lock: password isn\u{2019}t required immediately" }
+    public var menuNote: String {
+        self == .passwordUnknown ? "Won\u{2019}t lock: can\u{2019}t check the password setting"
+                                 : "Won\u{2019}t lock: password isn\u{2019}t required immediately"
+    }
 
     /// The app is launched with `[launchArgument, rawValue]` when the helper refused while it wasn't running.
     public static let launchArgument = "--lock-refused"

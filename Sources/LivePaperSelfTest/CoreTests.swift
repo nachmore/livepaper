@@ -1119,6 +1119,82 @@ extension SelfTests {
                 try expectEqual(failed.skippedScenes.map(\.id), ["zen"])
             }
         },
+        TestCase(name: "core.publish.span-rules") {
+            // scene.json's "span": true is checked against the span rules before it is published
+            // (PublishedSpan): a scene that breaks them would drift apart across the displays.
+            let clean = "LivePaper.scene({\n  // no update(lp, dt): a pure function of lp.t\n  draw(lp) { lp.ctx.fillRect(0, 0, lp.w * Math.sin(lp.t), lp.h); }\n});\n"
+            let method = "LivePaper.scene({ setup(lp) {}, update(lp, dt) { this.x += dt; }, draw(lp) {} });"
+            let arrow = "LivePaper.scene({ draw: (lp) => {}, update: (lp, dt) => {} });"
+            let shorthand = "function update(lp, dt) {}\nfunction draw(lp) {}\nLivePaper.scene({ draw, update });"
+            let quoted = "LivePaper.scene({ 'update'(lp, dt) {}, draw(lp) {} });"
+            let helper = "class Particle { update(dt) { this.x += dt; } }\nLivePaper.scene({ draw(lp) { const p = { update(t) {} }; p.update(lp.t); } });"
+            let variable = "const scene = { draw(lp) {} };\nscene.update = function (lp, dt) {};\nLivePaper.scene(scene);"
+            let variableClean = "const scene = { draw(lp) { other.update(lp.t); } };\nif (scene.update == null) {}\nLivePaper.scene(scene);"
+            let random = "LivePaper.scene({ draw(lp) { lp.ctx.globalAlpha = Math.random(); } });"
+            try expect(!SceneSourceScanner.definesUpdate(clean))
+            for js in [method, arrow, shorthand, quoted, variable] { try expect(SceneSourceScanner.definesUpdate(js), js) }
+            for js in [helper, variableClean, "", "// update(lp, dt) {}\nLivePaper.scene({ draw(lp) { const s = 'update(lp, dt) {'; } });"] {
+                try expect(!SceneSourceScanner.definesUpdate(js), js)
+            }
+
+            let span = SceneManifest(id: "s", name: "S", kind: .web, span: true)
+            let plain = SceneManifest(id: "s", name: "S", kind: .web)
+            let video = SceneManifest(id: "v", name: "V", kind: .video, video: .init(file: "v.mov"))
+            try expect(PublishedSpan.spans(manifest: span, sceneJS: clean, report: nil))
+            try expect(!PublishedSpan.spans(manifest: plain, sceneJS: clean, report: nil))
+            try expect(PublishedSpan.spans(manifest: video, sceneJS: "", report: nil))
+            try expect(!PublishedSpan.spans(manifest: span, sceneJS: method, report: nil))
+            try expect(!PublishedSpan.spans(manifest: span, sceneJS: random, report: nil))
+            // A current check decides about update() and the crops; Math.random() never spans.
+            try expect(!PublishedSpan.spans(manifest: span, sceneJS: clean, report: CheckReport(passed: false, spanPassed: false)))
+            try expect(PublishedSpan.spans(manifest: span, sceneJS: variable, report: CheckReport(passed: true, spanPassed: true)))
+            try expect(!PublishedSpan.spans(manifest: span, sceneJS: random, report: CheckReport(passed: true, spanPassed: true)))
+            try expect(PublishedSpan.spans(manifest: span, sceneJS: clean, report: CheckReport(passed: true)))   // says nothing: the scan decides
+            // A report from before the verdict existed: a failed slice, or a span problem.
+            let slice = CheckReport.SpanSlice(arrangement: "B", t: 12, display: "external", path: "x.png", meanDiff: 9, passed: false)
+            try expectEqual(CheckReport(passed: false, span: [slice]).spanVerdict, false)
+            try expectEqual(CheckReport(passed: false, problems: ["scene.json says \"span\": true, but the scene defines update(lp, dt): …"]).spanVerdict, false)
+            try expectEqual(CheckReport(passed: false, problems: ["Uses 900 mW"]).spanVerdict, nil)
+            // A report older than scene.js no longer describes it.
+            let checked = Date(timeIntervalSinceReferenceDate: 800_000_000)
+            try expect(PublishedSpan.isCurrent(CheckReport(passed: true, checkedAt: checked), sceneJSModified: checked.addingTimeInterval(-60)))
+            try expect(PublishedSpan.isCurrent(CheckReport(passed: true, checkedAt: checked), sceneJSModified: checked.addingTimeInterval(0.6)))
+            try expect(!PublishedSpan.isCurrent(CheckReport(passed: true, checkedAt: checked), sceneJSModified: checked.addingTimeInterval(2)))
+            try expect(!PublishedSpan.isCurrent(CheckReport(passed: true, checkedAt: checked), sceneJSModified: nil))
+
+            // End to end: what publish writes into playlist.json.
+            try CoreSandbox.with("publish-span-rules") { sb in
+                let lib = sb.makeLibrary()
+                let publish = PublishService(library: lib, compiler: FakeCompiler(), settingsURL: sb.support.appendingPathComponent("playlist-settings.json"),
+                                             saverURL: sb.saver, lockURL: sb.support.appendingPathComponent("publish.lock"), notify: { _ in })
+                try sb.installFakeSaver()
+                func scene(_ name: String, _ js: String) throws -> SceneItem {
+                    let item = try lib.createWebScene(name: name, description: "")
+                    var m = item.manifest
+                    m.span = true
+                    try lib.update(m)
+                    try Data(js.utf8).write(to: item.packageURL.appendingPathComponent("scene.js"))
+                    return item
+                }
+                let pure = try scene("Pure", clean), stateful = try scene("Stateful", method), noisy = try scene("Noisy", random)
+                let checkedOK = try scene("Checked", clean)
+                // A check that found the slices don't match, written after scene.js…
+                let checkDir = checkedOK.packageURL.appendingPathComponent(".check")
+                try FileManager.default.createDirectory(at: checkDir, withIntermediateDirectories: true)
+                let report = CheckReport(passed: false, checkedAt: Date().addingTimeInterval(5), span: [slice], spanPassed: false)
+                try SceneChecker.reportEncoder().encode(report).write(to: checkDir.appendingPathComponent("report.json"))
+                try publish.saveSettings(PlaylistSettings(sceneIDs: [pure.id, stateful.id, noisy.id, checkedOK.id, "clip"],
+                                                          displays: LPDisplaySettings(mode: .span)))
+                var p = try publish.publish()
+                try expectEqual(p.scenes.map(\.id), [pure.id, stateful.id, noisy.id, checkedOK.id, "clip"])
+                try expectEqual(p.scenes.map(\.span), [true, false, false, false, true])
+                // …until scene.js changes after it: then the scan decides again.
+                let js = checkedOK.packageURL.appendingPathComponent("scene.js")
+                try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(60)], ofItemAtPath: js.path)
+                p = try publish.publish()
+                try expectEqual(p.scenes.last { $0.id == checkedOK.id }?.span, true)
+            }
+        },
     ] }
 }
 
@@ -2166,6 +2242,22 @@ extension SelfTests {
                 system.screenLock = "2026-11-14 18:32:04.037 sysadminctl[1:2] screenLock delay is 300 seconds"
                 s = install().status()
                 try expect(!s.passwordImmediately, "sysadminctl wins over the profile")
+                try expect(!s.passwordUnknown && s.passwordImmediatelyIfKnown == false)
+                // Nothing says anything (sysadminctl unrecognised, no profile): LivePaper can't tell.
+                system.screenLock = "garbage"
+                try make(["idleTime": 900], managed)
+                s = install().status()
+                try expect(!s.passwordImmediately && s.passwordUnknown && s.passwordImmediatelyIfKnown == nil, "\(s)")
+                // A profile answers as the helper reads it: askForPassword = false is off, a delay is
+                // the delay, askForPassword = true alone says nothing.
+                try make(["askForPassword": true], managed)
+                try expect(install().status().passwordUnknown)
+                try make(["askForPassword": false], managed)
+                s = install().status()
+                try expect(!s.passwordUnknown && !s.passwordImmediately)
+                try make(["askForPasswordDelay": 0], managed)
+                try expect(install().status().passwordImmediately)
+                try expect(!InstallStatus(passwordImmediately: true, passwordUnknown: true).passwordImmediately)
                 try expect(system.mutatingCommands.isEmpty, "status() only reads: \(system.mutatingCommands)")
             }
         },

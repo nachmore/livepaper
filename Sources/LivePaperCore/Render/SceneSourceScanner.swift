@@ -90,6 +90,48 @@ public enum SceneSourceScanner {
         return issues
     }
 
+    /// Whether scene.js gives its scene an `update(lp, dt)` (what the runtime's `hasUpdate` reports
+    /// once the page runs): a key `update` — a method, a property or a shorthand — in the object
+    /// literal passed to `LivePaper.scene({...})`. When the scene is passed some other way (a
+    /// variable), any `update` defined as an object key or method, or assigned as `.update = …`,
+    /// counts. Comments and strings don't. A static scan for when no check has run (PublishedSpan).
+    public static func definesUpdate(_ source: String) -> Bool {
+        let tokens = JSTokenizer.tokens(source)
+        func isPunct(_ j: Int, _ text: String) -> Bool { j < tokens.count && tokens[j].kind == .punct && tokens[j].text == text }
+        func isKey(_ j: Int) -> Bool {
+            let t = tokens[j]
+            return (t.kind == .identifier || t.kind == .string) && t.text == "update"
+        }
+        // LivePaper.scene({ … }): the literal's own keys only (depth 1).
+        if let call = tokens.indices.first(where: { i in
+            tokens[i].kind == .identifier && tokens[i].text == "LivePaper" && isPunct(i + 1, ".")
+                && i + 2 < tokens.count && tokens[i + 2].text == "scene" && isPunct(i + 3, "(")
+        }), isPunct(call + 4, "{") {
+            var depth = 0
+            var j = call + 4
+            while j < tokens.count {
+                let t = tokens[j]
+                if t.kind == .punct {
+                    if ["{", "(", "["].contains(t.text) { depth += 1 }
+                    if ["}", ")", "]"].contains(t.text) { depth -= 1; if depth == 0 { return false } }
+                }
+                if depth == 1, isKey(j), isPunct(j - 1, "{") || isPunct(j - 1, ","),
+                   isPunct(j + 1, "(") || isPunct(j + 1, ":") || isPunct(j + 1, ",") || isPunct(j + 1, "}") {
+                    return true
+                }
+                j += 1
+            }
+            return false
+        }
+        // Passed another way: any update method, key or assignment.
+        for j in tokens.indices where isKey(j) && j > 0 {
+            let afterBraceOrComma = isPunct(j - 1, "{") || isPunct(j - 1, ",")
+            if afterBraceOrComma && (isPunct(j + 1, "(") || isPunct(j + 1, ":")) { return true }
+            if isPunct(j - 1, ".") && isPunct(j + 1, "=") && !isPunct(j + 2, "=") { return true }
+        }
+        return false
+    }
+
     /// The token following the parenthesised group that opens at `open`, if any.
     private static func tokenAfterParens(_ tokens: [JSToken], from open: Int) -> JSToken? {
         var depth = 0, j = open

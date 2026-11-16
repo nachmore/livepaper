@@ -127,8 +127,8 @@ struct DisplaysSection: View {
     @ViewBuilder
     private var spanRow: some View {
         let ids = PlaylistDraft(draft.settings.following(model.collections)).effectiveSceneIDs(available: model.availableSceneIDs)
-        let manifests = Dictionary(model.entries.map { ($0.id, $0.manifest) }, uniquingKeysWith: { a, _ in a })
-        let support = PlaylistDraft.spanSupport(ids: ids, manifests: manifests)
+        let spans = Dictionary(model.entries.map { ($0.id, $0.spans) }, uniquingKeysWith: { a, _ in a })
+        let support = PlaylistDraft.spanSupport(ids: ids, spans: spans)
         let total = support.spanning.count + support.notSpanning.count
         if total > 0 {
             Label {

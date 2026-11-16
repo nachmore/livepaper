@@ -120,6 +120,10 @@ enum InstallCommands {
         let lock = "Lock screen"
         if status.passwordImmediately {
             add(lock, "password", .ok, "required immediately when the screen saver starts")
+        } else if status.passwordUnknown {
+            add(lock, "password", .problem, "LivePaper can\u{2019}t tell whether \u{201C}Require password after screen saver begins\u{201D} is " +
+                "Immediately (`sysadminctl -screenLock status` said nothing it recognises), so LivePaper\u{2019}s lock shortcut and " +
+                "Lock Now refuse to run. Check it in System Settings › Lock Screen.")
         } else {
             add(lock, "password", .problem, "\u{201C}Require password after screen saver begins\u{201D} isn't Immediately, so starting the " +
                 "screen saver doesn't lock the Mac and LivePaper's lock shortcut and Lock Now refuse to run. " +
@@ -252,7 +256,8 @@ enum InstallCommands {
     /// The "before screens off" row: the option (state.json) and whether it has anything to do.
     static func preSleepCheck(enabled: Bool, status: InstallStatus) -> (status: Check.Status, detail: String) {
         let timers = status.screenTimers
-        let text = LPPreSleepStatus.text(passwordImmediately: status.passwordImmediately, timers: timers)
+        // "can't tell" when the setting couldn't be read, as Settings › Lock and the helper say.
+        let text = LPPreSleepStatus.text(passwordImmediately: status.passwordImmediatelyIfKnown, timers: timers)
         let applies = status.passwordImmediately && !LPPreSleepStatus.applicableSources(timers).isEmpty
         guard enabled else {
             let hint = applies ? " Turn on \u{201C}Show your scene when the screens turn off first\u{201D} in LivePaper › Settings › Lock " +

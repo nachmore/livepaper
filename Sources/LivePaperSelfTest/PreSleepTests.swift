@@ -454,6 +454,14 @@ extension SelfTests {
                 try awaitMain { await model.refreshInstallStatus() }
                 try expectEqual(model.preSleepStatus, "Off: your password isn\u{2019}t required immediately after the screen saver starts")
             }
+            // A password setting that couldn't be read: "can't tell", as the helper says — not "isn't required".
+            let unknown = InstallStatus(passwordImmediately: false, passwordUnknown: true, screenTimers: ownerTimers())
+            try withInstallModel("presleep-app-password-unknown", status: unknown, locked: false) { model, _, _ in
+                try awaitMain { await model.refreshInstallStatus() }
+                try expectEqual(model.preSleepStatus, "Off: LivePaper can\u{2019}t tell whether your password is required immediately")
+                try expectEqual(model.lockRefusal, .passwordUnknown)
+                try expectEqual(model.lockRefusal?.menuNote, "Won\u{2019}t lock: can\u{2019}t check the password setting")
+            }
             let notNeeded = InstallStatus(passwordImmediately: true, screenTimers: LPScreenTimers(
                 displaySleep: [.ac: 1800], currentSource: .ac, screenSaverIdle: LPScreenSaverIdle(seconds: 600, source: .user)))
             try withInstallModel("presleep-app-not-needed", status: notNeeded, locked: false) { model, _, _ in

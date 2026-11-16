@@ -335,13 +335,30 @@ public struct CheckReport: Codable, Sendable, Equatable {
     }
     /// The span check's slices; nil when the scene doesn't declare span or the check was quick.
     public var span: [SpanSlice]?
+    /// Whether the scene keeps the span rules (scenes with `"span": true`; SCENE_API.md §16): false when
+    /// it defines update(), calls Math.random(), a slice doesn't match its crop of the whole canvas or the
+    /// span renders failed; true when none of what was checked failed (a quick check skips the renders);
+    /// nil when the scene doesn't declare span or never started. Publishing reads it (PublishedSpan).
+    public var spanPassed: Bool?
     public init(passed: Bool, problems: [String] = [], warnings: [String] = [], jsErrors: [String] = [], stills: [Still] = [],
                 benchMs: [String: Double] = [:], energyMw: Double? = nil, checkedAt: Date = Date(), motion: [MotionSummary]? = nil,
-                reference: ReferenceCheckSummary? = nil, span: [SpanSlice]? = nil) {
+                reference: ReferenceCheckSummary? = nil, span: [SpanSlice]? = nil, spanPassed: Bool? = nil) {
         self.passed = passed; self.problems = problems; self.warnings = warnings; self.jsErrors = jsErrors; self.stills = stills
         self.benchMs = benchMs; self.energyMw = energyMw; self.checkedAt = checkedAt; self.motion = motion; self.reference = reference
-        self.span = span
+        self.span = span; self.spanPassed = spanPassed
     }
+
+    /// The span verdict of this report: `spanPassed`, or for a report written before it existed,
+    /// false when a span slice failed or a problem is one of the span rules' (nil: it doesn't say).
+    public var spanVerdict: Bool? {
+        if let spanPassed { return spanPassed }
+        let failed = span?.contains { $0.passed == false } == true
+            || problems.contains { $0.hasPrefix(CheckReport.spanProblemPrefix) || $0.hasPrefix("The span check (") }
+        return failed ? false : nil
+    }
+
+    /// How every span-rule problem starts ("scene.json says "span": true, but …").
+    public static let spanProblemPrefix = "scene.json says \"span\": true, but"
 }
 
 public protocol SceneChecking: AnyObject, Sendable {
@@ -652,8 +669,12 @@ public struct InstallStatus: Sendable, Equatable {
     /// The helper is set up but its job doesn't run this LivePaper's helper (nil: nothing known to
     /// be wrong, or it isn't set up). Read from launchd, so the CLI sees it too.
     public var helperProblem: HelperProblem?
-    /// "Require password after screen saver begins" is Immediately.
+    /// "Require password after screen saver begins" is Immediately (false too when it can't be read:
+    /// the lock refuses either way).
     public var passwordImmediately: Bool
+    /// The setting couldn't be read (sysadminctl said nothing LivePaper recognises and no profile sets
+    /// it): the status lines say LivePaper can't tell rather than that it isn't Immediately.
+    public var passwordUnknown: Bool
     /// True when a configuration profile manages any screen-saver setting (idle time, password, module).
     public var managedByMDM: Bool
     /// The password isn't required immediately *because* a configuration profile forces it off or
@@ -672,18 +693,23 @@ public struct InstallStatus: Sendable, Equatable {
     public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverNewerInstalled: Bool = false, saverSelected: Bool = false,
                 saverSelection: SaverSelection? = nil, selectionReapplyNeeded: Bool = false,
                 helperRunning: Bool = false, helperLoginItem: LoginItemStatus = .notRegistered, helperProblem: HelperProblem? = nil,
-                passwordImmediately: Bool = false,
+                passwordImmediately: Bool = false, passwordUnknown: Bool = false,
                 managedByMDM: Bool = false, passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false,
                 lockKeysChangedByLivePaper: Bool = false, screenTimers: LPScreenTimers = LPScreenTimers()) {
         self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverNewerInstalled = saverNewerInstalled
         self.saverSelection = saverSelection ?? (saverSelected ? .everyDisplay : .none)
         self.selectionReapplyNeeded = selectionReapplyNeeded
         self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.helperProblem = helperProblem
-        self.passwordImmediately = passwordImmediately
+        self.passwordImmediately = passwordImmediately && !passwordUnknown
+        self.passwordUnknown = passwordUnknown
         self.managedByMDM = managedByMDM; self.passwordManagedByMDM = passwordManagedByMDM; self.lockKeysShowScene = lockKeysShowScene
         self.lockKeysChangedByLivePaper = lockKeysChangedByLivePaper
         self.screenTimers = screenTimers
     }
+
+    /// "Require password … Immediately" as LPPreSleepStatus and the helper take it: nil when it
+    /// couldn't be read.
+    public var passwordImmediatelyIfKnown: Bool? { passwordUnknown ? nil : passwordImmediately }
 
     /// The installed saver is an older build than this LivePaper's: what the launch-time update
     /// (InstallServicing.updateSaver) replaces.

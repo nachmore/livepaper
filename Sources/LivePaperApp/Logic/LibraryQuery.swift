@@ -11,6 +11,9 @@ struct LibraryEntry: Identifiable, Equatable, Hashable, Sendable {
     var energy: EnergyClass
     /// thumbnail.jpg when it exists (checked once here so grid cells never stat files).
     var thumbnail: URL?
+    /// It stretches across the displays in "Span across displays" as publishing decides
+    /// (PublishedSpan: scene.json's claim checked against scene.js and its last check).
+    var spans: Bool
     var id: String { item.id }
     var manifest: SceneManifest { item.manifest }
 
@@ -19,6 +22,7 @@ struct LibraryEntry: Identifiable, Equatable, Hashable, Sendable {
         self.badge = SceneBadge(kind: item.manifest.kind, hasAIHistory: hasAIHistory)
         self.energy = EnergyClass(manifest: item.manifest)
         self.thumbnail = item.thumbnailURL
+        self.spans = PublishedSpan.spans(item)
     }
 }
 

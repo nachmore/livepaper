@@ -269,7 +269,11 @@ file without it. Assignment keys are display UUIDs, uppercase (`CGDisplayCreateU
 form the wallpaper store uses; "DISPLAY-<id>" for a display without one). Publish writes `mode` and
 `onBattery` always, assignments only in `choose` mode and only to scenes it published — a deck scene, or
 a library scene staged once into `displayScenes` (one that fails to stage is reported in `skipped`; an
-unknown one is dropped) — and every entry's `span` (`SceneManifest.spans`). `schema` stays 1: the seven
+unknown one is dropped) — and every entry's `span`: `SceneManifest.spans`, checked for web scenes
+against the span rules (`Publish/PublishedSpan.swift`; a scene that would drift apart across displays
+is published as not spanning: scene.js calls `Math.random()`; or its last check — `.check/report.json`,
+when it is at least as new as scene.js — says a span rule failed, `CheckReport.spanPassed`; or, without
+such a check, scene.js gives the scene an `update()`, `SceneSourceScanner.definesUpdate`). `schema` stays 1: the seven
 original keys are required as before (unreadable → the saver's fallback), the new ones are optional and
 tolerant both ways (an unknown mode or battery value → the default, a broken `displayScenes` item is
 dropped; an older saver ignores them all and plays "same").
@@ -794,7 +798,10 @@ defaults.
 `doctor`'s Lock screen section also reports the screen saver's idle time and where it comes from
 ("idle timeout"), each power source's display-sleep time ("screens off") and "before screens off":
 the option from state.json and `LPPreSleepStatus`'s line (OK when on and it applies somewhere, info
-otherwise, with a hint to turn it on when it would apply).
+otherwise, with a hint to turn it on when it would apply). When the password setting can't be read
+(`InstallStatus.passwordUnknown`: sysadminctl says nothing LivePaper recognises and no profile sets it)
+the "password" row and that line say LivePaper can't tell, as the helper does, rather than that it isn't
+Immediately (the lock refuses either way, `LPLockRefusal.passwordUnknown`).
 `check` = compile → stills at 1512×982@2 for t = 0, 4, 12, 30, 90, 240, 600, plus 32:9 (2560×720
 @1, t = 12/90/600), 5:4 (1280×1024 @1, t = 12/90) and thumbnail size (320×200 @2, t = 12) →
 JS-error check → motion at 1280×720@0.5 and 1024×820@0.5 (t = 3, 17, 41, 120; gaps 0.5/2/5 s;
@@ -803,7 +810,8 @@ sampled time but the last, to find the heaviest phase → full benches (120 fram
 1512×982@2 and 5120×1440@1 → luminance checks → (with a reference target, below) resemblance → (for
 `"span": true`, not `--quick`) the span check: arrangement B of `SpanCheck.standard` (a 1512×982 laptop
 bottom-aligned left of a 2560×1440 display, a 4072×1440 canvas) at 1×, t = 12, clock off, rendered as a
-whole and per display (`.check/span-B-t12-*.png`, `span[]` in the report) → optional
+whole and per display (`.check/span-B-t12-*.png`, `span[]` in the report; `spanPassed`: whether every span
+rule that ran held, what publishing reads) → optional
 live energy run (`--power`, battery profile: 30 fps, 75 %) → writes `.check/report.json` (+ `motion[]`:
 coverage, regions, busy, flicker, map per size; + `reference` for animate scenes) + PNGs, prints a short
 summary for humans and agents (with the motion map when motion needs attention, and a `picture` line);
@@ -1251,7 +1259,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     CLI). Choices stay in the settings in every mode but are published only in *Choose*, and only
     for scenes that still exist (`PlaylistDraft.effectiveAssignments`, as PublishService does).
     *Different* says when the playlist has fewer scenes than there are displays (some then share
-    one). *Span* says how many of the playlist's scenes can span (`SceneManifest.spans`: "3 of 5 scenes
+    one). *Span* says how many of the playlist's scenes can span (`LibraryEntry.spans`, what publishing
+    decides — `PublishedSpan`, §4.3: "3 of 5 scenes
     can span; the others show on every display.", naming up to four that can't). "On battery, other
     displays show": the scene / a still picture / nothing (black), with the footnote that the main
     display always shows the scene. The connected displays come from `AppEnvironment.connectedDisplays`
@@ -1342,10 +1351,11 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   Helper while another copy's runs; "Screens turning off": the toggle "Show your scene when the
   screens turn off first" (state.json, off by default, §7) with its one-line trade-off — moving the
   mouse in the last few seconds before the screens turn off then asks for the password — and a status
-  line from `InstallStatus.screenTimers` + `passwordImmediately` through `LPPreSleepStatus`, the
+  line from `InstallStatus.screenTimers` + `passwordImmediatelyIfKnown` through `LPPreSleepStatus`, the
   helper's own facts: "Applies on battery: screens off after 5 min, screen saver after 15 min" / "Not
   needed: the screen saver starts before the screens turn off" / "Off: your password isn't required
-  immediately …"; the pane re-reads the install status when it appears), Performance (profile), AI
+  immediately …" / "Off: LivePaper can't tell whether your password is required immediately" (the
+  setting couldn't be read); the pane re-reads the install status when it appears), Performance (profile), AI
   (default agent, per-agent model, time limit, custom command), About (+ Uninstall).
 * **Onboarding** (first launch; re-runnable, every step idempotent and showing live status), 4
   steps: Welcome → Screen saver (install, select — with backup, or a guided one-click step in

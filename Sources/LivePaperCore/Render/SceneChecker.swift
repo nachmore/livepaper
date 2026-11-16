@@ -162,10 +162,11 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             return try finish(CheckReport(passed: false, problems: problems + e.messages), checkDir: checkDir, package: pkg, manifest: manifest)
         }
 
-        var spanWarnings: [String] = []
+        var spanWarnings: [String] = [], spanSourceProblems: [String] = []
         if manifest.span == true {
             let js = (try? String(contentsOf: pkg.appendingPathComponent("scene.js"), encoding: .utf8)) ?? ""
             let findings = Self.spanSourceFindings(js)
+            spanSourceProblems = findings.problems
             problems += findings.problems
             spanWarnings = findings.warnings
         }
@@ -189,6 +190,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         var report = Self.evaluate(results, plan: plan, budgets: budgets, quick: options.quick)
         report.problems = problems + report.problems
         report.warnings += spanWarnings
+        if manifest.span == true, !spanSourceProblems.isEmpty { report.spanPassed = false }
         report.passed = report.problems.isEmpty
         return try finish(report, checkDir: checkDir, package: pkg, manifest: manifest)
     }
@@ -416,7 +418,9 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
 
         // Spanning displays ("span": true in scene.json).
         var spanSummary: [CheckReport.SpanSlice]?
+        var spanPassed: Bool?
         if results.spanDeclared {
+            let spanProblemsBefore = problems.count
             let stillsHaveUpdate = results.stills.contains { $0.response.hasUpdate == true }
             if stillsHaveUpdate || results.span?.hasUpdate == true {
                 problems.append("scene.json says \"span\": true, but the scene defines update(lp, dt): its state builds up frame by frame, " +
@@ -443,6 +447,8 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                                                                     path: $0.path, meanDiff: $0.diff.map { round2($0.meanAbs) },
                                                                     passed: run.serverSupportsSpan ? $0.diff?.passed == true : nil) }
             }
+            // A scene that never started says nothing about update() (check() adds the Math.random() rule).
+            spanPassed = problems.count > spanProblemsBefore ? false : neverStarted ? nil : true
         }
 
         for key in failureOrder { problems.append(key.dropLast() + " (at \(labelList(failures[key] ?? [])))." ) }
@@ -462,7 +468,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         }
         return CheckReport(passed: problems.isEmpty, problems: problems, warnings: warnings, jsErrors: jsErrors, stills: stills,
                            benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion, reference: reference,
-                           span: spanSummary)
+                           span: spanSummary, spanPassed: spanPassed)
     }
 
     private static func round2(_ x: Double) -> Double { (x * 100).rounded() / 100 }

@@ -919,7 +919,8 @@ final class AppModel {
     /// status has been read (the Lock pane reads it when it appears).
     var preSleepStatus: String? {
         guard installStatusLoaded else { return nil }
-        return LPPreSleepStatus.text(passwordImmediately: installStatus.passwordImmediately, timers: installStatus.screenTimers)
+        // A setting that couldn't be read says so ("can't tell"), as the helper does.
+        return LPPreSleepStatus.text(passwordImmediately: installStatus.passwordImmediatelyIfKnown, timers: installStatus.screenTimers)
     }
 
     /// state.json carries the lock-keys state for the helper; the system preference is the truth
@@ -945,7 +946,7 @@ final class AppModel {
     /// read knows: the menu disables Lock Now and explains. nil until the status has been read.
     var lockRefusal: LPLockRefusal? {
         guard installStatusLoaded, !installStatus.passwordImmediately else { return nil }
-        return .passwordNotImmediate
+        return installStatus.passwordUnknown ? .passwordUnknown : .passwordNotImmediate
     }
 
     /// Tells the user why LivePaper didn't lock (from Lock Now, or the helper's LPNotification.lockRefused).
@@ -970,7 +971,7 @@ final class AppModel {
         // Fresh, not the last status shown: the user may just have changed it in System Settings.
         await refreshInstallStatus()
         guard installStatus.passwordImmediately else {
-            showLockRefusal(.passwordNotImmediate)
+            showLockRefusal(installStatus.passwordUnknown ? .passwordUnknown : .passwordNotImmediate)
             return .refused
         }
         if installStatus.saverPartlySelected {

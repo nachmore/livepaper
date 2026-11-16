@@ -283,9 +283,10 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             helperRunning: helperRunning,
             helperLoginItem: loginItemStatus,
             helperProblem: helperAssessment(loginItem: loginItemStatus, loginJob: loginJob, fallbackJob: fallbackJob)?.problem,
-            passwordImmediately: immediate,
+            passwordImmediately: immediate ?? false,
+            passwordUnknown: immediate == nil,
             managedByMDM: SystemProbes.isManaged(managed),
-            passwordManagedByMDM: !immediate && SystemProbes.passwordEnforcedNotImmediately(
+            passwordManagedByMDM: immediate != true && SystemProbes.passwordEnforcedNotImmediately(
                 SystemProbes.enforcedPasswordSettings(managed: managed) {
                     preferences.forcedValue(domain: SystemProbes.screenSaverDomain, key: $0)
                 }),
