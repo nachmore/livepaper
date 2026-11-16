@@ -25,6 +25,10 @@ struct AppEnvironment {
     /// "0.1.0.195": CFBundleShortVersionString, then the build number (CFBundleVersion, the commit
     /// count), so Settings › About tells builds of the same version apart.
     var appVersion: String
+    /// Pauses before the automatic helper repair tries again after a failed attempt. Observed on
+    /// macOS 26.7: registering again right after the app was replaced can leave launchd refusing
+    /// the new helper (spawn failed, EX_CONFIG), while the same call a while later starts it.
+    var helperRepairRetryDelays: [TimeInterval] = [20, 60]
     /// The running .app bundle, or nil when not running from one (`swift run`, tests).
     var appBundlePath: String?
     /// System Settings › Lock Screen (AppKit; Entry/SystemActions). A no-op in mock mode and tests.
@@ -979,8 +983,21 @@ final class AppModel {
 
     private func runHelperRepair() async {
         let install = services.install
+        var delays = environment.helperRepairRetryDelays[...]
         do {
-            switch try await offMain({ try install.recoverHelper() }) {
+            let outcome: HelperRecoveryOutcome
+            while true {
+                do {
+                    outcome = try await offMain({ try install.recoverHelper() })
+                    break
+                } catch {
+                    guard let delay = delays.popFirst() else { throw error }
+                    NSLog("LivePaper: the helper repair didn't work yet (\(error.localizedDescription)); trying again in \(Int(delay)) s")
+                    try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+                    guard !Task.isCancelled else { throw error }
+                }
+            }
+            switch outcome {
             case .notNeeded(let why):
                 NSLog("LivePaper: the helper needs no repair: \(why)")
             case .started:

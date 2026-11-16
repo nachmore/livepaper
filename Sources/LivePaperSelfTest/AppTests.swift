@@ -1283,17 +1283,27 @@ extension SelfTests {
                 banner.actions[0].perform()
                 try expectEqual(opened.count, 1)
             }
-            // A repair that fails says so, and Try Again is the user's attempt.
+            // Registering again right after an update can fail where the same call a little later
+            // works: the automatic repair tries again (quietly when that works).
+            try withInstallModel("helper-repair-retry", status: broken, locked: false,
+                                 prepare: { $0.recoveryBehaviour = .failsTimes(1, "spawn failed") }) { model, install, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                try expectEqual(install.recoverCalls, 2)
+                try expect(model.installStatus.helperRunning)
+                try expect(model.banners.banners.isEmpty, "\(model.banners.banners.map(\.title))")
+            }
+            // A repair that keeps failing says so after its retries, and Try Again is the user's attempt.
             try withInstallModel("helper-repair-fails", status: broken, locked: false,
                                  prepare: { $0.recoveryBehaviour = .fails("spawn failed") }) { model, install, _ in
                 try awaitMain { await model.awaitHelperRepair() }
+                try expectEqual(install.recoverCalls, 3)   // the first attempt and two retries
                 let banner = try unwrap(model.banners.banners.last)
                 try expect(banner.style == .error && banner.message?.contains("spawn failed") == true, banner.message ?? "")
                 try expectEqual(banner.actions.map(\.title), ["Try Again"])
                 banner.actions[0].perform()
                 try awaitMain(until: { install.registerCalls == 1 && !model.isInstallBusy })
                 try expect(model.installStatus.helperRunning)
-                try expectEqual(install.recoverCalls, 1)
+                try expectEqual(install.recoverCalls, 3)
             }
             // Nothing set up, or waiting for approval: nothing to repair, nothing tried.
             for status in [InstallStatus(), InstallStatus(helperLoginItem: .requiresApproval)] {
@@ -2046,7 +2056,8 @@ extension SelfTests {
         AppEnvironment(isMock: mock, defaults: InMemoryPreferences(), stateURL: root.appendingPathComponent("Support/state.json"),
                        saveState: { saved.all.append($0) }, helperLock: helperLock ?? FixedHelperLockChannel(answers: false),
                        startScreenSaver: startScreenSaver,
-                       previewCacheDirectory: root.appendingPathComponent("Previews"), appVersion: "0.0.0-test", appBundlePath: nil)
+                       previewCacheDirectory: root.appendingPathComponent("Previews"), appVersion: "0.0.0-test",
+                       helperRepairRetryDelays: [0.01, 0.01], appBundlePath: nil)
     }
 
     /// A started AppModel over fresh mock services (zero delays) in a scratch directory.

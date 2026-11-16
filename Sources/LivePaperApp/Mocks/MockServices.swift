@@ -363,7 +363,7 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
     var recoverCalls: Int { lock.lock(); defer { lock.unlock() }; return recoverRequests }
     var registerCalls: Int { lock.lock(); defer { lock.unlock() }; return registerRequests }
     private var recoverRequests = 0, registerRequests = 0
-    enum RecoveryBehaviour { case needsApproval, fails(String) }
+    enum RecoveryBehaviour { case needsApproval, fails(String), failsTimes(Int, String) }
     var recoveryBehaviour: RecoveryBehaviour?
     /// Like InstallService's uninstall marker: set by performUninstall, lifted by setting the helper up again.
     private var uninstalled = false
@@ -384,6 +384,11 @@ final class MockInstallService: InstallServicing, @unchecked Sendable {
             return .needsApproval
         case .fails(let why)?:
             throw InstallError.helperCannotStart(why)
+        case .failsTimes(let n, let why)? where recoverRequests <= n:
+            throw InstallError.helperCannotStart(why)
+        case .failsTimes?:
+            current.helperRunning = true; current.helperProblem = nil
+            return .reregistered
         case nil:
             current.helperRunning = true; current.helperProblem = nil
             return .reregistered
