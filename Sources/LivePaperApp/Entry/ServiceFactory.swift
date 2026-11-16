@@ -82,6 +82,8 @@ enum ServiceFactory {
                               helperLock: helperLock, startScreenSaver: startScreenSaver, previewCacheDirectory: cache,
                               appVersion: version, appBundlePath: appPath,
                               openLockScreenSettings: mock ? {} : { SystemActions.openLockScreenSettings() },
+                              openLoginItemsSettings: mock ? {} : { SystemActions.openLoginItemsSettings() },
+                              observeUnlock: mock ? { _ in {} } : { SessionUnlockObserver.observe($0) },
                               diskWatchRoot: diskWatchRoot,
                               isSessionLocked: isSessionLocked)
     }

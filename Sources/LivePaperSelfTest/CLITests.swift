@@ -108,6 +108,78 @@ extension SelfTests {
             try expectEqual(calls, ["uninstall --yes"])
             try expect(fm.fileExists(atPath: app.path), "the fake CLI failed the uninstall, so the app was never deleted")
         },
+        TestCase(name: "cli.packaging.dev-install-helper") {
+            // scripts/dev-install.sh can't register the helper's login item again (only the app can),
+            // so it never restarts one launchd would refuse, and says when launching LivePaper is
+            // needed. Installs a fake app into a temp folder; fake launchctl, codesign, pgrep, pkill
+            // and lsregister keep it away from the real helper, Launch Services and any LivePaper.
+            let root = try tempDir("dev-install")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fm = FileManager.default
+            let bin = root.appendingPathComponent("bin"), state = root.appendingPathComponent("launchd"), log = root.appendingPathComponent("calls.log")
+            let src = root.appendingPathComponent("build/LivePaper.app"), dest = root.appendingPathComponent("Apps")
+            func file(_ text: String, _ url: URL, executable: Bool = true) throws {
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data((text + "\n").utf8).write(to: url)
+                if executable { try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path) }
+            }
+            func fakeApp(_ app: URL, helper: String) throws {
+                try file("#!/bin/sh\n# \(helper)", app.appendingPathComponent("Contents/Helpers/LivePaperHelper"))
+                try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "190"],
+                                                   format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
+                try file("#!/bin/sh\nexit 0", app.appendingPathComponent("Contents/Helpers/livepaper"))
+            }
+            try fakeApp(src, helper: "new helper")
+            try file("#!/bin/sh\necho \"launchctl $*\" >> '\(log.path)'\ncase \"$1\" in\n  print) f='\(state.path)/'\"$(basename \"$2\")\".print\n" +
+                     "    if [ -f \"$f\" ]; then cat \"$f\"; exit 0; fi\n    echo 'Could not find service' >&2; exit 113 ;;\nesac\nexit 0",
+                     bin.appendingPathComponent("launchctl"))
+            // codesign -dvvv: a cdhash of the file's contents, ad-hoc; --verify: fine.
+            try file("#!/bin/sh\nfor last; do :; done\ncase \"$1\" in\n  -dvvv) echo \"CDHash=$(shasum \"$last\" | cut -c1-40)\" >&2; " +
+                     "echo 'Signature=adhoc' >&2 ;;\nesac\nexit 0", bin.appendingPathComponent("codesign"))
+            try file("#!/bin/sh\nexit 1", bin.appendingPathComponent("pgrep"))
+            try file("#!/bin/sh\nexit 1", bin.appendingPathComponent("pkill"))
+            try file("#!/bin/sh\nexit 0", bin.appendingPathComponent("lsregister"))
+            var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("LIVEPAPER_") }
+            env["PATH"] = bin.path + ":/usr/bin:/bin"
+            env["HOME"] = root.path
+            env["LIVEPAPER_LSREGISTER"] = bin.appendingPathComponent("lsregister").path
+            let devInstall = CLITestSupport.repo.appendingPathComponent("scripts/dev-install.sh").path
+            let uid = getuid(), login = "gui/\(uid)/\(LPPaths.helperLabel)", fallback = "gui/\(uid)/\(LPPaths.helperLabel).fallback"
+            let running = "gui/\(uid)/\(LPPaths.helperLabel) = {\n\tstate = running\n\tpid = 4242\n\tparent bundle version = 186\n\tjob state = running\n}"
+            let broken = "gui/\(uid)/\(LPPaths.helperLabel) = {\n\tstate = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n" +
+                         "\tresource coalition = {\n\t\tstate = active\n\t}\n\tjob state = spawn failed\n" +
+                         "\tproperties = partial import | runatload | resolve program | needs LWCR update | has LWCR\n}"
+            /// Installs over an app whose helper says `previous`, with these jobs loaded.
+            func install(previous: String, loginJob: String?, fallbackJob: String? = nil) throws -> (CLITestSupport.Result, [String]) {
+                try? fm.removeItem(at: log); try? fm.removeItem(at: state); try? fm.removeItem(at: dest)
+                try fm.createDirectory(at: state, withIntermediateDirectories: true)
+                try fakeApp(dest.appendingPathComponent("LivePaper.app"), helper: previous)
+                if let loginJob { try file(loginJob, state.appendingPathComponent("\(LPPaths.helperLabel).print"), executable: false) }
+                if let fallbackJob { try file(fallbackJob, state.appendingPathComponent("\(LPPaths.helperLabel).fallback.print"), executable: false) }
+                let r = try CLITestSupport.exec(URL(fileURLWithPath: "/bin/bash"), [devInstall, "--app", src.path, "--dest", dest.path],
+                                                environment: env, stdin: nil)
+                let calls = ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+                return (r, calls)
+            }
+            // The owner's state: launchd can't start the login item. No restart; launch the app.
+            var (r, calls) = try install(previous: "old helper", loginJob: broken)
+            try expect(r.status == 0, r.out + r.err)
+            try expect(r.out.contains("has to be registered again: launchd can't start it (spawn failed, last exit code 78: EX_CONFIG, " +
+                                      "needs LWCR update)") && r.out.contains("launching LivePaper"), r.out)
+            try expect(!calls.contains { $0.hasPrefix("launchctl kickstart") }, "\(calls)")
+            try expect(fm.fileExists(atPath: dest.appendingPathComponent("LivePaper.app/Contents/Helpers/LivePaperHelper").path))
+            // Running, and this build changes the ad-hoc helper: left running (a restart would be
+            // refused), and the same advice.
+            (r, calls) = try install(previous: "old helper", loginJob: running)
+            try expect(r.out.contains("this build changes the ad-hoc-signed helper") && r.out.contains("keeps running until then"), r.out)
+            try expect(!calls.contains { $0.hasPrefix("launchctl kickstart") }, "\(calls)")
+            // The helper didn't change: restarted, nothing to say.
+            (r, calls) = try install(previous: "new helper", loginJob: running)
+            try expect(calls.contains("launchctl kickstart -k \(login)") && !r.out.contains("registered again"), r.out + "\(calls)")
+            // The LaunchAgent fallback is a plain plist: always restarted.
+            (r, calls) = try install(previous: "old helper", loginJob: nil, fallbackJob: "gui/\(uid)/x = {\n\tstate = running\n}")
+            try expect(calls.contains("launchctl kickstart -k \(fallback)") && !r.out.contains("registered again"), r.out + "\(calls)")
+        },
     ] }
 
     // MARK: - Commands

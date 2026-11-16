@@ -293,6 +293,52 @@ public enum LoginItemStatus: String, Sendable, Equatable {
     case notFound
 }
 
+/// What is wrong with the helper's launchd job while it is set up (the login item, or the
+/// LaunchAgent fallback) — from `launchctl print` (HelperJobAssessment). The app repairs it by
+/// itself once per launch (InstallServicing.recoverHelper); "Start Helper" / "Repair Helper" do it
+/// on request.
+public enum HelperProblem: Sendable, Equatable {
+    /// launchd has the job but can't start the helper; the detail is what it reports (e.g. "spawn
+    /// failed, last exit code 78: EX_CONFIG, needs LWCR update"). After an update of an ad-hoc-signed
+    /// LivePaper macOS still expects the helper it recorded when the login item was registered
+    /// (docs/RESEARCH.md §6); registering it again fixes that.
+    case cannotStart(String)
+    /// It should be loaded (the login item is enabled, or the fallback plist is in place) but launchd
+    /// doesn't have the job.
+    case notLoaded
+    /// Loaded but not running (it was quit, or exited).
+    case stopped
+    /// Running, but an older build than this LivePaper's (the detail says how LivePaper can tell).
+    case outdated(String)
+
+    /// Only this one keeps the helper from working although the user set it up: the UI calls it
+    /// out with its own wording and a "Repair Helper" button.
+    public var cannotStart: Bool { if case .cannotStart = self { return true }; return false }
+
+    /// One line for logs and `livepaper doctor`.
+    public var summary: String {
+        switch self {
+        case .cannotStart(let detail): return "launchd can't start it (\(detail))"
+        case .notLoaded: return "launchd doesn't have its job loaded"
+        case .stopped: return "its job is loaded but not running"
+        case .outdated(let detail): return "it runs an older build (\(detail))"
+        }
+    }
+}
+
+/// What InstallServicing.recoverHelper did (failures throw).
+public enum HelperRecoveryOutcome: Sendable, Equatable {
+    /// Nothing to do, and why (running, not set up, waiting for approval, uninstalled, …).
+    case notNeeded(String)
+    /// The job was started again (`launchctl kickstart`, or the fallback bootstrapped again).
+    case started
+    /// The login item was unregistered and registered again, and the helper runs.
+    case reregistered
+    /// Registered again, but macOS now waits for the user to allow it in System Settings ›
+    /// General › Login Items.
+    case needsApproval
+}
+
 public struct InstallStatus: Sendable, Equatable {
     public var saverInstalled: Bool
     /// The installed saver is the build this LivePaper ships (CFBundleVersion).
@@ -303,8 +349,12 @@ public struct InstallStatus: Sendable, Equatable {
     /// The LivePaper saver is the selected screen saver (any display).
     public var saverSelected: Bool
     public var helperRunning: Bool
-    /// The helper's SMAppService login item (`.notFound` when it runs from the LaunchAgent fallback).
+    /// The helper's SMAppService login item (`.notFound` when it runs from the LaunchAgent fallback,
+    /// and in the CLI, which can't ask SMAppService about the app's login item).
     public var helperLoginItem: LoginItemStatus
+    /// The helper is set up but its job doesn't run this LivePaper's helper (nil: nothing known to
+    /// be wrong, or it isn't set up). Read from launchd, so the CLI sees it too.
+    public var helperProblem: HelperProblem?
     /// "Require password after screen saver begins" is Immediately.
     public var passwordImmediately: Bool
     /// True when a configuration profile manages any screen-saver setting (idle time, password, module).
@@ -319,12 +369,14 @@ public struct InstallStatus: Sendable, Equatable {
     public var lockKeysChangedByLivePaper: Bool
 
     public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverNewerInstalled: Bool = false, saverSelected: Bool = false,
-                helperRunning: Bool = false, helperLoginItem: LoginItemStatus = .notRegistered, passwordImmediately: Bool = false,
+                helperRunning: Bool = false, helperLoginItem: LoginItemStatus = .notRegistered, helperProblem: HelperProblem? = nil,
+                passwordImmediately: Bool = false,
                 managedByMDM: Bool = false, passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false,
                 lockKeysChangedByLivePaper: Bool = false) {
         self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverNewerInstalled = saverNewerInstalled
         self.saverSelected = saverSelected
-        self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.passwordImmediately = passwordImmediately
+        self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.helperProblem = helperProblem
+        self.passwordImmediately = passwordImmediately
         self.managedByMDM = managedByMDM; self.passwordManagedByMDM = passwordManagedByMDM; self.lockKeysShowScene = lockKeysShowScene
         self.lockKeysChangedByLivePaper = lockKeysChangedByLivePaper
     }
@@ -341,6 +393,10 @@ public enum SaverUpdateOutcome: Sendable, Equatable {
     case updated(PublishResult?)
     /// Nothing changed, and why.
     case skipped(String)
+
+    /// The reason of a skip because the login session is locked: the app tries again after the
+    /// next unlock (com.apple.screenIsUnlocked).
+    public static let sessionLockedReason = "the Mac is locked"
 }
 
 /// One logged installer step (what the uninstall sheet and `livepaper doctor` show).
@@ -373,7 +429,15 @@ public protocol InstallServicing: AnyObject, Sendable {
     /// Makes LivePaper the selected screen saver. Returns false if it could not be done automatically
     /// (the UI then shows the one-click guided step via openScreenSaverSettings()).
     func selectSaver() throws -> Bool
+    /// Sets the helper up (login item, else the LaunchAgent fallback) and makes sure it runs this
+    /// build: starts a stopped job, and registers the login item again when launchd can't start it
+    /// or it belongs to an older build. The user's "Start Helper" / "Repair Helper".
     func registerHelper() throws
+    /// The app's automatic repair, at most once per launch: when the helper is set up but its job
+    /// doesn't run this build's helper (InstallStatus.helperProblem), start it again or register the
+    /// login item again. Never sets up a helper that isn't, never after an uninstall and never while
+    /// macOS waits for the user's approval. Throws when the repair didn't work.
+    func recoverHelper() throws -> HelperRecoveryOutcome
     func unregisterHelper() throws
     /// Turns the lock-keys takeover on or off (`immediateLockLaunchesScreenSaver`). The value from
     /// before LivePaper's first change is backed up; uninstall restores it.
@@ -386,6 +450,9 @@ public protocol InstallServicing: AnyObject, Sendable {
 }
 
 public extension InstallServicing {
+    /// Stand-ins that know nothing about launchd have nothing to repair.
+    func recoverHelper() throws -> HelperRecoveryOutcome { .notNeeded("not supported here") }
+
     /// `performUninstall` that throws `InstallError.uninstallIncomplete` if any step failed.
     func uninstall(removeLibrary: Bool) throws {
         let failed = performUninstall(removeLibrary: removeLibrary).compactMap { step -> String? in

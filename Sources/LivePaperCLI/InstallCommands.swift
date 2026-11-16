@@ -132,12 +132,8 @@ enum InstallCommands {
             ? "on: ⌃⌘Q, Lock Screen and the Touch ID / lock key show the scene (\(InstallService.lockTakeoverDomain) \(InstallService.lockTakeoverKey))"
             : "off: ⌃⌘Q, Lock Screen and the Touch ID / lock key lock straight to the wallpaper. Turn it on in LivePaper › Settings › Lock (\u{201C}Use ⌃⌘Q and the lock key for LivePaper lock\u{201D}).")
         add(lock, "idle timeout", .info, "unchanged; macOS starts the screen saver after the idle time set in System Settings › Lock Screen")
-        if status.helperRunning {
-            add(lock, "helper", .ok, "running (\(LPPaths.helperLabel))")
-        } else {
-            add(lock, "helper", .problem, "\(LPPaths.helperLabel) isn't running: LivePaper's lock shortcut and \u{201C}Lock now\u{201D} don't work. " +
-                "Open LivePaper to start it (and allow it in System Settings › General › Login Items).")
-        }
+        let helper = helperCheck(status)
+        add(lock, "helper", helper.status, helper.detail)
         if FileManager.default.fileExists(atPath: paths.fallbackAgentPlist.path) {
             add(lock, "helper agent", .info, "fallback LaunchAgent at \(displayPath(paths.fallbackAgentPlist))")
         }
@@ -185,6 +181,27 @@ enum InstallCommands {
             "logs": LPPaths.logs.path,
         ]
         return DoctorReport(version: CLIEnvironment.version.display, checks: checks, paths: pathList)
+    }
+
+    /// The helper row: running, running an older build, can't start (with the fix), or not running.
+    static func helperCheck(_ status: InstallStatus) -> (status: Check.Status, detail: String) {
+        let label = LPPaths.helperLabel
+        switch (status.helperRunning, status.helperProblem) {
+        case (true, .outdated(let detail)?):
+            return (.warning, "running, but an older build than this LivePaper (\(detail)). Open LivePaper: it registers the helper " +
+                    "again at launch, so the next start doesn't run into the code signature macOS recorded for the old one.")
+        case (true, _):
+            return (.ok, "running (\(label))")
+        case (false, .cannotStart(let detail)?):
+            return (.problem, "\(label) can't start: launchd reports \(detail), so LivePaper's lock shortcut and \u{201C}Lock now\u{201D} " +
+                    "don't work. After an update of an ad-hoc-signed LivePaper, macOS still expects the helper " +
+                    "it recorded when the login item was registered, and only the app itself can register it again: open " +
+                    "LivePaper (it does so at launch) or use Settings › Lock › Repair Helper. If it still can't start, switch " +
+                    "LivePaper off and on in System Settings › General › Login Items, or log out and back in.")
+        case (false, _):
+            return (.problem, "\(label) isn't running: LivePaper's lock shortcut and \u{201C}Lock now\u{201D} don't work. " +
+                    "Open LivePaper to start it (and allow it in System Settings › General › Login Items).")
+        }
     }
 
     static func renderServerState() async -> String {

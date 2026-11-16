@@ -88,6 +88,9 @@ public enum InstallError: Error, LocalizedError, Sendable, Equatable {
     case uninstallIncomplete([String])
     /// The user switched the helper off in System Settings › General › Login Items.
     case helperDeniedByUser
+    /// launchd still can't start the helper after LivePaper registered its login item again (what
+    /// it reports).
+    case helperCannotStart(String)
     /// Uninstall couldn't switch the screen saver away from LivePaper (the reason), so it keeps
     /// LivePaper.saver: the store must never point at a deleted module.
     case screenSaverStillSelected(String)
@@ -100,6 +103,9 @@ public enum InstallError: Error, LocalizedError, Sendable, Equatable {
         case .uninstallIncomplete(let steps): return "Uninstall couldn't finish: " + steps.joined(separator: "; ")
         case .helperDeniedByUser:
             return "LivePaper's helper is switched off in System Settings › General › Login Items. Switch it on there."
+        case .helperCannotStart(let detail):
+            return "macOS can't start LivePaper's helper (\(detail)), even after LivePaper registered it again. Switch LivePaper " +
+                   "off and on again in System Settings › General › Login Items, or log out and back in."
         case .screenSaverStillSelected(let why):
             return "LivePaper is still your screen saver (\(why)). Choose another screen saver in System Settings › Wallpaper › " +
                    "Screen Saver, then run uninstall again; until then LivePaper keeps its screen saver and backups."
@@ -162,6 +168,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     private let wallpaperSystem: WallpaperSystem
     private let wallpaperClock: WallpaperClock
     private let wallpaperOptions: WallpaperApplyOptions
+    private let processStartTime: @Sendable (Int32) -> Date?
+    private let helperStartTimeout: TimeInterval
     private let lock = NSRecursiveLock()
     private var steps: [InstallStep] = []
     private let log = Logger(subsystem: LPPaths.bundleID, category: "install")
@@ -173,12 +181,17 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     ///     nil: the live system (it restarts WallpaperAgent) when `runner` really runs commands, and
     ///     one that refuses everything when commands are only recorded.
     ///   - wallpaperClock, wallpaperOptions: the timings of the store applier (tests: a fake clock).
+    ///   - processStartTime: when a process started (nil: sysctl), to tell whether the running
+    ///     helper predates the helper on disk.
+    ///   - helperStartTimeout: how long starting or registering the helper waits for launchd to
+    ///     report it running (0: look once).
     public init(paths: InstallPaths = .current(), publisher: PublishServicing?, runner: CommandRunning = SystemCommandRunner(),
                 loginItem: LoginItemRegistering = SMAppServiceAgent(), preferences: PreferencesAccessing = SystemPreferences(),
                 dryRun: Bool = false,
                 uid: uid_t = getuid(), osMajorVersion: Int = ProcessInfo.processInfo.operatingSystemVersion.majorVersion,
                 wallpaperSystem: WallpaperSystem? = nil, wallpaperClock: WallpaperClock = SystemWallpaperClock(),
-                wallpaperOptions: WallpaperApplyOptions = WallpaperApplyOptions()) {
+                wallpaperOptions: WallpaperApplyOptions = WallpaperApplyOptions(),
+                processStartTime: (@Sendable (Int32) -> Date?)? = nil, helperStartTimeout: TimeInterval = 3) {
         self.paths = paths; self.publisher = publisher; self.runner = runner; self.loginItem = loginItem
         self.preferences = preferences; self.dryRun = dryRun; self.uid = uid
         self.osMajorVersion = osMajorVersion
@@ -188,6 +201,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             : UnavailableWallpaperSystem(reason: "system commands are only recorded"))
         self.wallpaperClock = wallpaperClock
         self.wallpaperOptions = wallpaperOptions
+        self.processStartTime = processStartTime ?? { SystemProbes.processStartTime(pid: $0) }
+        self.helperStartTimeout = helperStartTimeout
     }
 
     /// Every step performed (or, in a dry run, planned) by this instance, oldest first.
@@ -209,9 +224,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         let installed = FileOps.isRegularFile(paths.installedSaver.appendingPathComponent("Contents/Info.plist"))
         let managed = SystemProbes.managedSettings(paths.managedPreferences)
         let sysadminctl = try? runner.run("/usr/sbin/sysadminctl", ["-screenLock", "status"], timeout: 10)
-        let helperRunning = [helperService, fallbackService].contains { service in
-            (try? runner.run("/bin/launchctl", ["print", service], timeout: 10)).map(SystemProbes.helperRunning) ?? false
-        }
+        let loginJob = job(helperService), fallbackJob = job(fallbackService)
+        let helperRunning = [loginJob, fallbackJob].contains { $0?.isRunning == true }
+        let loginItemStatus = loginItem.status
         let immediate = SystemProbes.passwordImmediately(sysadminctlOutput: sysadminctl?.combinedOutput, managed: managed)
         // Without a template (development builds) there is nothing newer to install.
         let upToDate = installed && (templateVersion == nil || installedVersion == templateVersion)
@@ -221,7 +236,8 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             saverNewerInstalled: installed && !upToDate && Self.isNewerBuild(installedVersion, than: templateVersion),
             saverSelected: store.isSelected(),
             helperRunning: helperRunning,
-            helperLoginItem: loginItem.status,
+            helperLoginItem: loginItemStatus,
+            helperProblem: helperAssessment(loginItem: loginItemStatus, loginJob: loginJob, fallbackJob: fallbackJob)?.problem,
             passwordImmediately: immediate,
             managedByMDM: SystemProbes.isManaged(managed),
             passwordManagedByMDM: !immediate && SystemProbes.passwordEnforcedNotImmediately(
@@ -265,7 +281,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// settings and library, and the report says which scenes that left out.
     public func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome {
         let title = "Update the screen saver in \(paths.screenSaversDir.path)"
-        func blocker() -> String? { saverUpdateBlocker() ?? (isSessionLocked() ? "the Mac is locked" : nil) }
+        func blocker() -> String? { saverUpdateBlocker() ?? (isSessionLocked() ? SaverUpdateOutcome.sessionLockedReason : nil) }
         if let why = blocker() {
             record(title, .skipped(why))
             return .skipped(why)
@@ -412,8 +428,9 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// Registers the helper as a login item (SMAppService) and makes sure it runs, falling back to a
     /// LaunchAgent plist (its own label) when the process isn't the app bundle or SMAppService refuses
     /// for good. Idempotent; "Start Helper" calls it to restart a helper that was quit:
-    /// * login item enabled: start its job (`launchctl kickstart`), or register it again when launchd
-    ///   doesn't have it loaded;
+    /// * login item enabled: make its job run this build's helper (`runRegisteredHelper`: start it,
+    ///   or register it again when launchd doesn't have it, can't start it or it belongs to an older
+    ///   build);
     /// * waiting for approval / switched off by the user: nothing LivePaper can do — the user allows
     ///   it in System Settings › General › Login Items (no fallback: that would bypass their choice);
     /// * SMAppService fails otherwise: the LaunchAgent, and that choice is remembered
@@ -436,7 +453,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
         switch loginItem.status {
         case .enabled:
-            try startRegisteredHelper()
+            _ = try runRegisteredHelper()
             return
         case .requiresApproval:
             record("Register the helper as a login item", .skipped("waiting for approval in System Settings › General › Login Items"))
@@ -455,7 +472,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             switch LoginItemRegistrationFailure(error) {
             case .alreadyRegistered:
                 record(title, .skipped("already registered"))
-                try startRegisteredHelper()
+                _ = try runRegisteredHelper()
                 return
             case .deniedByUser:
                 record(title, .failed(InstallError.helperDeniedByUser.localizedDescription))
@@ -474,25 +491,174 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
     }
 
-    /// The login item is registered and enabled, but its job may have stopped: the helper exits
-    /// cleanly when quit, and KeepAlive {SuccessfulExit: false} then leaves it stopped.
-    private func startRegisteredHelper() throws {
-        guard helperLoaded(helperService) else {
-            // Registered but not loaded (e.g. booted out): registering again loads it.
-            try perform("Register the helper login item again") {
-                try? loginItem.unregister()
-                _ = try loginItem.register()
-                return nil
-            }
-            return
+    /// The app's automatic repair (InstallServicing.recoverHelper; at most once per launch): makes the
+    /// job of a helper that is set up run this build's helper — the login item's
+    /// (`runRegisteredHelper`), or the LaunchAgent fallback's (written again and bootstrapped). Leaves
+    /// alone what the user hasn't set up, a login item waiting for approval, and an uninstall.
+    public func recoverHelper() throws -> HelperRecoveryOutcome {
+        func notNeeded(_ why: String) -> HelperRecoveryOutcome {
+            record(Self.recoverHelperTitle, .skipped(why))
+            return .notNeeded(why)
         }
-        try perform("Start the helper (\(helperService))", skipIf: { helperIsRunning(helperService) ? "already running" : nil }) {
-            let result = try runner.run("/bin/launchctl", ["kickstart", helperService], timeout: 15)
-            guard result.succeeded else {
-                throw InstallError.commandFailed("launchctl kickstart", result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines))
-            }
-            return nil
+        if FileOps.entryExists(paths.uninstallMarker) { return notNeeded("LivePaper was uninstalled") }
+        if !loginItem.isAvailable || FileOps.entryExists(paths.helperLaunchChoice) {
+            // The LaunchAgent fallback: unbundled builds, or SMAppService refused for good.
+            guard FileOps.entryExists(paths.fallbackAgentPlist) else { return notNeeded("the helper isn't set up") }
+            let assessment = assessFallbackJob(job(fallbackService))
+            guard let problem = assessment.problem, assessment.action != .none else { return notNeeded("already running") }
+            log.notice("starting the helper LaunchAgent again: \(problem.summary, privacy: .public)")
+            try installFallbackAgent()
+            return .started
         }
+        switch loginItem.status {
+        case .enabled: return try runRegisteredHelper()
+        case .requiresApproval: return notNeeded("waiting for approval in System Settings › General › Login Items")
+        case .notRegistered, .notFound: return notNeeded("the helper isn't set up")
+        }
+    }
+
+    /// Title of the step recoverHelper records when it has nothing to do.
+    public static let recoverHelperTitle = "Repair the helper"
+    /// Title of the step that registers the helper's login item again.
+    public static let reregisterLoginItemTitle = "Register the helper login item again"
+
+    /// The login item is registered and enabled; makes its job run this build's helper
+    /// (HelperJobAssessment). A job that is merely stopped — the helper exits cleanly when quit, and
+    /// KeepAlive {SuccessfulExit: false} leaves it stopped — is started. One that launchd doesn't
+    /// have, can't start, or that belongs to an older build is registered again, and so is a stopped
+    /// one that still doesn't run once started: launchd only checks the recorded code requirement
+    /// when it starts the helper.
+    private func runRegisteredHelper() throws -> HelperRecoveryOutcome {
+        let assessment = assessLoginJob(job(helperService))
+        let title = "Start the helper (\(helperService))"
+        switch assessment.action {
+        case .none:
+            record(title, .skipped("already running"))
+            return .notNeeded("already running")
+        case .reregister(let why):
+            return try reregisterLoginItem(because: why)
+        case .start:
+            try perform(title) { try kickstart(helperService); return nil }
+            if dryRun { return .notNeeded("dry run") }
+            switch awaitStart(helperService) {
+            case .running: return .started
+            case .cannotStart(let why): return try reregisterLoginItem(because: "launchd couldn't start it: \(why)")
+            case .notRunning: return try reregisterLoginItem(because: "it didn't start")
+            }
+        }
+    }
+
+    /// Unregisters the login item and registers it again: what SMAppService.h asks for after the
+    /// helper changed, and the only thing that gets launchd a job for the current helper once it
+    /// can't start the recorded one (docs/RESEARCH.md §6). Only ever done for an enabled item, and new
+    /// agents start out allowed; should macOS ask for approval anyway, that is reported
+    /// (.needsApproval) and nothing else is tried — no LaunchAgent behind the user's back.
+    private func reregisterLoginItem(because why: String) throws -> HelperRecoveryOutcome {
+        let title = "\(Self.reregisterLoginItemTitle) (\(why))"
+        if dryRun { record(title, .planned); return .notNeeded("dry run") }
+        log.notice("registering the helper login item again: \(why, privacy: .public)")
+        let status: LoginItemStatus
+        do {
+            // SMAppServiceAgent.unregister returns once the old job is gone.
+            try? loginItem.unregister()
+            status = try loginItem.register()
+        } catch {
+            let failure: Error
+            switch LoginItemRegistrationFailure(error) {
+            case .deniedByUser: failure = InstallError.helperDeniedByUser
+            case .alreadyRegistered: failure = InstallError.helperCannotStart("macOS kept the old registration: \(error.localizedDescription)")
+            case .other: failure = error
+            }
+            record(title, .failed(failure.localizedDescription))
+            throw failure
+        }
+        if status == .requiresApproval {
+            record(title, .done)
+            log.notice("helper needs approval in System Settings › General › Login Items")
+            return .needsApproval
+        }
+        // Registering bootstraps the job and RunAtLoad starts it; a loaded job that is still idle
+        // gets one kickstart.
+        var started = awaitStart(helperService)
+        if case .notRunning = started, job(helperService) != nil {
+            try? kickstart(helperService)
+            started = awaitStart(helperService)
+        }
+        switch started {
+        case .running:
+            record(title, .done)
+            return .reregistered
+        case .cannotStart(let detail):
+            let failure = InstallError.helperCannotStart(detail)
+            record(title, .failed(failure.localizedDescription))
+            throw failure
+        case .notRunning:
+            let failure = InstallError.helperCannotStart(job(helperService) == nil ? "launchd doesn't have its job" : "it doesn't start")
+            record(title, .failed(failure.localizedDescription))
+            throw failure
+        }
+    }
+
+    private func kickstart(_ service: String) throws {
+        let result = try runner.run("/bin/launchctl", ["kickstart", service], timeout: 15)
+        guard result.succeeded else {
+            throw InstallError.commandFailed("launchctl kickstart", result.combinedOutput.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+    }
+
+    private enum JobStart { case running, cannotStart(String), notRunning }
+
+    /// Watches `service` for up to helperStartTimeout until it runs; otherwise what launchd last
+    /// said (why it can't start it, or that it just doesn't run).
+    private func awaitStart(_ service: String) -> JobStart {
+        let deadline = Date().addingTimeInterval(helperStartTimeout)
+        while true {
+            let current = job(service)
+            if current?.isRunning == true { return .running }
+            if Date() >= deadline { return current?.cannotStartReason.map(JobStart.cannotStart) ?? .notRunning }
+            Thread.sleep(forTimeInterval: 0.25)
+        }
+    }
+
+    /// `launchctl print` (read-only) of a loaded job; nil when launchd doesn't have it.
+    private func job(_ service: String) -> LaunchdJob? {
+        guard let result = try? runner.run("/bin/launchctl", ["print", service], timeout: 10), result.succeeded else { return nil }
+        return LaunchdJob.parse(result.stdout)
+    }
+
+    private func assessLoginJob(_ job: LaunchdJob?) -> HelperJobAssessment {
+        HelperJobAssessment.assess(job, appBuild: appBuild, helperReplacedSinceStart: helperReplaced(since: job))
+    }
+
+    private func assessFallbackJob(_ job: LaunchdJob?) -> HelperJobAssessment {
+        HelperJobAssessment.assess(job, appBuild: appBuild, expectedProgram: paths.helperExecutable.path,
+                                   helperReplacedSinceStart: helperReplaced(since: job))
+    }
+
+    /// The helper status() reports on: the login item's job whenever launchd has it (the CLI can't
+    /// ask SMAppService about the app's login item, but launchd knows), else the fallback when its
+    /// plist is in place, else an enabled login item whose job is missing. nil: no helper is set up,
+    /// or LivePaper was uninstalled.
+    private func helperAssessment(loginItem status: LoginItemStatus, loginJob: LaunchdJob?, fallbackJob: LaunchdJob?) -> HelperJobAssessment? {
+        guard !FileOps.entryExists(paths.uninstallMarker) else { return nil }
+        if let loginJob { return assessLoginJob(loginJob) }
+        if FileOps.entryExists(paths.fallbackAgentPlist) { return assessFallbackJob(fallbackJob) }
+        return status == .enabled ? assessLoginJob(nil) : nil
+    }
+
+    /// The running helper started before the helper file on disk was put in place, so it is an
+    /// older build (an app replaced while its helper ran keeps running the old executable).
+    private func helperReplaced(since job: LaunchdJob?) -> Bool {
+        guard let job, job.isRunning, let pid = job.pid, let started = processStartTime(pid),
+              let replaced = SystemProbes.statusChangeTime(paths.helperExecutable) else { return false }
+        return replaced.timeIntervalSince(started) > 1
+    }
+
+    /// CFBundleVersion of the app the helper belongs to (…/LivePaper.app for
+    /// …/LivePaper.app/Contents/Helpers/LivePaperHelper).
+    private var appBuild: String? {
+        let app = paths.helperExecutable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        return FileOps.bundleInfo(app, "CFBundleVersion")
     }
 
     /// Title of the step that unregisters the helper's login item.
@@ -541,10 +707,6 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// `launchctl print` (read-only) succeeds only for a loaded job.
     private func helperLoaded(_ service: String) -> Bool {
         (try? runner.run("/bin/launchctl", ["print", service], timeout: 10))?.succeeded ?? false
-    }
-
-    private func helperIsRunning(_ service: String) -> Bool {
-        (try? runner.run("/bin/launchctl", ["print", service], timeout: 10)).map(SystemProbes.helperRunning) ?? false
     }
 
     private func installFallbackAgent() throws {

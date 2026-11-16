@@ -18,6 +18,117 @@ extension SelfTests {
     static var core: [TestCase] { coreLibrary + corePublish + coreAI + coreInstall + coreSmoke }
 }
 
+// MARK: - Recorded launchd output
+
+/// `launchctl print gui/503/com.nachmore.livepaper.helper` on the owner's Mac (macOS 26.7, 2026-11-15),
+/// hours after an update of the ad-hoc-signed app (build 125 registered it; the app was build 186).
+private let helperSpawnFailedPrint = [
+    "gui/503/com.nachmore.livepaper.helper = {",
+    "\tactive count = 0",
+    "\tpath = (submitted by smd.368)",
+    "\ttype = Submitted",
+    "\tmanaged_by = com.apple.xpc.ServiceManagement",
+    "\tstate = spawn scheduled",
+    "",
+    "\tprogram identifier = Contents/Helpers/LivePaperHelper (mode: 2)",
+    "\tparent bundle identifier = com.nachmore.livepaper",
+    "\tparent bundle version = 125",
+    "\tBTM uuid = 4EC772A1-5A99-4427-82F2-183EC7724503",
+    "\tinherited environment = {",
+    "\t\tSSH_AUTH_SOCK => /var/run/com.apple.launchd.A4vxG6hchi/Listeners",
+    "\t}",
+    "",
+    "\tdefault environment = {",
+    "\t\tPATH => /usr/bin:/bin:/usr/sbin:/sbin",
+    "\t}",
+    "",
+    "\tenvironment = {",
+    "\t\tOSLogRateLimit => 64",
+    "\t\tXPC_SERVICE_NAME => com.nachmore.livepaper.helper",
+    "\t}",
+    "",
+    "\tdomain = gui/503 [100025]",
+    "\tasid = 100025",
+    "\tminimum runtime = 10",
+    "\texit timeout = 5",
+    "\truns = 856",
+    "\tlast exit code = 78: EX_CONFIG",
+    "",
+    "\tsemaphores = {",
+    "\t\tsuccessful exit => 0",
+    "\t}",
+    "",
+    "\tresource coalition = {",
+    "\t\tID = 43810",
+    "\t\ttype = resource",
+    "\t\tstate = active",
+    "\t\tactive count = 1",
+    "\t\tname = com.nachmore.livepaper.helper",
+    "\t}",
+    "",
+    "\tjetsam coalition = {",
+    "\t\tID = 43811",
+    "\t\ttype = jetsam",
+    "\t\tstate = active",
+    "\t\tactive count = 1",
+    "\t\tname = com.nachmore.livepaper.helper",
+    "\t}",
+    "",
+    "\tspawn type = interactive (4)",
+    "\tjetsam priority = 40",
+    "\tjetsam memory limit (active) = (unlimited)",
+    "\tjetsam memory limit (inactive) = (unlimited)",
+    "\tjetsamproperties category = daemon",
+    "\tsubmitted job. ignore execute allowed",
+    "\tjetsam thread limit = 32",
+    "\tcpumon = default",
+    "\tjob state = spawn failed",
+    "",
+    "\tproperties = partial import | runatload | resolve program | needs LWCR update | has LWCR",
+    "}",
+].joined(separator: "\n") + "\n"
+
+/// The same job running (the shape of a running SMAppService job on that Mac: nested blocks carry
+/// their own `state = active`, `active = 1`, …, which aren't the job's).
+private let helperRunningPrint = [
+    "gui/503/com.nachmore.livepaper.helper = {",
+    "\tactive count = 4",
+    "\tpath = (submitted by smd.368)",
+    "\ttype = Submitted",
+    "\tmanaged_by = com.apple.xpc.ServiceManagement",
+    "\tstate = running",
+    "",
+    "\tprogram identifier = Contents/Helpers/LivePaperHelper (mode: 2)",
+    "\tparent bundle identifier = com.nachmore.livepaper",
+    "\tparent bundle version = 186",
+    "\tenvironment = {",
+    "\t\tXPC_SERVICE_NAME => com.nachmore.livepaper.helper",
+    "\t}",
+    "",
+    "\truns = 1",
+    "\tpid = 4242",
+    "\tlast exit code = (never exited)",
+    "",
+    "\tpid-local endpoints = {",
+    "\t\t\"com.apple.tsm.portname\" = {",
+    "\t\t\tport = 0xc36a3",
+    "\t\t\tactive = 1",
+    "\t\t}",
+    "\t}",
+    "",
+    "\tresource coalition = {",
+    "\t\tID = 1177",
+    "\t\ttype = resource",
+    "\t\tstate = active",
+    "\t}",
+    "",
+    "\tspawn type = daemon (3)",
+    "\tjob state = running",
+    "",
+    "\tproperties = partial import | runatload | resolve program | has LWCR",
+    "}",
+].joined(separator: "\n") + "\n"
+
 // MARK: - Sandbox & fakes
 
 /// A temp tree with a fake app bundle's resources, plus the LIVEPAPER_* overrides pointing into it.
@@ -184,6 +295,10 @@ private final class FakeLoginItem: LoginItemRegistering, @unchecked Sendable {
     var refusesWhenRegistered = false
     /// What registering does to launchd (loads the job).
     var onRegister: (() -> Void)?
+    /// What unregistering does to launchd (removes the job).
+    var onUnregister: (() -> Void)?
+    /// The status a registration ends in (SMAppService may ask for approval).
+    var statusAfterRegister: LoginItemStatus = .enabled
     var registerCalls = 0, unregisterCalls = 0
     init(available: Bool) { isAvailable = available }
     var status: LoginItemStatus { current }
@@ -191,11 +306,11 @@ private final class FakeLoginItem: LoginItemRegistering, @unchecked Sendable {
         registerCalls += 1
         if refusesWhenRegistered && current == .enabled { throw Self.smError(12) }
         if let registerError { throw registerError }
-        current = .enabled
-        onRegister?()
+        current = statusAfterRegister
+        if current == .enabled { onRegister?() }
         return current
     }
-    func unregister() throws { unregisterCalls += 1; current = .notRegistered }
+    func unregister() throws { unregisterCalls += 1; current = .notRegistered; onUnregister?() }
     static func smError(_ code: Int) -> NSError { NSError(domain: "SMAppServiceErrorDomain", code: code) }
 }
 
@@ -217,6 +332,14 @@ private final class FakePreferences: PreferencesAccessing, @unchecked Sendable {
 private final class FakeSystem: @unchecked Sendable {
     var loaded: Set<String> = []
     var stopped: Set<String> = []
+    /// Loaded jobs launchd can't start (what `launchctl print` showed on the owner's Mac after an
+    /// update of an ad-hoc-signed build: spawn failed, EX_CONFIG, needs LWCR update).
+    var broken: Set<String> = []
+    /// Jobs whose next start fails that way (the recorded code requirement doesn't match).
+    var breaksOnStart: Set<String> = []
+    /// `parent bundle version` and `pid` lines for jobs that have them.
+    var parentVersion: [String: String] = [:]
+    var pids: [String: Int32] = [:]
     /// The login item's job is loaded (and running unless stopped).
     var helperLoaded: Bool {
         get { !loaded.isEmpty }
@@ -230,18 +353,26 @@ private final class FakeSystem: @unchecked Sendable {
         case ("/usr/sbin/sysadminctl", _):
             return CommandResult(status: 0, stderr: screenLock)
         case ("/bin/launchctl", "print"):
-            return loaded.contains(label)
-                ? CommandResult(status: 0, stdout: "gui/501/\(label) = {\n\tstate = \(stopped.contains(label) ? "not running" : "running")\n}\n")
-                : CommandResult(status: 113, stdout: "Could not find service \"\(label)\" in domain for user gui: 501\n")
+            guard loaded.contains(label) else {
+                return CommandResult(status: 113, stdout: "Could not find service \"\(label)\" in domain for user gui: 501\n")
+            }
+            if broken.contains(label) { return CommandResult(status: 0, stdout: helperSpawnFailedPrint) }
+            let running = !stopped.contains(label)
+            var lines = ["gui/501/\(label) = {", "\tstate = \(running ? "running" : "not running")"]
+            if let version = parentVersion[label] { lines.append("\tparent bundle version = \(version)") }
+            if running, let pid = pids[label] { lines.append("\tpid = \(pid)") }
+            return CommandResult(status: 0, stdout: (lines + ["}"]).joined(separator: "\n") + "\n")
         case ("/bin/launchctl", "bootstrap"):
             let plist = args.count > 2 ? (NSDictionary(contentsOfFile: args[2])?["Label"] as? String) : nil
             loaded.insert(plist ?? "?"); stopped.remove(plist ?? "?"); return nil
         case ("/bin/launchctl", "bootout"):
-            defer { loaded.remove(label); stopped.remove(label) }
+            defer { loaded.remove(label); stopped.remove(label); broken.remove(label) }
             return loaded.contains(label) ? nil : CommandResult(status: 3, stderr: "Boot-out failed: 3: No such process\n")
         case ("/bin/launchctl", "kickstart"):
             guard loaded.contains(label) else { return CommandResult(status: 113, stderr: "Could not find service\n") }
-            stopped.remove(label); return nil
+            if breaksOnStart.contains(label) { broken.insert(label); return nil }
+            if !broken.contains(label) { stopped.remove(label) }
+            return nil
         default:
             return nil
         }
@@ -250,6 +381,14 @@ private final class FakeSystem: @unchecked Sendable {
     var mutatingCommands: [[String]] {
         runner.commands.filter { !($0.first == "/bin/launchctl" && $0.dropFirst().first == "print") && $0.first != "/usr/sbin/sysadminctl" }
     }
+}
+
+/// Process start times by pid (InstallService's processStartTime).
+private final class ProcessStarts: @unchecked Sendable {
+    private let lock = NSLock()
+    private var byPID: [Int32: Date] = [:]
+    func set(_ pid: Int32, _ date: Date) { lock.lock(); byPID[pid] = date; lock.unlock() }
+    func get(_ pid: Int32) -> Date? { lock.lock(); defer { lock.unlock() }; return byPID[pid] }
 }
 
 private final class ResultBox<T>: @unchecked Sendable {
@@ -2116,6 +2255,226 @@ extension SelfTests {
                 system.loaded.insert(LPPaths.helperLabel)
                 try make(item).unregisterHelper()
                 try expect(system.loaded.isEmpty && !exists(paths.fallbackAgentPlist))
+            }
+        },
+        TestCase(name: "core.install.helper-job-parse") {
+            // The owner's job hours after an update: launchd can't start it, and says why.
+            let failed = LaunchdJob.parse(helperSpawnFailedPrint)
+            try expectEqual(failed.state, "spawn scheduled")
+            try expectEqual(failed.jobState, "spawn failed")
+            try expectEqual(failed.lastExit, "78: EX_CONFIG")
+            try expectEqual(failed.lastExitCode, 78)
+            try expectEqual(failed.runs, 856)
+            try expectEqual(failed.parentBundleVersion, "125")
+            try expectEqual(failed.program, "Contents/Helpers/LivePaperHelper")
+            try expectEqual(failed.managedBy, "com.apple.xpc.ServiceManagement")
+            try expectEqual(failed.properties, ["partial import", "runatload", "resolve program", "needs LWCR update", "has LWCR"])
+            try expect(!failed.isRunning && failed.pid == nil && !failed.codeSigningFailure)
+            try expectEqual(failed.cannotStartReason, "spawn failed, last exit code 78: EX_CONFIG, needs LWCR update")
+            // Running: the nested blocks' own `state = active`, `active = 1`, … aren't the job's.
+            let running = LaunchdJob.parse(helperRunningPrint)
+            try expect(running.isRunning && running.pid == 4242 && running.jobState == "running")
+            try expectEqual(running.lastExit, "(never exited)")
+            try expectEqual(running.lastExitCode, nil)
+            try expectEqual(running.parentBundleVersion, "186")
+            try expectEqual(running.cannotStartReason, nil)
+            // A plain plist's job that was quit (exit 0): stopped, and nothing says it can't start.
+            let quit = LaunchdJob.parse("gui/501/x = {\n\tstate = not running\n\tprogram = /Applications/LivePaper.app/Contents/Helpers/" +
+                                        "LivePaperHelper\n\tlast exit code = 0\n\tresource coalition = {\n\t\tstate = running\n\t}\n}\n")
+            try expect(!quit.isRunning, "a nested state isn't the job's")
+            try expectEqual(quit.program, "/Applications/LivePaper.app/Contents/Helpers/LivePaperHelper")
+            try expectEqual(quit.lastExitCode, 0)
+            try expectEqual(quit.cannotStartReason, nil)
+            // A launch refused for its code signature counts even without EX_CONFIG.
+            let refused = LaunchdJob.parse("gui/501/x = {\n\tstate = not running\n\tlast exit reason = OS_REASON_CODESIGNING | " +
+                                           "Launch Constraint Violation\n}\n")
+            try expectEqual(refused.cannotStartReason, "launch constraint violation")
+            try expectEqual(LaunchdJob.parse(""), LaunchdJob())
+        },
+        TestCase(name: "core.install.helper-job-assess") {
+            let assess = { (job: LaunchdJob?, app: String?, program: String?, replaced: Bool) in
+                HelperJobAssessment.assess(job, appBuild: app, expectedProgram: program, helperReplacedSinceStart: replaced)
+            }
+            let failed = LaunchdJob.parse(helperSpawnFailedPrint), running = LaunchdJob.parse(helperRunningPrint)
+            let why = "spawn failed, last exit code 78: EX_CONFIG, needs LWCR update"
+            // The owner's case: register it again, whichever build registered it.
+            try expectEqual(assess(failed, "186", nil, false),
+                            HelperJobAssessment(problem: .cannotStart(why), action: .reregister("launchd can't start it: \(why)")))
+            try expectEqual(assess(failed, "100", nil, false), assess(failed, "186", nil, false))
+            try expectEqual(assess(nil, "186", nil, false),
+                            HelperJobAssessment(problem: .notLoaded, action: .reregister("launchd doesn't have its job loaded")))
+            try expectEqual(assess(running, "186", nil, false), HelperJobAssessment(problem: nil, action: .none))
+            // Registered by an older build but started from this one's helper (Developer ID, or an
+            // unchanged helper): it works, so it stays.
+            try expectEqual(assess(running, "190", nil, false).action, .none)
+            // Started before the helper on disk was replaced: an older build, registered again.
+            let detail = "it started before this LivePaper's helper was installed"
+            try expectEqual(assess(running, "186", nil, true),
+                            HelperJobAssessment(problem: .outdated(detail), action: .reregister("it runs an older build: \(detail)")))
+            // Stopped: started again — unless an older build registered it (starting that only gets
+            // the launch refused and sets off launchd's repair) …
+            var stopped = running
+            stopped.state = "not running"; stopped.pid = nil; stopped.jobState = "exited"; stopped.lastExit = "0"
+            try expectEqual(assess(stopped, "186", nil, false), HelperJobAssessment(problem: .stopped, action: .start))
+            try expectEqual(assess(stopped, "190", nil, false),
+                            HelperJobAssessment(problem: .stopped, action: .reregister("registered by build 186; this LivePaper is build 190")))
+            // … and a newer LivePaper's registration is only started, never taken over.
+            try expectEqual(assess(stopped, "150", nil, false).action, .start)
+            try expectEqual(assess(stopped, nil, nil, false).action, .start)
+            // The fallback's plain plist: a job that runs another copy's helper is the wrong one.
+            let helper = "/Applications/LivePaper.app/Contents/Helpers/LivePaperHelper"
+            let other = "/Users/me/Downloads/LivePaper.app/Contents/Helpers/LivePaperHelper"
+            try expectEqual(assess(LaunchdJob(state: "running", pid: 7, program: helper), nil, helper, false).action, .none)
+            try expectEqual(assess(LaunchdJob(state: "running", pid: 7, program: other), nil, helper, false).problem,
+                            .outdated("it runs \(other), not \(helper)"))
+            try expectEqual(assess(LaunchdJob(state: "not running", program: other), nil, helper, false),
+                            HelperJobAssessment(problem: .stopped, action: .reregister("its job runs \(other)")))
+            // What the UI calls out, and how logs and doctor say it.
+            try expect(HelperProblem.cannotStart("x").cannotStart && !HelperProblem.stopped.cannotStart && !HelperProblem.outdated("x").cannotStart)
+            try expectEqual(HelperProblem.cannotStart("spawn failed").summary, "launchd can't start it (spawn failed)")
+        },
+        TestCase(name: "core.install.helper-repair") {
+            // After an update of an ad-hoc-signed app the login item is enabled and launchd has its
+            // job, but can't start it: status() says so, and recoverHelper registers it again.
+            try CoreSandbox.with("helper-repair") { sb in
+                let paths = sb.installPaths()
+                try sb.writeExecutable("#!/bin/sh", to: paths.helperExecutable)
+                let app = paths.helperExecutable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+                try PropertyListSerialization.data(fromPropertyList: ["CFBundleVersion": "186"], format: .xml, options: 0)
+                    .write(to: app.appendingPathComponent("Contents/Info.plist"))
+                let system = FakeSystem()
+                let label = LPPaths.helperLabel, service = "gui/501/\(LPPaths.helperLabel)"
+                let starts = ProcessStarts()
+                let item = FakeLoginItem(available: true)
+                item.current = .enabled
+                let registers = { system.loaded.insert(label); system.stopped.remove(label); system.parentVersion[label] = "186" }
+                item.onRegister = registers
+                item.onUnregister = { system.loaded.remove(label); system.broken.remove(label) }
+                let make = { (dryRun: Bool) in
+                    InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: item, preferences: FakePreferences(),
+                                   dryRun: dryRun, uid: 501, processStartTime: { starts.get($0) }, helperStartTimeout: 0)
+                }
+                let why = "spawn failed, last exit code 78: EX_CONFIG, needs LWCR update"
+                system.loaded = [label]; system.broken = [label]; system.parentVersion[label] = "125"
+                let broken = make(false).status()
+                try expect(!broken.helperRunning && broken.helperLoginItem == .enabled)
+                try expectEqual(broken.helperProblem, .cannotStart(why))
+                try expect(system.mutatingCommands.isEmpty, "status() only reads")
+                let install = make(false)
+                try expectEqual(try install.recoverHelper(), .reregistered)
+                try expect(item.unregisterCalls == 1 && item.registerCalls == 1, "unregistered, then registered")
+                try expect(system.mutatingCommands.isEmpty, "registering starts it: \(system.mutatingCommands)")
+                try expectEqual(install.transcript.last,
+                                InstallStep(title: "Register the helper login item again (launchd can't start it: \(why))", outcome: .done))
+                let fixed = make(false).status()
+                try expect(fixed.helperRunning && fixed.helperProblem == nil, "\(fixed)")
+                try expectEqual(try make(false).recoverHelper(), .notNeeded("already running"))
+                try expectEqual(item.registerCalls, 1)
+
+                // A dry run only plans it.
+                system.broken = [label]
+                let dry = make(true)
+                try expectEqual(try dry.recoverHelper(), .notNeeded("dry run"))
+                try expectEqual(dry.transcript.last?.outcome, .planned)
+                try expectEqual(item.registerCalls, 1)
+
+                // Left alone: waiting for approval, not set up, uninstalled.
+                item.current = .requiresApproval
+                try expectEqual(try make(false).recoverHelper(), .notNeeded("waiting for approval in System Settings › General › Login Items"))
+                item.current = .notRegistered
+                try expectEqual(try make(false).recoverHelper(), .notNeeded("the helper isn't set up"))
+                item.current = .enabled
+                try sb.write("uninstalled", to: paths.uninstallMarker)
+                try expectEqual(try make(false).recoverHelper(), .notNeeded("LivePaper was uninstalled"))
+                try expectEqual(make(false).status().helperProblem, nil)
+                try FileManager.default.removeItem(at: paths.uninstallMarker)
+                try expectEqual(item.registerCalls, 1)
+
+                // Registered again, macOS asks for approval: say so, and nothing else — no LaunchAgent
+                // behind the user's back.
+                item.statusAfterRegister = .requiresApproval
+                try expectEqual(try make(false).recoverHelper(), .needsApproval)
+                try expect(!exists(paths.fallbackAgentPlist) && system.mutatingCommands.isEmpty)
+                try expectEqual(item.status, .requiresApproval)
+                item.statusAfterRegister = .enabled
+
+                // launchd still can't start it after registering again: the error says what to do.
+                item.current = .enabled
+                item.onRegister = { system.loaded.insert(label); system.broken.insert(label) }
+                do { _ = try make(false).recoverHelper(); throw TestFailure(description: "still broken") } catch InstallError.helperCannotStart(let detail) {
+                    try expectEqual(detail, why)
+                    try expect(InstallError.helperCannotStart(detail).localizedDescription.contains("Login Items"))
+                }
+                // macOS keeps the old registration.
+                item.current = .enabled
+                item.registerError = FakeLoginItem.smError(12)
+                do { _ = try make(false).recoverHelper(); throw TestFailure(description: "kept") } catch InstallError.helperCannotStart(let detail) {
+                    try expect(detail.hasPrefix("macOS kept the old registration"), detail)
+                }
+                item.registerError = nil
+                item.onRegister = registers
+
+                // Stopped, registered by an older build: registered again, never kickstarted (the
+                // launch would be refused).
+                item.current = .enabled
+                system.loaded = [label]; system.broken = []; system.stopped = [label]; system.parentVersion[label] = "125"
+                try expectEqual(try make(false).recoverHelper(), .reregistered)
+                try expect(system.mutatingCommands.isEmpty, "\(system.mutatingCommands)")
+                // Stopped, registered by this build: started; and registered again when launchd
+                // refuses that start.
+                system.stopped = [label]
+                try expectEqual(try make(false).recoverHelper(), .started)
+                try expectEqual(system.mutatingCommands, [["/bin/launchctl", "kickstart", service]])
+                system.stopped = [label]; system.breaksOnStart = [label]
+                let calls = item.registerCalls
+                try expectEqual(try make(false).recoverHelper(), .reregistered)
+                try expectEqual(item.registerCalls, calls + 1)
+                try expectEqual(system.mutatingCommands.count, 2)
+                system.breaksOnStart = []
+
+                // Still running the build from before the update (its process predates the helper on
+                // disk): reported, and registered again, which starts the new one.
+                system.pids[label] = 4242
+                starts.set(4242, Date(timeIntervalSinceNow: -3600))
+                let old = make(false).status()
+                try expect(old.helperRunning && old.helperProblem == .outdated("it started before this LivePaper's helper was installed"), "\(old)")
+                item.onRegister = { registers(); starts.set(4242, Date().addingTimeInterval(5)) }
+                try expectEqual(try make(false).recoverHelper(), .reregistered)
+                try expectEqual(make(false).status().helperProblem, nil)
+
+                // The user's "Repair Helper" (registerHelper) does the same for a job launchd can't start.
+                system.broken = [label]
+                let repair = make(false)
+                try repair.registerHelper()
+                try expect(make(false).status().helperRunning)
+                try expect(repair.transcript.contains { $0.title.hasPrefix("Register the helper login item again") && $0.outcome == .done })
+            }
+        },
+        TestCase(name: "core.install.helper-repair-fallback") {
+            // The LaunchAgent fallback (unbundled builds): started again when it should run but doesn't.
+            try CoreSandbox.with("helper-repair-fallback") { sb in
+                let paths = sb.installPaths()
+                try sb.writeExecutable("#!/bin/sh", to: paths.helperExecutable)
+                let system = FakeSystem()
+                let fallback = "gui/501/\(FakeSystem.fallbackLabel)"
+                let make = {
+                    InstallService(paths: paths, publisher: nil, runner: system.runner, loginItem: FakeLoginItem(available: false),
+                                   preferences: FakePreferences(), uid: 501, helperStartTimeout: 0)
+                }
+                try expectEqual(try make().recoverHelper(), .notNeeded("the helper isn't set up"))
+                try expectEqual(make().status().helperProblem, nil)
+                try expect(system.mutatingCommands.isEmpty, "nothing is set up by itself")
+                try make().registerHelper()
+                try expectEqual(try make().recoverHelper(), .notNeeded("already running"))
+                for (label, change) in [("booted out", { system.loaded = [] }), ("quit", { system.stopped = [FakeSystem.fallbackLabel] })] {
+                    change()
+                    try expectEqual(make().status().helperProblem, label == "quit" ? .stopped : .notLoaded)
+                    let before = system.mutatingCommands.count
+                    try expectEqual(try make().recoverHelper(), .started)
+                    try expectEqual(Array(system.mutatingCommands.dropFirst(before)), [
+                        ["/bin/launchctl", "bootout", fallback], ["/bin/launchctl", "bootstrap", "gui/501", paths.fallbackAgentPlist.path]])
+                    try expect(make().status().helperRunning, label)
+                }
             }
         },
         TestCase(name: "core.install.settings-urls") {

@@ -413,6 +413,19 @@ extension SelfTests {
             try expect(helper.detail.contains("Login Items"), helper.detail)
             st.install.helperLoginItem = .enabled
             try expect(!st.helperNeedsApproval)
+            // launchd can't start the enabled login item (after an update): its own wording, and
+            // the button registers it again.
+            try expectEqual(st.helperActionTitle, "Start Helper")
+            st.install.helperProblem = .cannotStart("spawn failed, last exit code 78: EX_CONFIG")
+            try expect(st.helperCannotStart)
+            try expectEqual(st.helperActionTitle, "Repair Helper")
+            let broken = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .helper })
+            try expectEqual(broken.title, "LivePaper helper can\u{2019}t start")
+            try expect(broken.state == .needed && broken.detail.contains("Repair Helper"), broken.detail)
+            st.install.helperLoginItem = .requiresApproval
+            try expect(!st.helperCannotStart && st.helperNeedsApproval, "approval comes first: only the user can give it")
+            st.install.helperLoginItem = .enabled; st.install.helperRunning = true
+            try expect(!st.helperCannotStart && st.helperActionTitle == "Start Helper")
         },
         TestCase(name: "app.setup.uninstall-report") {
             let home = "/Users/someone"
@@ -452,6 +465,27 @@ extension SelfTests {
                 try awaitMain { answered = await channel.requestLock(timeout: 0.3) }
                 try expect(!answered, "no helper: no answer")
                 try expect(Date().timeIntervalSince(started) < 3, "gives up after the timeout")
+            }
+        },
+        TestCase(name: "app.session-unlock.observer") {
+            // On a private name (nobody else posts it): an unlock of this session (the uid as the
+            // object, or no object) counts; another session's doesn't; nothing after invalidate().
+            try expect(SessionUnlockObserver.isOwnSession(nil, uid: "501") && SessionUnlockObserver.isOwnSession("501", uid: "501"))
+            try expect(!SessionUnlockObserver.isOwnSession("502", uid: "501") && !SessionUnlockObserver.isOwnSession(501, uid: "501"))
+            let name = Notification.Name("com.nachmore.livepaper.selftest.\(UUID().uuidString.prefix(8)).unlocked")
+            try MainActor.assumeIsolated {
+                var calls = 0
+                let observer = SessionUnlockObserver(name: name.rawValue, uid: 501) { calls += 1 }
+                let center = DistributedNotificationCenter.default()
+                center.postNotificationName(name, object: "502", userInfo: nil, deliverImmediately: true)
+                center.postNotificationName(name, object: "501", userInfo: nil, deliverImmediately: true)
+                try awaitMain(until: { calls == 1 })
+                pumpMain(0.3)
+                try expectEqual(calls, 1)
+                observer.invalidate()
+                center.postNotificationName(name, object: "501", userInfo: nil, deliverImmediately: true)
+                pumpMain(0.3)
+                try expectEqual(calls, 1)
             }
         },
         TestCase(name: "app.setup.uninstall-plan") {
@@ -1149,6 +1183,102 @@ extension SelfTests {
                 try expectEqual(install.installCount, 0)
             }
         },
+        TestCase(name: "app.model.saver-update-after-unlock") {
+            // Locked at launch: the update waits for the unlock, runs once then, and stops listening.
+            let outdated = InstallStatus(saverInstalled: true, saverUpToDate: false)
+            let unlock = UnlockSource()
+            try withInstallModel("update-after-unlock", status: outdated, locked: true,
+                                 configure: { env in env.observeUnlock = { unlock.observe($0) } }) { model, install, lock in
+                try expect(model.isSaverUpdateWaitingForUnlock && unlock.isObserving, "waits for the unlock")
+                try expectEqual(install.updateCalls, 0)
+                try expectEqual(unlock.observeCount, 1)
+                // An unlock that finds the Mac locked again (a quick re-lock) waits for the next one.
+                unlock.fire()
+                try awaitMain(until: { unlock.observeCount == 2 && model.isSaverUpdateWaitingForUnlock })
+                try expectEqual(install.updateCalls, 0)
+                lock.isLocked = false
+                unlock.fire()
+                try awaitMain(until: { install.installCount == 1 && !model.isInstallBusy })
+                try expect(!model.isSaverUpdateWaitingForUnlock && !unlock.isObserving, "stopped listening")
+                try expect(model.installStatus.saverUpToDate)
+                unlock.fire()   // nobody listens any more
+                pumpMain(0.2)
+                try expectEqual(install.updateCalls, 1)
+                try expectEqual(unlock.observeCount, 2)
+            }
+            // Nothing to update: nothing to wait for.
+            try withInstallModel("update-locked-none", status: InstallStatus(saverInstalled: true, saverUpToDate: true), locked: true,
+                                 configure: { env in env.observeUnlock = { unlock.observe($0) } }) { model, _, _ in
+                try expect(!model.isSaverUpdateWaitingForUnlock)
+            }
+            // Uninstalling stops the wait (the update would put back what it removes).
+            let unlock2 = UnlockSource()
+            try withInstallModel("update-locked-uninstall", status: outdated, locked: true,
+                                 configure: { env in env.observeUnlock = { unlock2.observe($0) } }) { model, install, lock in
+                try expect(unlock2.isObserving)
+                try awaitMain { _ = await model.uninstall(keepScenes: true) }
+                try expect(!unlock2.isObserving && !model.isSaverUpdateWaitingForUnlock)
+                lock.isLocked = false
+                unlock2.fire()
+                pumpMain(0.2)
+                try expectEqual(install.updateCalls, 0)
+            }
+        },
+        TestCase(name: "app.model.helper-repair") {
+            // After an update launchd can't start the helper although its login item is enabled: the
+            // app registers it again by itself — once per launch, quietly when that works.
+            let broken = InstallStatus(helperLoginItem: .enabled, helperProblem: .cannotStart("spawn failed, last exit code 78: EX_CONFIG"))
+            try withInstallModel("helper-repair", status: broken, locked: false) { model, install, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                try expectEqual(install.recoverCalls, 1)
+                try expect(model.installStatus.helperRunning && model.installStatus.helperProblem == nil, "\(model.installStatus)")
+                try expect(model.banners.banners.isEmpty, "a repair that worked is quiet")
+                try expect(model.helperRepairAttempted && !model.isInstallBusy)
+                // It breaks again later: no second automatic attempt; "Repair Helper" is the user's.
+                install.simulateHelperCannotStart()
+                try awaitMain { await model.refreshInstallStatus() }
+                try awaitMain { await model.awaitHelperRepair() }
+                try expectEqual(install.recoverCalls, 1)
+                try expect(model.setupState.helperCannotStart)
+                try awaitMain { await model.registerHelper() }
+                try expectEqual(install.registerCalls, 1)
+                try expect(model.installStatus.helperRunning)
+                try expectEqual(install.recoverCalls, 1)
+            }
+            // macOS asks for approval after the new registration: the banner says where.
+            let opened = OpenCount()
+            try withInstallModel("helper-repair-approval", status: broken, locked: false,
+                                 prepare: { $0.recoveryBehaviour = .needsApproval },
+                                 configure: { env in env.openLoginItemsSettings = { opened.count += 1 } }) { model, _, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                try expect(model.setupState.helperNeedsApproval)
+                let banner = try unwrap(model.banners.banners.last)
+                try expect(banner.style == .warning && banner.title.contains("Allow"), banner.title)
+                try expectEqual(banner.actions.map(\.title), ["Open Login Items"])
+                banner.actions[0].perform()
+                try expectEqual(opened.count, 1)
+            }
+            // A repair that fails says so, and Try Again is the user's attempt.
+            try withInstallModel("helper-repair-fails", status: broken, locked: false,
+                                 prepare: { $0.recoveryBehaviour = .fails("spawn failed") }) { model, install, _ in
+                try awaitMain { await model.awaitHelperRepair() }
+                let banner = try unwrap(model.banners.banners.last)
+                try expect(banner.style == .error && banner.message?.contains("spawn failed") == true, banner.message ?? "")
+                try expectEqual(banner.actions.map(\.title), ["Try Again"])
+                banner.actions[0].perform()
+                try awaitMain(until: { install.registerCalls == 1 && !model.isInstallBusy })
+                try expect(model.installStatus.helperRunning)
+                try expectEqual(install.recoverCalls, 1)
+            }
+            // Nothing set up, or waiting for approval: nothing to repair, nothing tried.
+            for status in [InstallStatus(), InstallStatus(helperLoginItem: .requiresApproval)] {
+                try withInstallModel("helper-repair-none", status: status, locked: false) { model, install, _ in
+                    try awaitMain { await model.awaitHelperRepair() }
+                    try expectEqual(install.recoverCalls, 0)
+                    try expect(!model.helperRepairAttempted)
+                }
+            }
+        },
         TestCase(name: "app.model.saver-update-before-uninstall") {
             // Uninstall (and setup) wait for a launch-time update that is still running: it would
             // otherwise put back what uninstall removes.
@@ -1199,6 +1329,7 @@ extension SelfTests {
                     try expectEqual(base.installCount, 0)
                     try expect(!model.installStatus.saverUpToDate && model.installStatus.saverUpdateAvailable, "still to do")
                     try expect(!model.isInstallBusy)
+                    try expect(model.isSaverUpdateWaitingForUnlock, "tries again after the unlock")
                     // Unlocked again, the next update goes ahead.
                     lock.isLocked = false
                     gated.release()
@@ -1717,17 +1848,22 @@ extension SelfTests {
     }
 
     /// A started AppModel whose install service starts from `status`, with a controllable lock.
+    /// `prepare` sets the service's test hooks and `configure` the environment before the model starts.
     static func withInstallModel(_ name: String, status: InstallStatus, locked: Bool,
+                                 prepare: (MockInstallService) -> Void = { _ in },
+                                 configure: @MainActor (inout AppEnvironment) -> Void = { _ in },
                                  _ body: @MainActor (AppModel, MockInstallService, LockFlag) throws -> Void) throws {
         try withScratchPaths(name) { root in
             let mocks = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
             let install = MockInstallService(status: status)
+            prepare(install)
             let services = LivePaperServices(library: mocks.library, publish: mocks.publish, ai: mocks.ai, install: install,
                                              render: mocks.render, checker: mocks.checker, compiler: mocks.compiler)
             let lock = LockFlag(locked)
             try MainActor.assumeIsolated {
                 var env = testEnvironment(root: root, saved: SavedStates())
                 env.isSessionLocked = { lock.isLocked }
+                configure(&env)
                 let model = AppModel(services: services, environment: env)
                 try awaitMain { await model.start() }
                 try body(model, install, lock)
@@ -1767,6 +1903,7 @@ extension SelfTests {
         }
         func selectSaver() throws -> Bool { try base.selectSaver() }
         func registerHelper() throws { try base.registerHelper() }
+        func recoverHelper() throws -> HelperRecoveryOutcome { try base.recoverHelper() }
         func unregisterHelper() throws { try base.unregisterHelper() }
         func setLockKeysShowScene(_ on: Bool) throws { try base.setLockKeysShowScene(on) }
         func openScreenSaverSettings() { base.openScreenSaverSettings() }
@@ -1775,6 +1912,22 @@ extension SelfTests {
             return base.performUninstall(removeLibrary: removeLibrary)
         }
     }
+
+    /// Plays loginwindow's com.apple.screenIsUnlocked for AppEnvironment.observeUnlock.
+    final class UnlockSource: @unchecked Sendable {
+        private var handler: (@MainActor () -> Void)?
+        private(set) var observeCount = 0
+        var isObserving: Bool { handler != nil }
+        func observe(_ handler: @escaping @MainActor () -> Void) -> (@MainActor () -> Void) {
+            observeCount += 1
+            self.handler = handler
+            return { [weak self] in self?.handler = nil }
+        }
+        @MainActor func fire() { handler?() }
+    }
+
+    /// Counts calls of an environment action.
+    final class OpenCount: @unchecked Sendable { var count = 0 }
 
     /// In-memory CFPreferences stand-in for InstallService (never touches the real domains).
     final class ScratchPreferences: PreferencesAccessing, @unchecked Sendable {

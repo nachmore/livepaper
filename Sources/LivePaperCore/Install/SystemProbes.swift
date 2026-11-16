@@ -74,6 +74,25 @@ enum SystemProbes {
     /// Parses `launchctl print gui/<uid>/<label>`: loaded and currently running.
     static func helperRunning(launchctlPrint result: CommandResult) -> Bool {
         guard result.succeeded else { return false }
-        return result.stdout.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "state = running" }
+        return LaunchdJob.parse(result.stdout).isRunning
+    }
+
+    /// When process `pid` started (sysctl KERN_PROC_PID; read-only), nil if it doesn't exist.
+    @Sendable static func processStartTime(pid: Int32) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
+        guard pid > 0, sysctl(&mib, u_int(mib.count), &info, &size, nil, 0) == 0, size > 0, info.kp_proc.p_pid == pid else { return nil }
+        let start = info.kp_proc.p_un.__p_starttime
+        guard start.tv_sec > 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(start.tv_sec) + TimeInterval(start.tv_usec) / 1_000_000)
+    }
+
+    /// When the file at `url` last changed status (st_ctime): copying or unpacking an app sets it to
+    /// when its helper was put in place, and nothing can set it back. nil if it doesn't exist.
+    static func statusChangeTime(_ url: URL) -> Date? {
+        var st = stat()
+        guard stat(url.path, &st) == 0 else { return nil }
+        return Date(timeIntervalSince1970: TimeInterval(st.st_ctimespec.tv_sec) + TimeInterval(st.st_ctimespec.tv_nsec) / 1_000_000_000)
     }
 }

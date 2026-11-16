@@ -44,9 +44,16 @@ public struct SMAppServiceAgent: LoginItemRegistering {
         return Self.map(service.status)
     }
 
+    /// Waits (at most `unregisterTimeout`) until the job is gone: SMAppService.h says it is safe to
+    /// register again once unregister's completion handler ran, while the synchronous call returns
+    /// before a running helper has been reaped.
     public func unregister() throws {
-        try SMAppService.agent(plistName: plistName).unregister()
+        let done = UnregisterCompletion()
+        SMAppService.agent(plistName: plistName).unregister { error in done.finish(error) }
+        if let error = done.wait(timeout: Self.unregisterTimeout) { throw error }
     }
+
+    public static let unregisterTimeout: TimeInterval = 10
 
     static func map(_ status: SMAppService.Status) -> LoginItemStatus {
         switch status {
@@ -56,6 +63,26 @@ public struct SMAppServiceAgent: LoginItemRegistering {
         case .notRegistered: return .notRegistered
         @unknown default: return .notRegistered
         }
+    }
+}
+
+/// The result of SMAppService's asynchronous unregister (its handler runs on a libdispatch queue).
+private final class UnregisterCompletion: @unchecked Sendable {
+    private let lock = NSLock()
+    private let done = DispatchSemaphore(value: 0)
+    private var error: Error?
+
+    func finish(_ error: Error?) {
+        lock.lock(); self.error = error; lock.unlock()
+        done.signal()
+    }
+
+    /// The error unregister reported; nil once it succeeded — or when it didn't answer in time, in
+    /// which case registering again reports what is left (e.g. "already registered").
+    func wait(timeout: TimeInterval) -> Error? {
+        guard done.wait(timeout: .now() + timeout) == .success else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return error
     }
 }
 
