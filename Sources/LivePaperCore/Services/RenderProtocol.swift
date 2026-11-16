@@ -2,6 +2,42 @@
 // One request per connection: client writes one JSON line, server replies with one JSON line.
 import Foundation
 
+/// A slice of a virtual canvas that spans several displays (runtime span keys, SCENE_API.md §16): the
+/// page is `width`×`height` (the viewport) and shows the part at (`x`, `y`) of a `canvasW`×`canvasH`
+/// canvas. The clock box (the main display's viewport) defaults to the whole canvas. CSS px.
+public struct RenderSpan: Codable, Sendable, Equatable {
+    public var canvasW: Double
+    public var canvasH: Double
+    public var x: Double
+    public var y: Double
+    public var clockX: Double?
+    public var clockY: Double?
+    public var clockW: Double?
+    public var clockH: Double?
+
+    public init(canvasW: Double, canvasH: Double, x: Double, y: Double,
+                clockX: Double? = nil, clockY: Double? = nil, clockW: Double? = nil, clockH: Double? = nil) {
+        self.canvasW = canvasW; self.canvasH = canvasH; self.x = x; self.y = y
+        self.clockX = clockX; self.clockY = clockY; self.clockW = clockW; self.clockH = clockH
+    }
+
+    /// The runtime configuration keys (runtime.js TYPES) that put a page in span mode.
+    public var configKeys: [String: Double] {
+        var keys: [String: Double] = ["spanW": canvasW, "spanH": canvasH, "spanX": x, "spanY": y]
+        if let clockX { keys["spanClockX"] = clockX }
+        if let clockY { keys["spanClockY"] = clockY }
+        if let clockW { keys["spanClockW"] = clockW }
+        if let clockH { keys["spanClockH"] = clockH }
+        return keys
+    }
+
+    /// `config` with the span keys merged in (nothing changes without a span).
+    public static func config(_ config: [String: Any], span: RenderSpan?) -> [String: Any] {
+        guard let span else { return config }
+        return config.merging(span.configKeys.mapValues { $0 as Any }) { _, new in new }
+    }
+}
+
 public struct RenderRequest: Codable, Sendable {
     public enum Op: String, Codable, Sendable { case still, bench, live, thumbnail, motion, ping, shutdown }
     public var op: Op
@@ -27,15 +63,17 @@ public struct RenderRequest: Codable, Sendable {
     public var times: [Double]?
     public var gaps: [Double]?
     public var grid: [Int]?
+    /// still/bench: render the page as a slice of a spanning canvas (`width`×`height` is the viewport).
+    public var span: RenderSpan?
 
     public init(op: Op, html: String? = nil, scene: String? = nil, width: Double? = nil, height: Double? = nil,
                 dpr: Double? = nil, t: Double? = nil, out: String? = nil, frames: Int? = nil, clock: Bool? = nil,
                 fps: Double? = nil, scale: Double? = nil, seconds: Double? = nil, warmup: Double? = nil, timeout: Double? = nil,
-                times: [Double]? = nil, gaps: [Double]? = nil, grid: [Int]? = nil) {
+                times: [Double]? = nil, gaps: [Double]? = nil, grid: [Int]? = nil, span: RenderSpan? = nil) {
         self.op = op; self.html = html; self.scene = scene; self.width = width; self.height = height; self.dpr = dpr
         self.t = t; self.out = out; self.frames = frames; self.clock = clock; self.fps = fps; self.scale = scale
         self.seconds = seconds; self.warmup = warmup; self.timeout = timeout
-        self.times = times; self.gaps = gaps; self.grid = grid
+        self.times = times; self.gaps = gaps; self.grid = grid; self.span = span
     }
 }
 
@@ -57,6 +95,11 @@ public struct RenderResponse: Codable, Sendable {
     public var clockLuma: Double?
     /// motion: per-tile change maps (MotionAnalysis.swift).
     public var motion: MotionMeasurement?
+    /// still/bench: the page rendered a span slice (nil from servers that predate span: they ignore
+    /// `RenderRequest.span` and render the whole scene at the slice's size).
+    public var span: Bool?
+    /// still/bench: the scene defines update() (state that a span check's stills can't compare).
+    public var hasUpdate: Bool?
 
     public init(ok: Bool, ready: Bool = false, errors: [String] = [], note: String? = nil, out: String? = nil,
                 benchMs: Double? = nil, fps: Double? = nil, cpuPct: Double? = nil, cpuMW: Double? = nil,
@@ -67,7 +110,7 @@ public struct RenderResponse: Codable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case ok, ready, errors, note, out, fps, seconds, motion
+        case ok, ready, errors, note, out, fps, seconds, motion, span, hasUpdate
         case benchMs = "bench_ms", cpuPct = "cpu_pct", cpuMW = "cpu_mW", meanLuma = "mean_luma", clockLuma = "clock_luma"
     }
 }

@@ -32,6 +32,40 @@ time-continuity fix, which adds no real work (one smoothstep, and sometimes a sk
 on a busy Mac afterwards, interleaved `livepaper live` runs read the same for both versions (121–133
 mW before, 120–138 mW after), so the idle figure stands.
 
+### Spanning displays (November 2026)
+
+All five built-ins declare `"span": true` in `scene.json`, so "Span across displays" stretches them
+across every display (SCENE_API.md §16). Each is a pure function of `lp.t`, its own seeds and the
+canvas size (no `update()`, no `Math.random`); what made them depend on the display — `lp.quality` and
+`lp.scale` (the governor is off while spanning), `lp.clockRect` (the same on every display) and
+absolute `setTransform` calls on the stage (Rain on the River's device-space rain and ripple patterns,
+Abyssal Lanterns' rotations; offset by the runtime) — is neutralised by the runtime, and Liquid
+Glass's offscreen passes cover the whole canvas while its `gl_FragCoord` only dithers.
+
+The criteria a built-in must meet before it opts in, measured with
+`LIVEPAPER_SELFTEST_E2E=1 LIVEPAPER_SPAN_ALL_BUILTINS=1 swift run LivePaperSelfTest runtime.e2e.span`:
+
+1. `runtime.e2e.spanCrops`: every slice of the standard arrangements (A: two 1512×982@2 side by side;
+   B: a 1512×982@2 laptop bottom-aligned left of a 2560×1440@1 display; C: 1920×1080@1 above a
+   centred 1512×982@2) matches its crop of one render of the whole canvas, at t = 12 and 90;
+2. no JavaScript errors;
+3. `runtime.e2e.spanCost`: B's 2560×1440 slice at 2× (a 5K panel) is ready within 3 s, and benches at
+   most 6 ms per frame — or, where that display alone already costs about as much, no more than 15 %
+   over the same display unspanned (spanning must not add real cost).
+
+| Scene | | Crops, mean difference (strict 1× / 2× · mixed densities) | B's 5K slice: ready · spanned · unspanned |
+|---|---|---|---|
+| `abyssal-lanterns` | Spans displays | 0.00 · 0.18–0.19 | 0.63 s · 1.08 ms · — |
+| `ink-and-ember` | Spans displays | 0.00 · 0.08–0.10 | 0.80 s · 1.60 ms · — |
+| `liquid-glass` | Spans displays | 0.00–0.70 (dither) · 0.09–0.10 | 0.45 s · 5.2 ms · 4.7 ms |
+| `rain-on-the-river` | Spans displays | 0.00 · 0.59–0.68 | 0.50 s · 5.6–6.1 ms · 5.6 ms |
+| `ringed-giant` | Spans displays | 0.00 · 0.14–0.19 | 0.76 s · 1.04 ms · — |
+
+Strict comparisons allow a mean of 1.5/255 (and 0.5 % of pixels over 8/255), mixed-density ones 4/255
+after averaging over 8-point cells. Every display still issues the whole canvas's draw calls, so a
+spanning scene costs each display about what it costs on that display alone; the pixels it fills are
+only its own.
+
 ### The motion pass (November 2026)
 
 Users found the first versions beautiful but too still, and `livepaper check` gained a motion

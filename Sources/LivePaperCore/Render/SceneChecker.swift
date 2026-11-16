@@ -109,6 +109,10 @@ public struct CheckResults: Sendable {
     public var live: RenderResponse?
     /// The stills compared with the picture to animate (only when the check had a reference target).
     public var reference: ReferenceMeasurement?
+    /// The scene declares `"span": true` (scene.json): its stills must report no update(), and…
+    public var spanDeclared = false
+    /// …its slices must match the whole canvas (standard checks only).
+    public var span: SpanCheck.Run?
     public init() {}
 }
 
@@ -158,8 +162,23 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             return try finish(CheckReport(passed: false, problems: problems + e.messages), checkDir: checkDir, package: pkg, manifest: manifest)
         }
 
+        var spanWarnings: [String] = []
+        if manifest.span == true {
+            let js = (try? String(contentsOf: pkg.appendingPathComponent("scene.js"), encoding: .utf8)) ?? ""
+            let findings = Self.spanSourceFindings(js)
+            problems += findings.problems
+            spanWarnings = findings.warnings
+        }
+
         let plan = options.quick ? CheckPlan.quick(power: options.power) : CheckPlan.standard(power: options.power)
         var results = try await run(plan, html: html, checkDir: checkDir)
+        results.spanDeclared = manifest.span == true
+        if manifest.span == true, !options.quick, let b = SpanCheck.arrangement(Self.spanArrangement)?.at(dpr: 1) {
+            progress?("span: \(CheckFrame.num(b.canvasW))x\(CheckFrame.num(b.canvasH)) across \(b.views.count) displays at t = " +
+                      "\(CheckFrame.num(Self.spanTime)), as a whole and per display")
+            results.span = try await SpanCheck.run(render: render, html: html, arrangement: b, t: Self.spanTime, clock: false,
+                                                   directory: checkDir, prefix: Self.spanFilePrefix)
+        }
         if let target = options.reference {
             progress?("comparing \(plan.resemblanceFrames.count) stills with the picture to animate")
             let wanted = Set(plan.resemblanceFrames)
@@ -169,6 +188,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         }
         var report = Self.evaluate(results, plan: plan, budgets: budgets, quick: options.quick)
         report.problems = problems + report.problems
+        report.warnings += spanWarnings
         report.passed = report.problems.isEmpty
         return try finish(report, checkDir: checkDir, package: pkg, manifest: manifest)
     }
@@ -394,6 +414,37 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
             }
         }
 
+        // Spanning displays ("span": true in scene.json).
+        var spanSummary: [CheckReport.SpanSlice]?
+        if results.spanDeclared {
+            let stillsHaveUpdate = results.stills.contains { $0.response.hasUpdate == true }
+            if stillsHaveUpdate || results.span?.hasUpdate == true {
+                problems.append("scene.json says \"span\": true, but the scene defines update(lp, dt): its state builds up frame by frame, " +
+                                "and every display renders its own frames, so their slices drift apart. Compute everything from lp.t " +
+                                "(and the seed) in draw(), or remove \"span\" from scene.json.")
+            }
+            if let run = results.span {
+                for e in run.errors where !jsErrors.contains(e) { jsErrors.append(e) }
+                if !run.rendered {
+                    let why = ([run.full] + run.slices.map(\.response)).first { !$0.ok }?.note ?? "no reason given"
+                    problems.append("The span check (\(spanArrangement) at t=\(CheckFrame.num(run.t))) failed to render: \(why). Fix the error, " +
+                                    "or remove \"span\" from scene.json.")
+                } else if !run.serverSupportsSpan {
+                    warnings.append("Spanning displays was not checked: the render server doesn't support it. It is probably an older " +
+                                    "LivePaper: quit and reopen LivePaper, or run `livepaper server stop`, then check again.")
+                } else if !run.mismatched.isEmpty {
+                    problems.append("scene.json says \"span\": true, but the scene doesn't span displays: " +
+                                    run.mismatched.map(run.describe).joined(separator: "; ") + ". Lay everything out from lp.w/lp.h " +
+                                    "(the whole canvas), never innerWidth/innerHeight, canvas.width/height or gl.drawingBufferWidth; use " +
+                                    "lp.pw/lp.ph for device pixels and add lp.fragOffset to gl_FragCoord; don't read the stage back " +
+                                    "(getImageData). Compare .check/\(spanFilePrefix)-*.png, or remove \"span\" from scene.json.")
+                }
+                spanSummary = run.slices.map { CheckReport.SpanSlice(arrangement: run.arrangement.name, t: run.t, display: $0.view.id,
+                                                                    path: $0.path, meanDiff: $0.diff.map { round2($0.meanAbs) },
+                                                                    passed: run.serverSupportsSpan ? $0.diff?.passed == true : nil) }
+            }
+        }
+
         for key in failureOrder { problems.append(key.dropLast() + " (at \(labelList(failures[key] ?? [])))." ) }
         if neverStarted {
             problems.append("Because of the JavaScript errors above the scene never started, so nothing could be rendered or measured.")
@@ -410,7 +461,35 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                             "before you finish.")
         }
         return CheckReport(passed: problems.isEmpty, problems: problems, warnings: warnings, jsErrors: jsErrors, stills: stills,
-                           benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion, reference: reference)
+                           benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion, reference: reference,
+                           span: spanSummary)
+    }
+
+    private static func round2(_ x: Double) -> Double { (x * 100).rounded() / 100 }
+
+    // MARK: - Spanning displays
+
+    /// The arrangement (SpanCheck.standard) and moment the standard check renders for span scenes:
+    /// a laptop next to a bigger display, bottom-aligned (unequal sizes, an empty corner), all at 1×.
+    public static let spanArrangement = "B"
+    public static let spanTime: Double = 12
+    /// `.check/span-B-t12-full.png`, `…-laptop.png`, `…-external.png`.
+    public static let spanFilePrefix = "span-B-t12"
+
+    /// What scene.js must not do when scene.json says `"span": true` (a static scan; the crop
+    /// comparison catches layout mistakes, but not live randomness).
+    public static func spanSourceFindings(_ js: String) -> (problems: [String], warnings: [String]) {
+        var problems: [String] = [], warnings: [String] = []
+        if js.range(of: #"\bMath\.random\s*\("#, options: .regularExpression) != nil {
+            problems.append("scene.json says \"span\": true, but scene.js calls Math.random(): every display would draw different " +
+                            "random values. Use LivePaper.util.mulberry32(seed) or LivePaper.util.hash2 with fixed seeds, or remove \"span\".")
+        }
+        if js.contains("gl_FragCoord") && !js.contains("fragOffset") {
+            warnings.append("scene.json says \"span\": true and a shader reads gl_FragCoord, but scene.js never uses lp.fragOffset: " +
+                            "gl_FragCoord is relative to each display's slice. Add lp.fragOffset (a uniform) wherever the position matters " +
+                            "(dithering alone is fine).")
+        }
+        return (problems, warnings)
     }
 
     // MARK: - Manifest

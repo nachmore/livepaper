@@ -192,11 +192,23 @@ public struct CheckReport: Codable, Sendable, Equatable {
     public var motion: [MotionSummary]?
     /// How much the stills look like the picture to animate (ReferenceResemblance); nil for other scenes.
     public var reference: ReferenceCheckSummary?
+    /// One display's slice of the span check (scenes with `"span": true`): how far it is from its crop
+    /// of the whole canvas (mean, 0–255) and whether that passes (nil when the server couldn't tell).
+    public struct SpanSlice: Codable, Sendable, Equatable {
+        public var arrangement: String; public var t: Double; public var display: String; public var path: String
+        public var meanDiff: Double?; public var passed: Bool?
+        public init(arrangement: String, t: Double, display: String, path: String, meanDiff: Double?, passed: Bool?) {
+            self.arrangement = arrangement; self.t = t; self.display = display; self.path = path; self.meanDiff = meanDiff; self.passed = passed
+        }
+    }
+    /// The span check's slices; nil when the scene doesn't declare span or the check was quick.
+    public var span: [SpanSlice]?
     public init(passed: Bool, problems: [String] = [], warnings: [String] = [], jsErrors: [String] = [], stills: [Still] = [],
                 benchMs: [String: Double] = [:], energyMw: Double? = nil, checkedAt: Date = Date(), motion: [MotionSummary]? = nil,
-                reference: ReferenceCheckSummary? = nil) {
+                reference: ReferenceCheckSummary? = nil, span: [SpanSlice]? = nil) {
         self.passed = passed; self.problems = problems; self.warnings = warnings; self.jsErrors = jsErrors; self.stills = stills
         self.benchMs = benchMs; self.energyMw = energyMw; self.checkedAt = checkedAt; self.motion = motion; self.reference = reference
+        self.span = span
     }
 }
 
