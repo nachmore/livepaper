@@ -242,15 +242,18 @@ extension PlaylistDraft {
             : "The playlist has \(sceneCount) scenes for \(displayCount) displays, so some displays show the same scene."
     }
 
-    /// "3 of 5 scenes can span; the others show on every display." ("" without scenes.)
+    /// "3 of 5 scenes can span; the others aren't made for it yet…" ("" without scenes). A scene
+    /// spans only when it's made for it (`SceneManifest.spans`): one that draws every moment the same
+    /// way on each display. Older AI-made scenes aren't; Modify with AI can make one span.
     static func spanSupportSummary(spanning: Int, total: Int) -> String {
         guard total > 0 else { return "" }
         if spanning >= total { return total == 1 ? "This scene can span." : "All \(total) scenes can span." }
         if spanning <= 0 {
-            return total == 1 ? "This scene can\u{2019}t span, so it shows on every display."
-                              : "None of these scenes can span, so they show on every display."
+            return total == 1
+                ? "This scene isn\u{2019}t made for spanning yet, so each display shows the whole scene. Modify with AI can add it."
+                : "None of these scenes are made for spanning yet, so each display shows the whole scene. Modify with AI can add it."
         }
-        return "\(spanning) of \(total) scenes can span; the others show on every display."
+        return "\(spanning) of \(total) scenes can span. The others aren\u{2019}t made for it yet, so each display shows the whole scene."
     }
 }
 
@@ -302,7 +305,7 @@ extension LPDisplayMode {
         case .choose: return "Pick a scene for each display. Displays without a choice play the playlist."
         case .span:
             return "One scene stretches across all displays, as they\u{2019}re arranged in System Settings \u{203A} Displays. "
-                + "Scenes that can\u{2019}t span show on every display."
+                + "A scene that isn\u{2019}t made for spanning shows whole on each display."
         }
     }
 }
