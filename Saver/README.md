@@ -215,7 +215,7 @@ the second failure; the fourth failure shows the fallback instead of crash-loopi
 next cycle tries again).
 
 **Options sheet.** A small programmatic sheet: playlist summary (scenes, mode, cycle, clock,
-performance, publish generation) plus "Open LivePaper…" and "Done". Settings live in the app; the
+performance, publish generation; the display mode and battery behaviour when they aren't the defaults) plus "Open LivePaper…" and "Done". Settings live in the app; the
 sandboxed saver can't launch apps, so the button posts `LPNotification.openApp` (no userInfo —
 sandboxed processes may not attach any) for the helper to act on. `isReleasedWhenClosed = false`
 because the host keeps and re-presents the window.
