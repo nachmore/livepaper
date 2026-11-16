@@ -99,6 +99,8 @@ Sources/LivePaperCore/            models, paths, the playlist contract, library,
                                   login item) and IOKit (power sources, assertions) — never AppKit or
                                   WebKit: the CLI links it.
   Services/ServiceProtocols.swift the service API the app and CLI program against (+ LivePaperServices.live())
+  Collections/                    collections of scenes: the model and collections.json (CollectionStore), the
+                                  ordering rules (CollectionOrder), editing, export and import (CollectionService, §4.6)
   Power/                          display-sleep timers, screen-saver idle time, assertions and the
                                   "before screens off" decision, schedule and status text (§7)
   Playlist/PlaylistModel.swift    Codable playlist + notification names, compiled into BOTH Core and the
@@ -149,11 +151,15 @@ directories and inject fakes for commands, preferences and login items.
     .kiro/agents/                 the restricted agent Kiro sessions run as
   Workspaces/.render-relay/<id>/  scenes compiled by the session runner for relayed render requests
   state.json                      app → helper shared state (§4.4)
+  collections.json                collections of scenes (§4.6); collections.lock: flock for its read-modify-writes
+                                  (app and CLI); collections.unreadable-<time>.json: a file that wasn't JSON, set
+                                  aside by the next change instead of being overwritten
   playlist-settings.json          PlaylistSettings: what to publish (mode, cycle, clock, profile, scenes,
                                   displays: mode / per-display scenes / battery, §4.3), plus `displayNames`
                                   (display id → last seen name, for assigned displays; app UI only, never
-                                  published). Decoded field by field: a missing or malformed field gets its
-                                  default, the rest is kept (old files, newer versions)
+                                  published) and `collectionID` (the collection the playlist follows, §4.6;
+                                  absent when none). Decoded field by field: a missing or malformed field gets
+                                  its default, the rest is kept (old files, newer versions)
   ai-settings.json                AISettings: Settings › AI (shared by the app, the CLI and sessions)
   publish.lock                    flock: one publish / saver install, update or removal at a time (app and CLI
                                   may race)
@@ -192,8 +198,8 @@ $TMPDIR/LivePaperPreviews/                        compiled preview HTML (the app
                                   `<id>-<updated>-<hash of location, id, sources>.html`, `scene-…` when the
                                   id isn't a valid scene id, e.g. an agent-written candidate's)
 ```
-Uninstall keeping the scenes keeps `Library/`, `state.json`, `playlist-settings.json` and
-`ai-settings.json`; everything else in the support directory goes (backups only when no step failed).
+Uninstall keeping the scenes keeps `Library/`, `collections.json`, `state.json`, `playlist-settings.json`
+and `ai-settings.json`; everything else in the support directory goes (backups only when no step failed).
 Other overrides: `LIVEPAPER_RESOURCES` (app resources), `LIVEPAPER_SOURCE_ROOT`
 (`swift run` from the source tree), `LIVEPAPER_CLI` (the CLI the workspace shim execs).
 The saver keeps its own session bookkeeping in ScreenSaverDefaults (inside its sandbox).
@@ -305,6 +311,82 @@ The app writes it and posts `com.nachmore.livepaper.stateChanged` (distributed);
 | `hotkeyRecording` | app → helper (suspend the shortcut while re-recording it) | `active`: Bool |
 | `openApp` | saver → helper (open the app; the sandboxed saver can't) | none (sandboxed posters may not attach any) |
 | `published` | app/CLI → saver previews (reload) | — |
+
+### 4.6 Collections (`Sources/LivePaperCore/Collections/`)
+A collection is a named, ordered set of scenes — user and built-in; a scene can be in any number of
+collections, at most once in each. `collections.json` (CollectionStore):
+```json
+{ "schema": 1,
+  "collections": [ { "id": "3129b068-b7a3-4eae-9627-a6021cb4e6bc", "name": "Night Skies",
+                     "scenes": ["ember", "aurora-lake", "glow"],       // scene ids, in order
+                     "created": "2026-11-16T12:45:00Z", "updated": "…" } ] }
+```
+* **Identity:** `id` is a lowercase UUID for collections LivePaper creates (1–64 letters, digits, dashes
+  are accepted from other writers). It never changes — renaming keeps it — and travels with an export,
+  so importing the same collection again finds it. **Names** are unique in a library ignoring letter case
+  and accents (`SceneCollection.nameKey`), so the CLI can name collections; LivePaper lists them by name.
+* **Scenes are referenced, never owned:** renaming or deleting a collection never touches a scene.
+  Deleting a scene in LivePaper removes it from every collection (`CollectionServicing.removeSceneEverywhere`,
+  one write, after the scene is gone; the delete sheet and banner name the collections). An id whose scene
+  is gone some other way (moved to the Trash in Finder) stays in the file, is skipped wherever the
+  collection is shown, played, previewed or exported, and is back if the scene is — the playlist's
+  `sceneIDs` work the same way.
+* **Writing:** every change is a read-modify-write under the in-process lock and `collections.lock`
+  (flock), written atomically; an edit that changes nothing doesn't write. Reads take no lock.
+* **Tolerant decoding:** a collection that can't be read is dropped; a field that can't be read gets its
+  default (blank name → "Untitled Collection"); scene ids that aren't valid ids are dropped, repeated
+  ones kept once; a collection without a usable id gets `c-<slug of its name>` (the same on every read),
+  repeated ids get `-2`, …; a bare array of collections is read too; unknown keys and a newer `schema` are
+  read past (and not written back). A file that isn't JSON at all reads as no collections and is moved
+  aside as `collections.unreadable-<time>.json` by the next change (never silently overwritten).
+* **Editing** (`CollectionOrder`, shared by the service, the app and the CLI): adding skips scenes the
+  collection has and puts the others at a placement (`start`, `end`, a 0-based index, `before`/`after` a
+  scene); removing reports what it removed; moving keeps the moved scenes' relative order and places them
+  against the others. Grid drag and drop (`dropPlacement`): scenes dropped onto a card take its place —
+  after it when all of them come from before it, before it otherwise — so a card dropped on its
+  neighbour swaps with it. Adding needs scenes the library has (`CollectionError.unknownScenes`).
+* **The screen saver following a collection** (a live link, not a copy): `PlaylistSettings.collectionID`.
+  `PlaylistSettings.following(_:)` gives the playlist as it plays — the collection's scenes, in its order;
+  an empty collection plays every scene, like an empty selection — and PublishService resolves it at every
+  publish. `sceneIDs` keeps the collection's scenes as they were when the settings were last saved: what an
+  older LivePaper (which ignores `collectionID`) plays, and what plays when the collection is gone. Whoever
+  changes the followed collection publishes it again when a saver is installed (the app quietly; the CLI's
+  `collection add|remove|move|import` print "updated the screen saver"); the app doesn't publish for
+  changes it only reads from disk. Deleting the followed collection turns the playlist into a list of its
+  scenes (`collectionID` cleared, nothing republished: the saver already plays them). "Use as Screen Saver"
+  on a single scene, "Play: All scenes / Scenes you choose", `publish --scenes` and `--collection none`
+  stop following. While following, Next Scene is off (the order is the collection's) and "Add to Playlist"
+  adds to the collection.
+* **Export** (`CollectionService.export`): one file, `<name>.lpcollection` (`CollectionArchive.suggestedFileName`:
+  `/`, `:` and `\` become `-`) — a zip (`ditto -c -k --sequesterRsrc`, without `--keepParent`, built next to
+  the destination and renamed into place) whose root holds:
+  ```
+  collection.json   {"schema":1, "format":"livepaper-collection", "id", "name", "created", "updated", "exported",
+                     "scenes":[{"id":"ember","name":"Ember","builtin":false,"package":"scenes/ember.lpscene"},
+                               {"id":"aurora-lake","name":"Aurora Lake","builtin":true}]}   // the collection's order
+  scenes/<id>.lpscene/  every user scene, exactly as `LibraryServicing.exportPackage` writes it
+  ```
+  Built-in scenes are referenced by id, never copied (every LivePaper has them); scenes no longer in the
+  library are left out and reported.
+* **Import** (`CollectionService.importCollection(at:mode:)`, one at a time per process): a `.lpcollection`
+  file is unpacked with `ditto -x -k` into a temporary folder (ditto drops `..` and leading `/` from entry
+  names and writes link entries as plain files — docs/RESEARCH.md §8 — so nothing lands outside it); an
+  unpacked one (a folder) is read in place. The root is the folder with collection.json, or its only
+  subfolder that has one. collection.json: at most 4 MB and 5,000 scenes, entries decoded one by one (an
+  unreadable or repeated entry is dropped). Each entry, in order: a **built-in** is used when this
+  LivePaper has it as a built-in (not when a scene of yours has its id, not when this version lacks it:
+  both reported); a **user scene** must be `scenes/<plain name>.lpscene`, a real folder in the file (else
+  reported); `LibraryServicing.existingScene(matching:)` — the scene itself, or one with the same contents
+  (ScenePackageComparison) — is used, otherwise the package is imported (`openPackage`, under the
+  library's lock; another version of one of your scenes is imported next to it, never over it), so ids
+  that clash with unrelated scenes get `-2`, … and nothing is imported twice. Every scene failing is an
+  error (no empty collection); a file with no scenes makes an empty one. Then the collection:
+  * **new to this library** (no collection with its id): created with the file's id and name (made unique:
+    "Night Skies 2"), `created` from the file;
+  * **already here** (`.automatic`): nothing is changed or imported — the result lists the file's scenes
+    the collection doesn't have (`lacking`), so a re-import never puts back what was removed; `.merge`
+    adds those at the end (importing what isn't in the library yet), `.copy` makes another collection with
+    a new id. The app's banner offers "Add N Scenes" / "Import as a Copy", the CLI `--merge` / `--copy`.
 
 ## 5. Runtime v1 (JS) — `Runtime/runtime.js`, typed in `Runtime/livepaper.d.ts`
 
@@ -652,10 +734,41 @@ livepaper ai harnesses [--json]
 livepaper server status|start|stop
 livepaper new <id> [--from <scene-id>] | list
 livepaper doctor [--no-ai] [--json] | select | uninstall [--yes] [--keep-scenes] [--dry-run]
-livepaper publish [--scenes <id,…>|all] [--mode shuffle|sequence|single] [--cycle <min>] [--performance …]
-                  [--clock|--no-clock] [--displays same|different|choose|span]
+livepaper publish [--scenes <id,…>|all | --collection <collection>|none] [--mode shuffle|sequence|single] [--cycle <min>]
+                  [--performance …] [--clock|--no-clock] [--displays same|different|choose|span]
                   [--display <display-uuid>=<scene-id>|playlist]… [--battery-displays live|still|off] [--json]
+livepaper import <video | .lpscene | .zip | .lpcollection> [--name <name>] [--battery] [--json]
+livepaper collection list [--json]
+livepaper collection show <collection> [--json]
+livepaper collection new <name> [<scene-id>…] [--json]
+livepaper collection rename <collection> <new-name> [--json]
+livepaper collection delete <collection> [--json]
+livepaper collection add <collection> <scene-id>… [--at <position>] [--json]
+livepaper collection remove <collection> <scene-id>… [--json]
+livepaper collection move <collection> <scene-id>… (--to <position>|first|last | --before <scene-id> | --after <scene-id>) [--json]
+livepaper collection export <collection> [--out <file.lpcollection>|<folder>] [--force] [--json]
+livepaper collection import <file.lpcollection> [--merge|--copy] [--json]
 ```
+`collection` (§4.6): `<collection>` is a name (any letter case), an id, or the start of an id (≥ 4
+characters, when only one id starts so); a name several collections share is refused with their ids.
+Positions are 1-based. Scene ids must exist (exit 2, like `publish --scenes`); an unknown collection is
+exit 2, a taken name or a file that isn't a collection exit 1. `add` skips scenes the collection has
+("already in it"), `remove` ones it doesn't. `export` writes `./<name>.lpcollection` by default (a folder
+as `--out` gets that name inside it) and refuses to replace a file without `--force`; it reports the user
+scenes it included, the built-ins it referenced and the scenes it left out. `import` (also `livepaper
+import x.lpcollection`) creates the collection, or — when the library has it — says so and lists what
+the file has that the collection doesn't, unless `--merge` / `--copy`. `delete` never deletes scenes. When
+the screen saver follows the collection, `add|remove|move|import` keep playlist-settings.json's copy of its
+scenes current and publish again if a saver is installed ("updated the screen saver …"; a failed publish
+is exit 1), and `delete` leaves the playlist playing its scenes as a list. `--json` prints the collection
+`{id, name, scenes, count, missing, playing, created, updated}` (with `changed` and `screenSaver`:
+updated / stored / failed for edits; `outcome` created / merged / alreadyPresent, `added`, `lacking`,
+`importedScenes`, `existingScenes`, `missing` for imports). `list` marks the collection the screen saver
+plays (●). Refused in AI sessions (AISessionPolicy).
+`publish --collection <collection>` makes the playlist follow it (a live link, §4.6; "One scene" becomes
+"In order" for several scenes), `--collection none` stops following (its scenes stay, as a list);
+`--scenes` stops following too, and the two don't mix (exit 2). `--json` adds `collection` and
+`collectionName`; the summary says "plays the collection “X” (changes to it update the screen saver)".
 `select` is the installer's own selection (`InstallService.selectSaver`, docs/RESEARCH.md §5.6):
 `SystemDefault`, every explicit Idle slot and the placeholder of every display record, originals
 backed up; nothing is written when every display record already shows the installed saver from a
@@ -934,8 +1047,43 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   Screen Settings…" item (the status is re-read when the user leaves System Settings).
 * **Main window (NavigationSplitView):**
   * *Library* — grid of live thumbnails (hover = live preview), badges (video/web/AI, energy class).
-  * *Scene detail* — full live preview (16:10 and 32:9), Use as Screen Saver / Add to Playlist,
-    Clone, Modify with AI…, Export, Delete, check report and provenance.
+    ⌘-click toggles a card's selection, ⇧-click adds the range from the last card clicked, a plain click
+    opens the card (and ends the selection), Esc or Done ends it (`Logic/LibrarySelection.swift`; cards a
+    search or filter hides leave it). While cards are selected a bar shows the count, "Add to Collection ▾",
+    Select All and Done; a selected card gets an accent border and a checkmark in its badge row. Dragging
+    a card carries every selected card when it is one of them (`SceneDragPayload`, the private type
+    `com.nachmore.livepaper.scene-references`), else just it, with a count badge on the drag image.
+  * *Collections* (§4.6; `Views/Collections/`, `Model/AppModel+Collections.swift`, `Logic/CollectionText.swift`)
+    — a sidebar section: each collection by name with the number of its scenes in the library and a ▶ on
+    the one the screen saver plays; context menu Open / Preview Full Screen / Use as Screen Saver / Export…
+    / Rename… / Delete Collection…; "New Collection…" (also File › New Collection…, ⌥⌘N). Scene cards
+    dropped on a collection are added (dropped back on their own collection: nothing), dropped on "New
+    Collection…" they open the sheet for a collection with them; `.lpcollection` and `.lpscene` files
+    dropped anywhere on the sidebar are imported. The new / rename sheet proposes "New Collection",
+    "New Collection 2", … and says when a name is taken; deleting asks first ("Its 4 scenes stay in your
+    library", and when it plays: "The screen saver keeps playing these scenes"). An empty collection
+    created from the sidebar opens; one created with scenes stays put and offers Show. A collection's
+    screen is the library grid limited to it, in its order: drag a card onto another to move it there (the
+    dragged scenes — the selection — take its place; dropped on the empty space they go to the end;
+    scenes from elsewhere are added there), the card menu adds Remove from “X” and Move to Collection ▸
+    (applied to the selection when the card is selected), and the selection bar Move to ▾ / Remove. The
+    header: the name and count, **Use as Screen Saver** (or "Plays in the screen saver" with Screen Saver
+    Settings… and the line "The screen saver follows “X”: adding, removing or reordering its scenes
+    updates it."), Export…; the toolbar Preview Full Screen (← → step through the collection in its order,
+    `FullScreenPreviewSource.collection`; Space on a card starts at it) and More. Empty: a drop zone saying
+    how to add scenes. Opening a scene pushes its detail onto the collection's own navigation stack
+    (`AppModel.collectionPath`; the Scene menu acts on it); changing screens drops that and the selection.
+    **Add to Collection ▸** in the card menu and in the scene detail view's actions lists every collection
+    with a checkmark when it has the scene(s) ("Night Skies (2 of 3)" when it has some): choosing a
+    checked one takes them out, otherwise adds the missing ones (`CollectionMembership`), then "New
+    Collection…" / "New Collection with N Scenes…". The detail view's About lists the scene's collections.
+    Banners say what changed ("Added 3 scenes to “Night Skies”", "Moved …", with Show), and deleting a
+    scene adds "It was also removed from “Night Skies”."; importing says what came in and what couldn't
+    (`CollectionText.importBanner`), with "Add N Scenes" / "Import as a Copy" for a collection the library
+    already has.
+  * *Scene detail* — full live preview (16:10 and 32:9), Use as Screen Saver / Add to Playlist /
+    Add to Collection ▸, Clone, Modify with AI…, Export, Delete, check report, provenance and the
+    collections it is in.
   * *Create* — **Video** (drop a file; optional "optimise for battery" HEVC transcode) and
     **Describe it** (prompt, agent + model picker, reference images) → live session view.
   * *Reference images* (`Views/Create/ReferenceTrayView.swift` over `Logic/ReferenceTray.swift`;
@@ -988,6 +1136,13 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
     "· 3 reference images (1 animated)".
   * *Screen Saver* — the playlist draft (scenes, order, cycle, clock, multiple displays, profile) →
     Save & Publish; a publish that left scenes out lists them with the reason (and a banner says so).
+    **Play** (`PlaylistSource`, `PlaylistDraft.setSource`): All scenes (new ones join) / Scenes you
+    choose (ordered, removable, "Add Scene") / a collection (§4.6: "The screen saver follows “X”: …" with
+    Edit Collection and its scenes, read-only, in order; "“X” is empty, so the screen saver plays every
+    scene"; a deleted one says so). Choosing scenes starts from what plays now (a copy of a collection's
+    scenes, which no longer follows it). The summary — publish bar, menu bar, sidebar footer — starts with
+    the collection's name ("“Night Skies” · Shuffle · 4 scenes · every 5 minutes"); the menu bar's Preview
+    Full Screen plays what the saver plays.
     **Multiple displays** (`Views/Playlist/DisplaysSection.swift` over `Logic/PlaylistDraft.swift`;
     always shown, between Playback and Performance): the display mode (*Same on every display* /
     *Different on each display* / *Choose per display* / *Span across displays*, §4.3, §6) with a
@@ -1042,7 +1197,8 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   `LibraryWatcher` watches the support directory with one FSEvents stream (`Workspaces/`, `Logs/`
   and `backups/` excluded). Only `Library/<id>.lpscene` entries, their `scene.json`,
   `thumbnail.jpg`, `history.jsonl`, `.check/report.json`, `scene.js` and `assets/` (what the live
-  previews compile), and `playlist-settings.json` count;
+  previews compile), `playlist-settings.json` and `collections.json` count (a collection on screen that
+  was deleted elsewhere goes back to the library);
   a burst becomes one refresh about 0.5 s after the last change (FSEvents latency 0.2 s + a 0.3 s
   debounce, at most 2 s). Becoming active and opening the main window refresh too, as a safety
   net. Refreshes are quiet: no loading state, unchanged data isn't reassigned (selection, scroll
@@ -1131,6 +1287,10 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   shared id alone is no evidence (ids are name slugs: two people's "Aurora Lake copy", "Untitled
   Scene"), so such a package is imported as a copy, as is anything else. The CLI's
   `livepaper import` always imports.
+  `.lpcollection` (`com.nachmore.livepaper.collection`, a zip conforming to `public.data`; §4.6):
+  double-click in Finder, File › Import Collection… (⇧⌘O, several at once) and drops on the sidebar go
+  through `AppModel.importCollection` (`CollectionServicing.importCollection`, `.automatic`). Info.plist also
+  declares the private drag type `com.nachmore.livepaper.scene-references` (never written to disk).
 * **Replacing a scene in the playlist** ("Replace with This Version", accepting an AI modify)
   publishes the playlist again, quietly, when the saver is installed: the saver plays the copies
   compiled at publish time, not the library. (The CLI leaves that to `livepaper publish`.)
@@ -1146,6 +1306,12 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   `playlist-displays-choose-light`, `playlist-displays-span-dark` and `playlist-displays-single-light`
   the Multiple displays section with mock displays (`MockSampleData.displays`: a built-in 1512×982
   display with the menu bar and a 2560×1440 one to its right, made-up ids; mock mode uses them too).
+  Mock mode and the snapshots also have sample collections (`MockSampleData.collections()`: Night Skies,
+  Calm Water and an empty Warm Evenings, fixed ids) through the real CollectionService over the mock
+  library; `collections-select-light` (three cards chosen, the selection bar, the sidebar section),
+  `collection-dark` (a collection the screen saver follows), `collection-empty-light`,
+  `sheet-new-collection-light`, `sheet-delete-collection-dark` and `playlist-collection-light` (Play: a
+  collection) show them.
 
 ## 12. Performance & battery policy
 * Budgets enforced by `livepaper check` (§9), shown in the UI as energy badges.

@@ -619,3 +619,21 @@ begins; §2: display-sleep locks aren't covered by `immediateLockLaunchesScreenS
   * whether `CGEventSourceSecondsSinceLastEventType` works in the LaunchAgent without Input Monitoring
     (Inferred: it reports only times; it was read from a terminal process here);
   * whether the dim really starts at the `UserIsActive` timeout (the 10 s gap is Inferred to be it).
+
+## 8. Unpacking a collection file with `ditto`
+
+A `.lpcollection` file (docs/ARCHITECTURE.md §4.6) is a zip that may come from anyone, so LivePaper
+needs `ditto -x -k <file> <folder>` to keep everything inside `<folder>`. Checked on macOS 26.7 with zips
+written by Python's `zipfile` (Verified):
+
+* An entry named `../../evil.txt` is written as `<folder>/evil.txt`: the `..` components are dropped.
+* An absolute entry name (`/tmp/x/abs.txt`) is written below `<folder>` (`<folder>/tmp/x/abs.txt`).
+* An entry whose external attributes mark it as a symbolic link (`S_IFLNK`, pointing outside) is written
+  as a plain file holding the target path, not as a link; a following entry `lnk/pwned.txt` then fails
+  ("Not a directory") and ditto exits 1. Nothing was written outside `<folder>`.
+* `ditto -c -k --sequesterRsrc <folder> <zip>` without `--keepParent` stores the folder's contents at the
+  archive's root (`collection.json`, `scenes/…`).
+
+LivePaper relies on this and checks again after unpacking: collection.json and every scene folder must
+be a real file / folder (lstat), a scene's package path must be `scenes/<plain name>.lpscene`, and the
+library's import refuses packages that contain a symbolic link.
