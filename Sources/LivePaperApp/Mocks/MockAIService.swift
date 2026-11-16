@@ -15,6 +15,11 @@ final class MockAIService: AIServicing, @unchecked Sendable {
     /// Snapshot/test hook: sessions stop after this many scripted steps and keep "running" until
     /// cancelled, which freezes the UI in its mid-session state.
     var holdAfterSteps: Int?
+    /// Test hook: for every `start`, whether it ran on the main thread (it must not: the real one
+    /// builds the workspace, which can take a second).
+    var startsOnMainThread: [Bool] { lock.lock(); defer { lock.unlock() }; return mainThreadStarts }
+    private var mainThreadStarts: [Bool] = []
+    private let lock = NSLock()
 
     init(library: MockLibraryService, workspaces: URL, pace: Double) {
         self.library = library
@@ -44,6 +49,7 @@ final class MockAIService: AIServicing, @unchecked Sendable {
     }
 
     func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?) throws -> AISessionHandle {
+        lock.lock(); mainThreadStarts.append(Thread.isMainThread); lock.unlock()
         try ReferencePrompts.validate(references)
         let id = "session-" + UUID().uuidString.prefix(8).lowercased()
         let workspace = workspaces.appendingPathComponent(id)

@@ -1282,6 +1282,9 @@ enum ReferenceTests {
             try expectEqual(session.references.map(\.role), [.reference, .animate])
             try expectEqual(session.references.map(\.displayName), ["city.png", "lake.png"])   // what the tiles show
             try expectEqual(session.referenceCounts, ReferenceCounts(reference: 1, animate: 1))
+            // The session view's References box: these tiles, in this order, with this caption.
+            try expectEqual(ReferenceTrayText.sessionCaption(roles: session.references.map(\.role)),
+                            "The scene shows the picture marked Animate; the others are inspiration. Trying again keeps them.")
             // Only the picture to animate keeps its full-size master in memory.
             try expectEqual(session.references[1].master, a.master)
             try expect(session.references[0].master == b.vision && b.master != b.vision, "the reference's master is released")
@@ -1324,6 +1327,12 @@ enum ReferenceTests {
             let plain = try SelfTests.started(model, .create(prompt: "A slow orbit of planets"), harness: harness, model: nil)
             try expectEqual(plain.referenceCounts, nil); try expect(plain.references.isEmpty)
             plain.cancel()
+
+            // Every workspace (create, Try Again, modify) was built off the main thread: the picture
+            // to animate may be decoded and re-encoded there.
+            let ai = try SelfTests.unwrap(fx.services.ai as? MockAIService)
+            try expectEqual(ai.startsOnMainThread, [false, false, false, false])
+            try expect(!model.isStartingSession)
         }
     }
 
