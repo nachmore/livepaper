@@ -74,6 +74,6 @@ enum SystemProbes {
     /// Parses `launchctl print gui/<uid>/<label>`: loaded and currently running.
     static func helperRunning(launchctlPrint result: CommandResult) -> Bool {
         guard result.succeeded else { return false }
-        return result.stdout.split(separator: "\n").contains { $0.trimmingCharacters(in: .whitespaces) == "state = running" }
+        return LaunchdJob.parse(result.stdout).isRunning
     }
 }

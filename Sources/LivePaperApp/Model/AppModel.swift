@@ -29,6 +29,12 @@ struct AppEnvironment {
     var appBundlePath: String?
     /// System Settings › Lock Screen (AppKit; Entry/SystemActions). A no-op in mock mode and tests.
     var openLockScreenSettings: @MainActor () -> Void = {}
+    /// System Settings › General › Login Items (AppKit; Entry/SystemActions). A no-op in mock mode and tests.
+    var openLoginItemsSettings: @MainActor () -> Void = {}
+    /// Calls the handler on the main actor whenever the login session is unlocked
+    /// (com.apple.screenIsUnlocked) until the returned closure cancels it. Live: SessionUnlockObserver;
+    /// mock mode and tests: never, unless a test fires it.
+    var observeUnlock: @MainActor (@escaping @MainActor () -> Void) -> (@MainActor () -> Void) = { _ in {} }
     /// The support directory whose `Library/` and `playlist-settings.json` are watched for changes
     /// made by other processes (LibraryWatcher). nil: not watched (tests, snapshots).
     var diskWatchRoot: URL? = nil
@@ -190,6 +196,22 @@ final class AppModel {
     private var installJobs = 0
     /// The launch-time saver update while it runs: uninstall and setup wait for it.
     @ObservationIgnored private var saverUpdate: Task<Void, Never>?
+    /// Set while a saver update waits for the next unlock (the Mac was locked when it was due);
+    /// calling it stops waiting.
+    @ObservationIgnored private var cancelUnlockWait: (@MainActor () -> Void)?
+    /// What the unlock started (re-reading the status, then the update): uninstall and setup wait for
+    /// it, so nothing runs between the unlock and the update unaccounted for.
+    @ObservationIgnored private var unlockRetry: Task<Void, Never>?
+    /// Uninstall or setup is running: no saver update starts meanwhile (uninstall removes the saver;
+    /// setup installs this build's itself).
+    @ObservationIgnored private var exclusiveInstallWork = 0
+    /// The automatic helper repair while it runs (uninstall and "Start Helper" wait for it), and
+    /// whether this launch has had its one attempt (the user's own attempts and an uninstall count too).
+    @ObservationIgnored private var helperRepair: Task<Void, Never>?
+    @ObservationIgnored private(set) var helperRepairAttempted = false
+    /// Banners about the helper not running (the repair's, Start Helper's): dismissed once a status
+    /// read shows it running.
+    @ObservationIgnored private var helperBanners: Set<UUID> = []
     private(set) var isLocking = false
 
     // AI
@@ -836,18 +858,29 @@ final class AppModel {
     /// can't be published any more are reported like after any publish. Only ever an upgrade
     /// (InstallStatus.saverUpdateAvailable: an older LivePaper never replaces a newer saver), never
     /// after an uninstall and never while the Mac is locked; InstallService checks all of that
-    /// again right before the swap.
+    /// again right before the swap. An update the lock held back runs after the next unlock.
     func updateInstalledSaverIfNeeded() async {
         await beginSaverUpdateIfNeeded()?.value
     }
 
-    /// Starts the launch-time update (or returns the one running), nil when there is nothing to do.
+    /// A saver update waits for the next unlock (tests, diagnostics).
+    var isSaverUpdateWaitingForUnlock: Bool { cancelUnlockWait != nil }
+
+    /// Starts the launch-time update (or returns the one running), nil when there is nothing to do
+    /// now. While the Mac is locked it waits for the unlock instead.
     private func beginSaverUpdateIfNeeded() -> Task<Void, Never>? {
         if let running = saverUpdate { return running }
-        guard installStatus.saverUpdateAvailable, !environment.isSessionLocked() else { return nil }
+        guard installStatus.saverUpdateAvailable, exclusiveInstallWork == 0 else { return nil }
+        if environment.isSessionLocked() {
+            NSLog("LivePaper: not updating the installed screen saver now: \(SaverUpdateOutcome.sessionLockedReason); " +
+                  "updating it once the Mac is unlocked")
+            updateSaverAfterUnlock()
+            return nil
+        }
+        stopWaitingForUnlock()
         installJobs += 1
         let task = Task { @MainActor in
-            defer { self.installJobs -= 1; self.saverUpdate = nil }
+            defer { self.saverUpdate = nil; self.endInstallJob() }
             await self.runSaverUpdate()
         }
         saverUpdate = task
@@ -864,6 +897,8 @@ final class AppModel {
                 if let result { reportPublish(result, announce: false) }
             case .skipped(let why):
                 NSLog("LivePaper: left the installed screen saver as it is: \(why)")
+                // Locked between the check and the swap: the same wait as at launch.
+                if why == SaverUpdateOutcome.sessionLockedReason { updateSaverAfterUnlock() }
             }
         } catch {
             NSLog("LivePaper: couldn't update the installed screen saver: \(error.localizedDescription)")
@@ -871,12 +906,101 @@ final class AppModel {
         await refreshInstallStatus()
     }
 
+    /// Waits for the next unlock (com.apple.screenIsUnlocked), then tries the update once more:
+    /// the installed saver is never swapped under a running lock screen, and nothing else would
+    /// try again before the next launch. One wait at a time; the unlock ends it (an update that
+    /// finds the Mac locked again waits for the following one). What the unlock starts is kept in
+    /// `unlockRetry`, which uninstall and setup wait for.
+    private func updateSaverAfterUnlock() {
+        guard cancelUnlockWait == nil else { return }
+        cancelUnlockWait = environment.observeUnlock { [weak self] in
+            guard let self, self.cancelUnlockWait != nil else { return }
+            self.stopWaitingForUnlock()
+            NSLog("LivePaper: the Mac was unlocked; updating the installed screen saver")
+            let previous = self.unlockRetry
+            self.unlockRetry = Task { @MainActor in
+                await previous?.value
+                await self.refreshInstallStatus()
+                await self.beginSaverUpdateIfNeeded()?.value
+            }
+        }
+    }
+
+    private func stopWaitingForUnlock() {
+        let cancel = cancelUnlockWait
+        cancelUnlockWait = nil
+        cancel?()
+    }
+
     func refreshInstallStatus() async {
         let install = services.install
         if let s = try? await offMain({ install.status() }) {
             installStatus = s
             installStatusLoaded = true
+            if s.helperRunning { dismissHelperBanners() }
+            beginHelperRepairIfNeeded()
         }
+    }
+
+    /// Ends one piece of install work; once none is left, a helper problem the status showed
+    /// meanwhile gets its repair (it is held back while other install work runs).
+    private func endInstallJob() {
+        installJobs -= 1
+        if installJobs == 0 { beginHelperRepairIfNeeded() }
+    }
+
+    /// The helper runs now (repaired, approved in Login Items, started): what said otherwise goes.
+    private func dismissHelperBanners() {
+        for id in helperBanners { banners.dismiss(id) }
+        helperBanners.removeAll()
+    }
+
+    // MARK: - Helper repair
+
+    /// The helper is set up but its job doesn't run this build's helper (InstallStatus.helperProblem;
+    /// typically after an update of an ad-hoc-signed LivePaper, when launchd can no longer start the
+    /// login item while SMAppService still calls it enabled): repair it — once per launch, whenever
+    /// the status first shows it, and not while other install work runs. Quiet unless the user has
+    /// to do something; "Start Helper" / "Repair Helper" are the user's further attempts.
+    private func beginHelperRepairIfNeeded() {
+        guard let problem = installStatus.helperProblem, problem.isRepairable, helperRepair == nil, !helperRepairAttempted,
+              installJobs == 0 else { return }
+        helperRepairAttempted = true
+        installJobs += 1
+        NSLog("LivePaper: the helper doesn't run this build: \(problem.summary); repairing it")
+        helperRepair = Task { @MainActor in
+            defer { self.helperRepair = nil; self.endInstallJob() }
+            await self.runHelperRepair()
+        }
+    }
+
+    /// Waits for an automatic helper repair that is running (tests).
+    func awaitHelperRepair() async { await helperRepair?.value }
+
+    private func runHelperRepair() async {
+        let install = services.install
+        do {
+            switch try await offMain({ try install.recoverHelper() }) {
+            case .notNeeded(let why):
+                NSLog("LivePaper: the helper needs no repair: \(why)")
+            case .started:
+                NSLog("LivePaper: started the helper again")
+            case .reregistered:
+                NSLog("LivePaper: registered the helper login item again; it runs this build now")
+            case .needsApproval:
+                NSLog("LivePaper: registered the helper login item again; macOS waits for approval in Login Items")
+                helperBanners.insert(banners.post(.warning, "Allow LivePaper\u{2019}s helper again",
+                    message: "After the update macOS asks you to allow the helper again in System Settings \u{203A} General \u{203A} " +
+                             "Login Items. Until then your lock shortcut doesn\u{2019}t work.",
+                    actions: [.init(title: "Open Login Items") { [environment] in environment.openLoginItemsSettings() }]))
+            }
+        } catch {
+            NSLog("LivePaper: couldn't repair the helper: \(error.localizedDescription)")
+            helperBanners.insert(banners.error("LivePaper\u{2019}s helper can\u{2019}t start", error) { [weak self] in
+                Task { await self?.registerHelper() }
+            })
+        }
+        await refreshInstallStatus()
     }
 
     /// Installs (if needed) and selects the saver. Returns false when macOS needs the user to pick
@@ -884,8 +1008,11 @@ final class AppModel {
     @discardableResult
     func makeLivePaperScreenSaver() async -> Bool {
         installJobs += 1
-        defer { installJobs -= 1 }
-        // The launch-time update is the same install: let it finish rather than race it.
+        exclusiveInstallWork += 1
+        defer { exclusiveInstallWork -= 1; endInstallJob() }
+        // The launch-time update is the same install: let it finish rather than race it (also one an
+        // unlock is about to start), and start none meanwhile.
+        await unlockRetry?.value
         await saverUpdate?.value
         let install = services.install
         do {
@@ -906,20 +1033,28 @@ final class AppModel {
         }
     }
 
+    /// "Start Helper" / "Repair Helper": sets the helper up and makes it run this build (it registers
+    /// the login item again when launchd can't start it). The user's attempt replaces this launch's
+    /// automatic repair.
     func registerHelper() async {
-        await runInstallStep("Couldn't start the LivePaper helper") { try $0.registerHelper() }
+        helperRepairAttempted = true
+        await helperRepair?.value
+        await runInstallStep("Couldn't start the LivePaper helper", aboutHelper: true) { try $0.registerHelper() }
     }
 
     func openScreenSaverSettings() { services.install.openScreenSaverSettings() }
 
-    private func runInstallStep(_ failure: String, _ step: @escaping @Sendable (InstallServicing) throws -> Void) async {
+    /// `aboutHelper`: a failure banner that goes once the helper runs.
+    private func runInstallStep(_ failure: String, aboutHelper: Bool = false,
+                                _ step: @escaping @Sendable (InstallServicing) throws -> Void) async {
         installJobs += 1
-        defer { installJobs -= 1 }
+        defer { endInstallJob() }
         let install = services.install
         do {
             try await offMain { try step(install) }
         } catch {
-            banners.error(failure, error) { [weak self] in Task { await self?.runInstallStep(failure, step) } }
+            let id = banners.error(failure, error) { [weak self] in Task { await self?.runInstallStep(failure, aboutHelper: aboutHelper, step) } }
+            if aboutHelper { helperBanners.insert(id) }
         }
         await refreshInstallStatus()
     }
@@ -936,9 +1071,16 @@ final class AppModel {
     /// skips the steps that already finished.
     func uninstall(keepScenes: Bool) async -> UninstallReport {
         installJobs += 1
-        defer { installJobs -= 1 }
-        // A launch-time saver update still running would put back what this removes.
+        exclusiveInstallWork += 1
+        defer { exclusiveInstallWork -= 1; endInstallJob() }
+        // A launch-time saver update still running (or waiting for an unlock, or about to start after
+        // one) would put back what this removes, and a helper repair would register the helper again:
+        // wait for those, and start none from here on.
+        helperRepairAttempted = true
+        stopWaitingForUnlock()
+        await unlockRetry?.value
         await saverUpdate?.value
+        await helperRepair?.value
         let install = services.install
         // Agents work inside the support directory this deletes: they must be gone first.
         await stopAllAgents()

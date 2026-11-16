@@ -149,7 +149,7 @@ private struct LockSettingsTab: View {
                         if model.setupState.helperNeedsApproval {
                             Button("Open Login Items\u{2026}") { SystemActions.openLoginItemsSettings() }
                         } else if check.state == .needed {
-                            Button("Start Helper") { Task { await model.registerHelper() } }
+                            Button(model.setupState.helperActionTitle) { Task { await model.registerHelper() } }
                                 .disabled(model.isInstallBusy)
                         }
                     }

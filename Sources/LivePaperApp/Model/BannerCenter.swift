@@ -54,9 +54,10 @@ final class BannerCenter {
     }
 
     /// Posts an error banner; `retry` adds a "Try Again" action.
-    func error(_ title: String, _ error: Error, retry: (@MainActor () -> Void)? = nil) {
+    @discardableResult
+    func error(_ title: String, _ error: Error, retry: (@MainActor () -> Void)? = nil) -> UUID {
         let actions = retry.map { [Action(title: "Try Again", perform: $0)] } ?? []
-        post(.error, title, message: error.localizedDescription, actions: actions)
+        return post(.error, title, message: error.localizedDescription, actions: actions)
     }
 
     func dismiss(_ id: UUID) { banners.removeAll { $0.id == id } }

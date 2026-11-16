@@ -129,6 +129,23 @@ downloaded app the first time. The notes of every ad-hoc release say how to open
   (and confirm with your password), or
 * `xattr -dr com.apple.quarantine /Applications/LivePaper.app` in Terminal.
 
+Updates of an ad-hoc build that change the helper cost one more step: **open LivePaper once after
+replacing it** (the copy in /Applications, or wherever it was installed). macOS starts the helper's
+login item only as the code it recorded when the item was registered — for ad-hoc code the helper's
+cdhash, which changes with every build that changes the helper — so after such an update launchd
+refuses the new helper, and its repair can leave the job unable to start at all ("spawn failed",
+EX_CONFIG) while System Settings still lists the item as allowed (docs/RESEARCH.md §6.1). Only the app
+can register the helper again; it does so by itself when it opens (macOS then says "LivePaper can run
+in the background"). Until then the lock shortcut doesn't work. An update whose helper is
+byte-identical changes nothing: the running helper is left alone and nothing is registered again. A
+copy opened from Downloads, a disk image or a build folder never takes the login item over by itself
+(Settings › Lock › Repair Helper in that copy does). The ad-hoc release notes say this under
+*Updating*, and `livepaper doctor` reports the state ("can't start: launchd reports …"). The same
+applies to nightlies and betas and to `scripts/dev-install.sh`, which compares the new helper with the
+one that runs and says when launching the app is needed. With Developer ID the recorded requirement
+should name the team rather than a cdhash (Inferred, docs/RESEARCH.md §6), so LivePaper only restarts
+an updated helper (`launchctl kickstart -k`) and registers it again only if launchd refuses it.
+
 ### Developer ID and notarization (optional)
 
 Set all six repository secrets (*Settings › Secrets and variables › Actions*) and the publish job
@@ -198,3 +215,10 @@ instead of running them.
   detaching the image, otherwise re-run the job.
 * **"main has moved on to a commit with other workflow files"** — a newer push changed the
   workflow before this run published; the newer run publishes the nightly. Not an error.
+* **After an update the lock shortcut does nothing** — the helper's login item can't start the new
+  (ad-hoc) helper ([Ad-hoc](#ad-hoc-the-default)). Open LivePaper (the installed copy): it registers
+  the helper again at launch, and also finishes a re-registration an earlier launch couldn't;
+  Settings › Lock › Repair Helper tries again. `livepaper doctor` and
+  `launchctl print gui/$UID/com.nachmore.livepaper.helper` (`job state = spawn failed`, `last exit
+  code = 78: EX_CONFIG`) show it. If it still can't start, switch LivePaper off and on in System
+  Settings › General › Login Items, or log out and back in.
