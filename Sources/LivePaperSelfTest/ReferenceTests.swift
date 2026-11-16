@@ -705,6 +705,27 @@ enum ReferenceTests {
             }
             try expect(!FileManager.default.fileExists(atPath: sb.workspaces.appendingPathComponent("m2").path), "a failed build leaves nothing")
 
+            // A scene that keeps its clock at the bottom left: the picture's brightness is measured
+            // there. This one is dark but for a bright bottom-left corner — fine behind the top clock
+            // (its summary), too bright behind that one (TASK.md and ref-01.json in that session).
+            let cornerCtx = ReferenceFixtures.context(1500, 1000)
+            cornerCtx.setFillColor(ReferenceFixtures.rgb(0.15, 0.15, 0.17)); cornerCtx.fill(CGRect(x: 0, y: 0, width: 1500, height: 1000))
+            cornerCtx.setFillColor(ReferenceFixtures.rgb(0.95, 0.95, 0.93)); cornerCtx.fill(CGRect(x: 0, y: 650, width: 600, height: 350))
+            let lamp = try prepare(write(png(cornerCtx.makeImage()!), sb.root.appendingPathComponent("in/corner.png")), role: .animate)
+            try expect(lamp.summary.brightness.darkenTo == nil && lamp.summary.brightness.clock == .top, "\(lamp.summary.brightness)")
+            let bottom = try lib.createWebScene(name: "Bottom clock", description: "")
+            var manifest = try SceneManifest.decoder().decode(SceneManifest.self,
+                                                              from: Data(contentsOf: bottom.packageURL.appendingPathComponent(SceneManifest.fileName)))
+            manifest.clock.position = .bottomLeft
+            try manifest.write(package: bottom.packageURL)
+            let low = try builder(sb, library: lib).buildSession(.modify(sceneID: bottom.id, prompt: "animate it"), references: [lamp], sessionID: "m4")
+            let lowTask = text(low.workspace.taskFile)
+            try expect(lowTask.contains("behind the clock (bottom left) up to") && lowTask.contains("That is too bright for the check: darken evenly") &&
+                       !lowTask.contains("Keep it that way"), lowTask)
+            let lowSummary = try JSONDecoder().decode(ReferenceSummary.self, from: Data(contentsOf: low.workspace.references.appendingPathComponent("ref-01.json")))
+            try expect(lowSummary.brightness.clock == .bottomLeft && lowSummary.brightness.behindClock > 200 && (lowSummary.brightness.darkenTo ?? 1) < 0.5,
+                       "\(lowSummary.brightness)")
+
             // A scene that shows a picture keeps it when changed without a new one.
             let pictured = try lib.createWebScene(name: "Pictured", description: "")
             _ = try write(photo.vision.data, pictured.packageURL.appendingPathComponent("assets/reference.jpg"))

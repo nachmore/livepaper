@@ -583,7 +583,9 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   vision copy ≤ 2000 px / 3.5 MB, JPEG, or PNG when meaningfully transparent — over 0.5 % of the pixels
   not opaque and some clearly see-through; a photo with soft corners or a stray pixel stays JPEG, those
   pixels black — plus a `ReferenceSummary` whose brightness covers the clock at each of the check's
-  screen shapes: 16:10, 32:9, 5:4, and `darkenTo` the brightest). Starting a session numbers them —
+  screen shapes: 16:10, 32:9, 5:4, and `darkenTo` the brightest; the top clock, or for a scene being
+  changed that keeps its clock at the bottom, that corner, measured again when the session starts).
+  Starting a session numbers them —
   the picture to animate is always ref-01, so the files, the rewritten prompt and the harnesses'
   attachments agree — and writes `references/` (§4.1) and, for the picture to animate,
   `scene/assets/reference.jpg|png` — the master if it fits the compiler's limits next to the scene's

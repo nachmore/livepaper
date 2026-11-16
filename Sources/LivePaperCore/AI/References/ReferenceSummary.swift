@@ -28,14 +28,17 @@ public struct ReferenceSummary: Codable, Sendable, Equatable {
             public var aspect: String
             /// Mean luma of what that screen shows of the picture.
             public var mean: Double
-            /// …inside the top clock rect there.
+            /// …inside the clock's rect there.
             public var behindClock: Double
         }
         /// Mean Rec. 709 luma (0–255) of the whole picture (transparent parts count as black).
         public var mean: Double
-        /// …inside the top clock rect when the picture is cover-fit: the brightest of the check's
+        /// …inside the clock's rect when the picture is cover-fit: the brightest of the check's
         /// sizes (a 32:9 screen shows a band of the picture, so its clock sits lower on it).
         public var behindClock: Double
+        /// The clock position measured: the scene's (top, unless a scene being changed puts it at
+        /// the bottom; `none` is measured at the top, where the system's own clock shows).
+        public var clock: LPClockPosition
         /// Per check size (16:10, 32:9, 5:4).
         public var sizes: [AtSize]
         /// `livepaper check`'s budgets.
@@ -140,12 +143,6 @@ enum ReferenceAnalysis {
     static func summary(master: CGImage, vision: EncodedReferenceImage, original: ReferenceProbe, transparent: Bool,
                         role: AIReferenceRole) -> ReferenceSummary? {
         guard let bmp = SRGBBitmap(image: master, maxPixel: analysisPixels) else { return nil }
-        let budgets = CheckBudgets()
-        let sizes = brightness(bmp)
-        let mean = bmp.meanLuma
-        let brightest = sizes.map(\.mean).max() ?? mean, behind = sizes.map(\.behindClock).max() ?? 0
-        var k = min(1, 0.9 * budgets.maxMeanLuma / max(max(mean, brightest), 1), 0.9 * budgets.maxClockLuma / max(behind, 1))
-        k = max(0.05, (k * 100).rounded(.down) / 100)
         return ReferenceSummary(
             file: "", role: role, width: vision.width, height: vision.height,
             aspect: aspectName(width: vision.width, height: vision.height),
@@ -153,9 +150,20 @@ enum ReferenceAnalysis {
             orientation: orientation(width: vision.width, height: vision.height),
             original: .init(width: original.width, height: original.height, format: original.formatName,
                             frames: original.frameCount, transparent: transparent),
-            brightness: .init(mean: round(mean, 1), behindClock: round(behind, 1), sizes: sizes,
-                              limits: .init(mean: budgets.maxMeanLuma, behindClock: budgets.maxClockLuma), darkenTo: k < 1 ? k : nil),
-            palette: palette(bmp), grid: grid(bmp), asset: nil)
+            brightness: brightness(bmp), palette: palette(bmp), grid: grid(bmp), asset: nil)
+    }
+
+    /// The picture's brightness against `livepaper check`'s budgets with the clock at `clock`, and
+    /// the even darkening that meets them at every check size.
+    static func brightness(_ bmp: SRGBBitmap, clock: LPClockPosition = .top) -> ReferenceSummary.Brightness {
+        let budgets = CheckBudgets()
+        let sizes = brightness(bmp, sizesWithClock: clock)
+        let mean = bmp.meanLuma
+        let brightest = sizes.map(\.mean).max() ?? mean, behind = sizes.map(\.behindClock).max() ?? 0
+        var k = min(1, 0.9 * budgets.maxMeanLuma / max(max(mean, brightest), 1), 0.9 * budgets.maxClockLuma / max(behind, 1))
+        k = max(0.05, (k * 100).rounded(.down) / 100)
+        return .init(mean: round(mean, 1), behindClock: round(behind, 1), clock: clock, sizes: sizes,
+                     limits: .init(mean: budgets.maxMeanLuma, behindClock: budgets.maxClockLuma), darkenTo: k < 1 ? k : nil)
     }
 
     /// The screen shapes whose stills `livepaper check` judges for brightness (CSS px).
@@ -163,13 +171,13 @@ enum ReferenceAnalysis {
         (CheckPlan.primary.width, CheckPlan.primary.height, "16:10"), (2560, 720, "32:9"), (1280, 1024, "5:4"),
     ]
 
-    /// Per check size: the mean luma of the cover-fit crop, and inside the runtime's top clock rect.
-    static func brightness(_ bmp: SRGBBitmap) -> [ReferenceSummary.Brightness.AtSize] {
+    /// Per check size: the mean luma of the cover-fit crop, and inside the runtime's clock rect.
+    static func brightness(_ bmp: SRGBBitmap, sizesWithClock position: LPClockPosition) -> [ReferenceSummary.Brightness.AtSize] {
         let sat = SummedArea(bmp)
         return checkSizes.map { size in
             let fw = Double(size.width), fh = Double(size.height)
             let crop = ReferenceResemblance.coverCrop(width: bmp.width, height: bmp.height, aspect: fw / fh, zoom: 1, dx: 0, dy: 0)
-            let clock = ReferenceResemblance.clockRect(.top, width: fw, height: fh)
+            let clock = ReferenceResemblance.clockRect(position, width: fw, height: fh)
             let s = crop.width / fw
             let rect = CGRect(x: crop.minX + clock.minX * s, y: crop.minY + clock.minY * s, width: clock.width * s, height: clock.height * s)
             let c = sat.mean(in: rect), m = sat.mean(in: crop)

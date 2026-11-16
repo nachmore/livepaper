@@ -138,7 +138,7 @@ public final class WorkspaceBuilder: @unchecked Sendable {
             // .kiro/agents/: the restricted agent Kiro sessions run as (harmless for other harnesses).
             try KiroAgentConfig.write(in: ws, protectingReferences: !refs.isEmpty)
             // references/ (+ scene/assets/reference.* for the picture to animate)
-            let references = try ReferenceWorkspace.write(refs, into: ws)
+            let references = try ReferenceWorkspace.write(refs, into: ws, clock: modified?.manifest.clock.position ?? .top)
             // The request as the agent reads it: paths LivePaper attached → their workspace names.
             let prompt: String
             switch request { case .create(let p), .modify(_, let p): prompt = p }

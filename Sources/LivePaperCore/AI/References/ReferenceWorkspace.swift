@@ -116,8 +116,9 @@ public enum ReferenceWorkspace {
 
     /// Writes `refs` (in order: ref-01 is the first; see `numbered`) into the workspace, and for the image to animate
     /// its full-resolution copy into the candidate's assets. Throws `ReferenceError.noRoomForAsset`
-    /// when the scene's own assets leave too little room for it.
-    static func write(_ refs: [PreparedReference], into ws: AIWorkspace) throws -> SessionReferences {
+    /// when the scene's own assets leave too little room for it. `clock`: where the scene's clock is
+    /// (the picture to animate's brightness is measured behind it).
+    static func write(_ refs: [PreparedReference], into ws: AIWorkspace, clock: LPClockPosition = .top) throws -> SessionReferences {
         var session = SessionReferences()
         guard !refs.isEmpty else { return session }
         try ReferencePrompts.validate(refs)
@@ -134,6 +135,10 @@ public enum ReferenceWorkspace {
                                              width: ref.vision.width, height: ref.vision.height)
             if ref.role == .animate {
                 let animate = try writeAsset(from: ref, scene: ws.scene)
+                // The summary measured the top clock; a scene being changed may keep its clock at the bottom.
+                if clock == .bottomLeft || clock == .bottomRight {
+                    summary.brightness = ReferenceAnalysis.brightness(animate.fingerprint.bitmap, clock: clock)
+                }
                 summary.asset = .init(path: "scene/" + animate.assetPath, width: animate.width, height: animate.height, bytes: animate.data.count)
                 entry.asset = "scene/" + animate.assetPath
                 entry.assetSHA256 = animate.sha256
@@ -236,7 +241,8 @@ public enum ReferenceWorkspace {
             let s = image.summary
             let asset = "scene/" + animate.assetPath, assetName = (animate.assetPath as NSString).lastPathComponent
             let perSize = s.brightness.sizes.map { "\($0.aspect) \(Int($0.behindClock.rounded()))" }.joined(separator: ", ")
-            var brightness = "5. Brightness: mean \(Int(s.brightness.mean.rounded()))/255; behind the clock up to " +
+            let clockAt = s.brightness.clock == .bottomLeft ? " (bottom left)" : s.brightness.clock == .bottomRight ? " (bottom right)" : ""
+            var brightness = "5. Brightness: mean \(Int(s.brightness.mean.rounded()))/255; behind the clock\(clockAt) up to " +
                 "\(Int(s.brightness.behindClock.rounded()))/255" + (perSize.isEmpty ? "" : " (\(perSize))") +
                 "; limits \(Int(budgets.maxMeanLuma)) / \(Int(budgets.maxClockLuma)) at every screen shape. "
             if let k = s.brightness.darkenTo {
