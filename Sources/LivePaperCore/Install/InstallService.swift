@@ -562,7 +562,7 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     /// the copy that registered it does — or, when that isn't known (registered before LivePaper kept
     /// a record, or by a copy that is gone), a copy in /Applications or ~/Applications: never a
     /// download that was just opened, a translocated copy, a disk image or a build folder. The user's
-    /// Repair Helper / Start Helper (registerHelper) can always take it over.
+    /// Repair Helper / Start Helper / Use This Copy's Helper (registerHelper) can always take it over.
     func automaticRepairBlocker(_ registration: HelperRegistration) -> String? {
         switch registration {
         case .thisCopy: return nil
@@ -596,18 +596,26 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             }
             return try reregisterLoginItem(because: why)
         }
-        switch assessment.action {
-        case .leave(let why):
-            record("Start the helper (\(helperService))", .skipped(why))
-            return .notNeeded(why)
-        case .reregister(let why):
-            // Unregistering ends a helper that still works: not for a registration that would fail.
+        /// Unregistering ends a helper that still works: not for a registration that would fail.
+        func reregisterUnlessUnsigned(_ why: String, cannotStart: Bool) throws -> HelperRecoveryOutcome {
             if runningHelper(current) != nil, probe.signatureIsValid(paths.appBundle) != true {
                 let blocker = "this LivePaper's code signature doesn't check out, so registering it would fail; the running helper keeps going"
                 record(Self.reregisterLoginItemTitle, .skipped(blocker))
                 return .notNeeded(blocker)
             }
-            return try reregister(why, cannotStart: assessment.problem?.cannotStart == true)
+            return try reregister(why, cannotStart: cannotStart)
+        }
+        switch assessment.action {
+        case .leave(let why):
+            // Another copy's helper runs, and the user asked for this copy's (Settings › Lock › Use
+            // This Copy's Helper): registering moves the login item here. Never by itself.
+            if !automatic, case .otherCopy(let app)? = assessment.problem {
+                return try reregisterUnlessUnsigned("asked to run this copy's helper instead of the one of the LivePaper at \(app)", cannotStart: false)
+            }
+            record("Start the helper (\(helperService))", .skipped(why))
+            return .notNeeded(why)
+        case .reregister(let why):
+            return try reregisterUnlessUnsigned(why, cannotStart: assessment.problem?.cannotStart == true)
         case .start, .restart:
             let restart = assessment.action == .restart
             let title = restart ? "Restart the helper with this build (\(helperService))" : "Start the helper (\(helperService))"
@@ -618,13 +626,19 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
             }
             try perform(title) { try kickstart(helperService, kill: restart); return nil }
             if dryRun { return .notNeeded("dry run") }
-            switch awaitStart(replacing: previous, timeout: helperStartTimeout) {
+            // A start may start another copy's helper (its job, or a job that still points there):
+            // the job runs, which is what was asked. A restart is for this build's helper.
+            switch awaitStart(replacing: previous, acceptingOtherCopy: !restart, timeout: helperStartTimeout) {
             case .running:
                 return .started
             case .cannotStart(let why):
                 return try reregister("launchd couldn't start it: \(why)", cannotStart: true)
             case .notLoaded:
                 return try reregister("launchd no longer has its job", cannotStart: false)
+            case .notRunning where restart && runningHelper(lookup(helperService)).map({ Self.isOutdated($0.code) }) == true:
+                // launchd started the old copy's helper again (its job still points at the app in the
+                // Trash, or at the replaced file): only registering from this copy moves it here.
+                return try reregister("launchd restarted it as the older build", cannotStart: false)
             case .notRunning:
                 // Nothing says why, so registering again would rest on nothing: say so instead.
                 let failure = InstallError.helperNotRunning("launchd reported no running helper after `launchctl kickstart`")
@@ -716,13 +730,16 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
     private enum JobStart { case running, cannotStart(String), notLoaded, notRunning }
 
     /// Watches the login item's job for up to `timeout` until a helper runs in it (another process
-    /// than `previous`, the one a restart replaces); otherwise what launchd last said. A live helper
-    /// process of this copy counts as running even when launchd's text doesn't say so.
-    private func awaitStart(replacing previous: Int32?, timeout: TimeInterval) -> JobStart {
+    /// than `previous`, the one a restart replaces; with `acceptingOtherCopy`, also another copy's
+    /// helper — what starting that copy's job starts); otherwise what launchd last said. A live
+    /// helper process of this copy counts as running even when launchd's text doesn't say so.
+    private func awaitStart(replacing previous: Int32?, acceptingOtherCopy: Bool = false, timeout: TimeInterval) -> JobStart {
         let deadline = Date().addingTimeInterval(timeout)
         while true {
             let current = lookup(helperService)
-            if let running = runningHelper(current), Self.isNewHelper(running, replacing: previous) { return .running }
+            if let running = runningHelper(current), Self.isNewHelper(running, replacing: previous, acceptingOtherCopy: acceptingOtherCopy) {
+                return .running
+            }
             if Date() >= deadline { return verdict(current, replacing: previous) }
             Thread.sleep(forTimeInterval: 0.25)
         }
@@ -748,12 +765,22 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
         }
     }
 
-    /// A helper that runs this build (or can't be told apart), not the old process a restart ends.
-    private static func isNewHelper(_ running: RunningHelper, replacing previous: Int32?) -> Bool {
+    /// A helper that runs this build (or can't be told apart; with `acceptingOtherCopy`, another
+    /// copy's), not the old process a restart ends.
+    private static func isNewHelper(_ running: RunningHelper, replacing previous: Int32?, acceptingOtherCopy: Bool = false) -> Bool {
         if let previous, running.pid == nil || running.pid == previous { return false }
         switch running.code {
         case .current, .unknown: return true
-        case .replaced, .gone, .otherCopy: return false
+        case .otherCopy: return acceptingOtherCopy
+        case .replaced, .gone: return false
+        }
+    }
+
+    /// It runs code that is no longer this copy's helper on disk.
+    private static func isOutdated(_ code: RunningHelper.Code) -> Bool {
+        switch code {
+        case .replaced, .gone: return true
+        case .current, .otherCopy, .unknown: return false
         }
     }
 

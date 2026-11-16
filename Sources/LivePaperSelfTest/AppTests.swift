@@ -426,6 +426,15 @@ extension SelfTests {
             try expect(!st.helperCannotStart && st.helperNeedsApproval, "approval comes first: only the user can give it")
             st.install.helperLoginItem = .enabled; st.install.helperRunning = true
             try expect(!st.helperCannotStart && st.helperActionTitle == "Start Helper")
+            try expectEqual(st.helperOtherCopy, nil)
+            // Another copy's helper runs: done, and Settings › Lock offers to use this copy's instead.
+            st.install.helperProblem = .otherCopy("/Users/me/Downloads/LivePaper.app")
+            try expectEqual(st.helperOtherCopy, "/Users/me/Downloads/LivePaper.app")
+            let other = try unwrap(SetupChecklist.checks(for: .lock, state: st).first { $0.id == .helper })
+            try expect(other.state == .done && other.detail.contains("/Users/me/Downloads/LivePaper.app") &&
+                       other.detail.contains(SetupState.useThisCopysHelperTitle), other.detail)
+            st.install.helperRunning = false
+            try expectEqual(st.helperOtherCopy, nil)
         },
         TestCase(name: "app.setup.uninstall-report") {
             let home = "/Users/someone"

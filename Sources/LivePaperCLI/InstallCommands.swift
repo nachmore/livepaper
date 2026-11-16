@@ -197,7 +197,7 @@ enum InstallCommands {
                     "the helper, or registers it again when macOS would refuse the new one.")
         case (true, .otherCopy(let app)?):
             return (.warning, "running, but it is the helper of another copy of LivePaper (\(app)). LivePaper leaves it with that " +
-                    "copy; keep one copy, or use Settings › Lock › Start Helper in the copy that should run it.")
+                    "copy; keep one copy, or use Settings › Lock › Use This Copy\u{2019}s Helper in the copy that should run it.")
         case (true, _):
             return (.ok, "running (\(label))")
         case (false, .cannotStart(let detail)?):

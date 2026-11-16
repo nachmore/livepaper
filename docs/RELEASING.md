@@ -137,9 +137,10 @@ refuses the new helper, and its repair can leave the job unable to start at all 
 EX_CONFIG) while System Settings still lists the item as allowed (docs/RESEARCH.md §6.1). Only the app
 can register the helper again; it does so by itself when it opens (macOS then says "LivePaper can run
 in the background"). Until then the lock shortcut doesn't work. An update whose helper is
-byte-identical changes nothing: the running helper is left alone and nothing is registered again. A
-copy opened from Downloads, a disk image or a build folder never takes the login item over by itself
-(Settings › Lock › Repair Helper in that copy does). The ad-hoc release notes say this under
+byte-identical is never registered again: the running helper is left alone (after Finder's Replace,
+which leaves it running from the Trash, it is restarted from the new copy). A copy opened from
+Downloads, a disk image or a build folder never takes the login item over by itself (Settings › Lock ›
+Repair Helper in that copy does, or Use This Copy's Helper while the other copy's helper runs). The ad-hoc release notes say this under
 *Updating*, and `livepaper doctor` reports the state ("can't start: launchd reports …"). The same
 applies to nightlies and betas and to `scripts/dev-install.sh`, which compares the new helper with the
 one that runs and says when launching the app is needed. With Developer ID the recorded requirement

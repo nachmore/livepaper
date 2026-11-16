@@ -29,6 +29,15 @@ struct SetupState: Equatable, Sendable {
 
     /// What the helper row's button says ("Repair Helper" when launchd can't start it).
     var helperActionTitle: String { helperCannotStart ? "Repair Helper" : "Start Helper" }
+
+    /// The helper that runs is another copy of LivePaper's (its path): Settings › Lock offers
+    /// "Use This Copy's Helper", which registers the login item from this copy.
+    var helperOtherCopy: String? {
+        guard install.helperRunning, case .otherCopy(let app)? = install.helperProblem else { return nil }
+        return app
+    }
+
+    static let useThisCopysHelperTitle = "Use This Copy\u{2019}s Helper"
 }
 
 /// The onboarding pages. Every page is idempotent: it shows live status and only offers the
@@ -115,7 +124,10 @@ enum SetupChecklist {
                            title: state.helperNeedsApproval ? "LivePaper helper waiting for approval"
                                : state.helperCannotStart ? "LivePaper helper can\u{2019}t start" : "LivePaper helper running",
                            detail: s.helperRunning
-                               ? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle."
+                               ? (state.helperOtherCopy.map {
+                                      "It runs from another copy of LivePaper (\($0)). \(SetupState.useThisCopysHelperTitle) runs " +
+                                      "this copy\u{2019}s instead (macOS then says LivePaper can run in the background)."
+                                  } ?? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle.")
                                : state.helperNeedsApproval
                                    ? "Allow LivePaper in System Settings \u{203A} General \u{203A} Login Items."
                                    : state.helperCannotStart

@@ -366,12 +366,14 @@ What fixes it, and what LivePaper does (ARCHITECTURE §7):
 * **When it does it — only on positive evidence that launchd can't run this build's helper**, decided
   by code, not by file times or build numbers (ARCHITECTURE §7): launchd can't start the job (the signs
   in 4.), doesn't have it (exit 113; a timeout or another error changes nothing), runs a helper whose
-  code is no longer this copy's on disk (8.) and is ad-hoc signed, or has a stopped job whose recorded
+  code is no longer this copy's on disk (8.) when the recorded requirement doesn't cover this copy's
+  helper (for ad-hoc code another cdhash), or has a stopped job whose recorded
   helper signature doesn't cover this one (LivePaper records it at every registration; without a
   record, a stopped job registered by an older build). A helper that runs this copy's current code is
-  left alone; one with the registration's Team ID is restarted (`kickstart -k`); a stopped job launchd
-  should accept is started. A start that launchd then refuses is registered again; launchctl text
-  LivePaper can't read never leads to an unregister.
+  left alone; an outdated one that the recorded requirement covers (the registration's Team ID, or the
+  same ad-hoc cdhash — Finder's Replace leaves the old helper running from the Trash) is restarted
+  (`kickstart -k`); a stopped job launchd should accept is started. A start that launchd then refuses
+  is registered again; launchctl text LivePaper can't read never leads to an unregister.
 * **Only from the copy the login item belongs to:** registering moves the item to the registering app.
   The automatic repair runs only in the copy that registered it — or, without a record (or when that
   copy is gone or in the Trash), in a copy in /Applications or ~/Applications — never in a download,

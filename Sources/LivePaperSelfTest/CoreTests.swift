@@ -2567,6 +2567,16 @@ extension SelfTests {
             let trashed = "/Users/me/.Trash/LivePaper.app/Contents/Helpers/LivePaperHelper"
             try expectEqual(login(.loaded(runningJob), .gone(trashed)).problem, .outdated("its executable is gone (\(trashed))"))
             try expectEqual(login(.loaded(runningJob), .gone(nil)).problem, .outdated("its executable is gone"))
+            // An ad-hoc helper on disk that is the one this copy registered (the same cdhash — an
+            // update that left it unchanged, e.g. Finder's Replace, whose old process runs from the
+            // Trash): restarted, not registered again; whoever else registered it, or another cdhash: registered again.
+            let gone = "its executable is gone (\(trashed))"
+            try expectEqual(login(.loaded(runningJob), .gone(trashed), helper: adhoc, here(adhoc, "186")), result(.outdated(gone), .restart))
+            try expectEqual(login(.loaded(runningJob), .gone(trashed), helper: team2, here(team, "180")), result(.outdated(gone), .restart))
+            try expectEqual(login(.loaded(runningJob), .replaced, helper: adhoc, here(adhoc, "186")), result(.outdated(replaced), .restart))
+            try expectEqual(login(.loaded(runningJob), .gone(trashed), helper: adhoc2, here(adhoc, "186")).action, .reregister("it runs an older build: \(gone)"))
+            try expectEqual(login(.loaded(runningJob), .gone(trashed), helper: adhoc, .unknown).action, .reregister("it runs an older build: \(gone)"))
+            try expectEqual(login(.loaded(runningJob), .gone(trashed), helper: adhoc, here(nil, "186")).action, .reregister("it runs an older build: \(gone)"))
             // Stopped, registered by this copy: started when launchd should accept this helper, and
             // registered again when it changed since — whatever the build numbers say.
             var stopped = runningJob
@@ -2790,6 +2800,52 @@ extension SelfTests {
                 try expect(system.mutatingCommands.contains(["/bin/launchctl", "kickstart", h.service]))
             }
         },
+        TestCase(name: "core.install.helper-repair-finder-update") {
+            // Finder's Replace (or trashing the old app, then copying the new one) moves the old app
+            // to the Trash, and its helper keeps running from there (proc_pidpath follows the file).
+            // When this copy's helper is still the code the registration recorded (for ad-hoc code
+            // the same cdhash: an update that left it unchanged), it is restarted from this copy —
+            // not registered again, which would end it and make macOS post "LivePaper can run in
+            // the background" at every such update.
+            try CoreSandbox.with("helper-finder") { sb in
+                let h = try HelperRig(sb, app: "Applications/LivePaper.app")
+                let item = h.item, system = h.system, label = h.label, probe = h.probe
+                try h.make().registerHelper()
+                let old = try unwrap(system.pids[label])
+                let trashed = URL(fileURLWithPath: resolvedPath(sb.root.path)).appendingPathComponent(".Trash/LivePaper.app/Contents/Helpers/LivePaperHelper")
+                try sb.writeExecutable("#!/bin/sh", to: trashed)
+                probe.run(old, trashed.path)
+                try expectEqual(h.make().status().helperProblem, .outdated("its executable is gone (\(trashed.path))"))
+                system.onKickstart = { l, kill in
+                    guard kill else { return }
+                    probe.end(old); system.pids[l] = 9100; probe.run(9100, h.paths.helperExecutable.path)
+                }
+                try expectEqual(try h.make().recoverHelper(), .started)
+                try expectEqual(system.mutatingCommands, [["/bin/launchctl", "kickstart", "-k", h.service]])
+                try expect(item.unregisterCalls == 0 && item.registerCalls == 1, "not registered again")
+                try expectEqual(h.make().status().helperProblem, nil)
+                // A helper that changed (another cdhash than the one registered): registered again —
+                // launchd would refuse it.
+                probe.run(9100, trashed.path)
+                probe.sign(h.paths.helperExecutable, CodeSignature(cdhash: "f2"))
+                try expectEqual(try h.make().recoverHelper(), .reregistered)
+                try expect(item.unregisterCalls == 1 && item.registerCalls == 2)
+                try expectEqual(try h.record().helper, CodeSignature(cdhash: "f2"))
+                // launchd restarts the old copy's helper again (its job still points into the Trash):
+                // only registering from this copy moves it here.
+                let now = try unwrap(system.pids[label])
+                probe.run(now, trashed.path)
+                system.onKickstart = { l, kill in
+                    guard kill else { return }
+                    probe.end(now); system.pids[l] = 9200; probe.run(9200, trashed.path)
+                }
+                try expectEqual(try h.make().recoverHelper(), .reregistered)
+                try expect(item.unregisterCalls == 2 && item.registerCalls == 3)
+                try expectEqual(Array(system.mutatingCommands.suffix(1)), [["/bin/launchctl", "kickstart", "-k", h.service]])
+                try expectEqual(h.make().status().helperProblem, nil)
+                system.onKickstart = nil
+            }
+        },
         TestCase(name: "core.install.helper-repair-copies") {
             // Registering moves the login item to the copy that registers. The automatic repair only
             // ever runs in the copy that registered it (or, without a record, the one in
@@ -2816,9 +2872,17 @@ extension SelfTests {
                 try expect(item.unregisterCalls == 0 && item.registerCalls == 1)
                 try expectEqual(try installed.make().recoverHelper(), .reregistered)
                 try expectEqual(try installed.record().app, installed.paths.appBundle.path)
-                // The installed copy's job is stopped: the download may start it (that starts the
-                // installed copy's helper), but when launchd refuses, it leaves registering it again to
-                // that copy — and says so.
+                // The installed copy's job is stopped: the download starts it, which starts the
+                // installed copy's helper — that is a start that worked, not "no running helper".
+                let repaired = try unwrap(system.pids[label])
+                probe.end(repaired); system.pids[label] = nil; system.stopped = [label]
+                system.onKickstart = { l, _ in system.pids[l] = 7777; probe.run(7777, installed.paths.helperExecutable.path) }
+                try expectEqual(try download.make().recoverHelper(), .started)
+                try expectEqual(Array(system.mutatingCommands.suffix(1)), [["/bin/launchctl", "kickstart", installed.service]])
+                try expect(item.unregisterCalls == 1 && item.registerCalls == 2, "nothing registered")
+                try expectEqual(download.make().status().helperProblem, .otherCopy(installed.paths.appBundle.path))
+                system.onKickstart = nil
+                // … but when launchd refuses, it leaves registering it again to that copy — and says so.
                 let now = try unwrap(system.pids[label])
                 probe.end(now); system.pids[label] = nil; system.stopped = [label]; system.breaksOnStart = [label]
                 do { _ = try download.make().recoverHelper(); throw TestFailure(description: "repaired from the download") }
@@ -2841,12 +2905,27 @@ extension SelfTests {
                 // Now the installed copy is the other one; its helper (in the download) runs fine.
                 let moved = try unwrap(system.pids[label])
                 try expectEqual(installed.make().status().helperProblem, .otherCopy(download.paths.appBundle.path))
+                // While another copy's helper works, the automatic repair leaves it — and the user's
+                // request (Use This Copy's Helper) moves it here, and back.
+                try expectEqual(try installed.make().recoverHelper(), .notNeeded("it runs the helper of the LivePaper at \(download.paths.appBundle.path)"))
+                try expectEqual(item.registerCalls, 3)
+                let takeover = installed.make()
+                try takeover.registerHelper()
+                try expectEqual(item.registerCalls, 4)
+                try expectEqual(try installed.record().app, installed.paths.appBundle.path)
+                try expect(installed.make().status().helperProblem == nil && !probe.isAlive(moved), "\(installed.make().status())")
+                try expect(takeover.transcript.contains { $0.title.contains("instead of the one of the LivePaper at \(download.paths.appBundle.path)") &&
+                                                          $0.outcome == .done }, "\(takeover.transcript)")
+                try download.make().registerHelper()
+                try expectEqual(item.registerCalls, 5)
+                try expectEqual(installed.make().status().helperProblem, .otherCopy(download.paths.appBundle.path))
+                let back = try unwrap(system.pids[label])
                 // The registering copy was moved to the Trash (replaced by Finder): its helper is gone,
                 // and the copy in /Applications takes over by itself.
                 let trash = URL(fileURLWithPath: resolvedPath(sb.root.path)).appendingPathComponent(".Trash/LivePaper.app")
                 try FileManager.default.createDirectory(at: trash.deletingLastPathComponent(), withIntermediateDirectories: true)
                 try FileManager.default.moveItem(at: download.paths.appBundle, to: trash)
-                probe.run(moved, trash.appendingPathComponent("Contents/Helpers/LivePaperHelper").path)
+                probe.run(back, trash.appendingPathComponent("Contents/Helpers/LivePaperHelper").path)
                 try expect(installed.make().status().helperProblem == .outdated("its executable is gone (\(trash.path)/Contents/Helpers/LivePaperHelper)"),
                            "\(installed.make().status())")
                 try expectEqual(try installed.make().recoverHelper(), .reregistered)

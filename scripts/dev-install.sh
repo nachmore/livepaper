@@ -133,7 +133,7 @@ if JOB="$(launchctl print "$LOGIN_JOB" 2>/dev/null)"; then
     RUNNING="$(running_executable "$HELPER_PID")"
     if [ -n "$RUNNING" ] && [ "$(real_path "$RUNNING")" != "$NEW_HELPER" ]; then
       echo "! the helper that runs belongs to another copy of LivePaper (${RUNNING%/Contents/Helpers/LivePaperHelper}); left alone." \
-           "Use Settings › Lock › Start Helper in this one to move it here." >&2
+           "Use Settings › Lock › Use This Copy’s Helper in this one to move it here." >&2
     elif [ -n "$RUNNING" ] && codesign --verify "$HELPER_PID" >/dev/null 2>&1; then
       echo "▸ the helper already runs this build's code (unchanged); nothing to restart"
     elif is_adhoc "$NEW_HELPER"; then

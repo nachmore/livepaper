@@ -151,6 +151,9 @@ private struct LockSettingsTab: View {
                         } else if check.state == .needed {
                             Button(model.setupState.helperActionTitle) { Task { await model.registerHelper() } }
                                 .disabled(model.isInstallBusy)
+                        } else if model.setupState.helperOtherCopy != nil {
+                            Button(SetupState.useThisCopysHelperTitle) { Task { await model.registerHelper() } }
+                                .disabled(model.isInstallBusy)
                         }
                     }
                 }

@@ -209,8 +209,12 @@ public struct HelperJobAssessment: Sendable, Equatable {
         /// (`launchctl kickstart`; InstallService registers it again only if launchd then reports it
         /// can't start it).
         case start
-        /// Running an older helper that launchd starts this build's in place of (same Team ID):
-        /// `launchctl kickstart -k`, registering again only if launchd then refuses it.
+        /// Running an older helper (or one whose executable is now in the Trash) that launchd starts
+        /// this build's in place of — the requirement recorded at registration covers this build's
+        /// helper: the same Team ID, or for ad-hoc code the same cdhash (an update that left the
+        /// helper unchanged, e.g. Finder's Replace, which moved the old app and its running helper's
+        /// file to the Trash): `launchctl kickstart -k`, registering again only if launchd then
+        /// refuses it or starts the old copy's again.
         case restart
         /// Register again — the login item (unregister, then register), or the fallback plist
         /// (written again and bootstrapped) — for the reason given.
@@ -251,8 +255,10 @@ public struct HelperJobAssessment: Sendable, Equatable {
                     // Registering a helper whose signature can't be read would likely fail, and the old one works.
                     return HelperJobAssessment(problem: .outdated(detail), action: .leave("this LivePaper's helper signature can't be read"))
                 }
-                if case .thisCopy(let record?) = registration, let recorded = record.helper, !helper.isAdHoc,
-                   recorded.passesRecordedRequirement(of: helper) {
+                // launchd starts this copy's helper under the recorded requirement: a restart is
+                // enough (no unregister, no new "can run in the background" alert) — for ad-hoc code
+                // when the helper on disk is the one registered (the same cdhash).
+                if case .thisCopy(let record?) = registration, let recorded = record.helper, recorded.passesRecordedRequirement(of: helper) {
                     return HelperJobAssessment(problem: .outdated(detail), action: .restart)
                 }
                 return HelperJobAssessment(problem: .outdated(detail), action: .reregister("it runs an older build: \(detail)"))

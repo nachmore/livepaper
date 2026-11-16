@@ -386,11 +386,16 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
     registering worked, so a register that fails after the unregister is retried at the next launch
     (and reported) instead of leaving the helper unregistered and taken for "not set up".
   * `HelperJobAssessment` decides: a helper that runs this copy's current code is left alone (an update
-    that leaves the helper byte-identical changes nothing); one that runs older code is registered again
-    when it is ad-hoc signed, and only restarted (`launchctl kickstart -k`) when the registration
-    recorded the same Team ID; a stopped job is started (`launchctl kickstart`) when the recorded
+    that leaves the helper byte-identical changes nothing); one that runs older code, or whose
+    executable is gone or in the Trash, is only restarted (`launchctl kickstart -k`) when this copy
+    registered it and the recorded signature covers this copy's helper — the same Team ID, or for
+    ad-hoc code the same cdhash (an update by Finder's Replace or trash-and-copy with an unchanged
+    helper: the old process runs from the Trash, as `proc_pidpath` follows the file) — and registered
+    again otherwise; a stopped job is started (`launchctl kickstart`) when the recorded
     signature still covers this helper, and registered again when it doesn't (without a record: when an
-    older build registered it). A start or restart that launchd then refuses is registered again; one
+    older build registered it). A start or restart that launchd then refuses — or a restart after which
+    the old copy's helper runs again — is registered again; a start counts as done when the job then
+    runs another copy's helper (that copy's job, started from this one); one
     that just doesn't show a running helper is reported, not registered again, and a helper that still
     runs is never ended for a registration this copy's own signature would make fail (a quick
     `SecStaticCodeCheckValidity` of the app). Registering again:
@@ -410,7 +415,9 @@ Bridge messages host→page: `LivePaper.host.config(obj)`, `.pause()`, `.resume(
     error banner with Try Again. Both go once a status read shows the helper running.
   * Settings › Lock and onboarding show "LivePaper helper can't start" with **Repair Helper** (otherwise
     Start Helper): `registerHelper`, the same logic on the user's request — which may take the helper
-    over from another copy.
+    over from another copy. While another copy's helper runs (the row is done), Settings › Lock says so
+    and offers **Use This Copy's Helper**: `registerHelper` then registers the login item from this
+    copy (the only way to move it while that helper works; the automatic repair never does).
   * `livepaper doctor` reports "can't start: launchd reports …" or an unfinished re-registration with
     the fix (open LivePaper; else Login Items off/on or log out and in), and warns about an outdated
     running helper or another copy's. `scripts/dev-install.sh` can't use SMAppService: it compares the
@@ -850,7 +857,7 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   (once per launch, only in the copy the helper belongs to) when launchd can't run this build's helper.
 * *Settings* — Screen Saver (status, setup), Lock (**one** toggle "Use ⌃⌘Q and the lock key for
   LivePaper lock" + the optional extra shortcut recorder + helper status with Start Helper / Repair
-  Helper / Open Login Items), Performance (profile),
+  Helper / Open Login Items, or Use This Copy's Helper while another copy's runs), Performance (profile),
   AI (default agent, per-agent model, time limit, custom command), About (+ Uninstall).
 * **Onboarding** (first launch; re-runnable, every step idempotent and showing live status), 4
   steps: Welcome → Screen saver (install, select — with backup, or a guided one-click step in

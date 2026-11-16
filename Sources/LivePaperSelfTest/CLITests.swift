@@ -226,7 +226,8 @@ extension SelfTests {
             try fakeApp(other, helper: "helper A")
             (r, calls) = try install(previous: "old helper", loginJob: running, startedFrom: "helper A",
                                      runningExe: other.appendingPathComponent("Contents/Helpers/LivePaperHelper"))
-            try expect(r.err.contains("belongs to another copy of LivePaper"), r.out + r.err)
+            try expect(r.err.contains("belongs to another copy of LivePaper") && r.err.contains("Settings › Lock › Use This Copy’s Helper"),
+                       r.out + r.err)
             try expect(kickstarts(calls).isEmpty, "\(calls)")
             // A Team ID-signed helper that changed: restarted (launchd accepts it under the same requirement).
             (r, calls) = try install(new: "new team helper", previous: "old team helper", loginJob: running, startedFrom: "old team helper")
