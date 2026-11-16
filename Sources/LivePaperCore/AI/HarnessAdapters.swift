@@ -29,9 +29,13 @@ public struct HarnessContext: Sendable {
     /// after LivePaper's own options and before any positional prompt argument. Ignored by custom
     /// harnesses, whose template already is the complete command.
     public var extraArguments: [String]
-    public init(workspace: AIWorkspace, model: String?, searchPath: [String], extraArguments: [String] = []) {
+    /// The session's reference images (workspace-relative, the one to animate first), for harnesses
+    /// that take images on the command line (Codex `-i`, a custom template's `{references}`).
+    public var referenceImages: [HarnessReferenceImage]
+    public init(workspace: AIWorkspace, model: String?, searchPath: [String], extraArguments: [String] = [],
+                referenceImages: [HarnessReferenceImage] = []) {
         self.workspace = workspace; self.model = model?.trimmingCharacters(in: .whitespaces).nilIfEmpty
-        self.searchPath = searchPath; self.extraArguments = extraArguments
+        self.searchPath = searchPath; self.extraArguments = extraArguments; self.referenceImages = referenceImages
     }
 }
 
@@ -66,11 +70,16 @@ public enum HarnessAdapters {
 /// (`acceptEdits` would also auto-approve edits and mv/cp anywhere in the workspace — bin/livepaper
 /// included — and a bare `Write`/`Edit` allow rule approves writes anywhere on disk.) Claude Code
 /// checks each part of a compound command, so `livepaper check scene && rm …` is refused.
+///
+/// Reference images: Claude Code has no image option; its Read tool returns image files to the
+/// model as images, and `Read(./**)` covers ./references. The copies and the picture to animate
+/// (scene/assets/reference.*) are protected by deny rules, which win over the ./scene allow rule.
 public struct ClaudeAdapter: HarnessAdapter {
     public static let allowedTools = (["Read(./**)", "Edit(./scene/**)"]
         + (AISessionPolicy.commands + ["help"]).map { "Bash(livepaper \($0) *)" }).joined(separator: ",")
     public static let disallowedTools = ["WebFetch", "WebSearch", "Edit(./bin/**)", "Edit(./sdk/**)", "Edit(./.livepaper/**)",
-                                         "Edit(./.kiro/**)", "Edit(./AGENTS.md)", "Edit(./CLAUDE.md)", "Edit(./TASK.md)"].joined(separator: ",")
+                                         "Edit(./.kiro/**)", "Edit(./AGENTS.md)", "Edit(./CLAUDE.md)", "Edit(./TASK.md)",
+                                         "Edit(./references/**)", "Edit(./scene/assets/reference.*)"].joined(separator: ",")
     public init() {}
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
@@ -91,13 +100,36 @@ public struct ClaudeAdapter: HarnessAdapter {
 /// It also blocks the Unix socket `livepaper check` uses to reach the render server; instead of
 /// opening the sandbox to the whole network for it, the CLI leaves its requests in the
 /// workspace's render spool and the session runner relays them (RenderSpool / RenderRelay).
+///
+/// Reference images are attached to the first message with `-i`. That option takes any number of
+/// values (and splits them at commas), so every `-i <path>` comes straight after `exec`, where the
+/// next token is always another option, and paths are workspace-relative. Requests past a few MB
+/// fail on some providers ("request_too_large"), so only the first images (ref-01 — the one to
+/// animate, if any — then ref-02, …) are attached, up to `maxAttachedBytes`. Codex labels them
+/// "[Image #1]", "[Image #2]", … by position only, so the attached ones are always a prefix of
+/// TASK.md's table, which says attachment k is ref-0k and to open the rest with view_image.
 public struct CodexAdapter: HarnessAdapter {
+    public static let maxAttachedBytes = 6 << 20
     public init() {}
+
+    /// The images passed with `-i`: the longest prefix whose total stays within `maxAttachedBytes`.
+    public static func attachedImages(_ images: [HarnessReferenceImage]) -> [HarnessReferenceImage] {
+        var total = 0
+        var out: [HarnessReferenceImage] = []
+        for image in images {
+            guard total + image.byteCount <= maxAttachedBytes else { break }
+            total += image.byteCount
+            out.append(image)
+        }
+        return out
+    }
 
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         let ws = context.workspace
-        var args = ["exec", "-C", ws.root.path, "-s", "workspace-write", "--skip-git-repo-check", "--json",
-                    "-o", ws.lastMessageFile.path]
+        var args = ["exec"]
+        for image in Self.attachedImages(context.referenceImages) { args += ["-i", image.path] }
+        args += ["-C", ws.root.path, "-s", "workspace-write", "--skip-git-repo-check", "--json",
+                 "-o", ws.lastMessageFile.path]
         if let model = context.model { args += ["-m", model] }
         args += context.extraArguments
         args.append("-")
@@ -149,12 +181,15 @@ public struct KiroAdapter: HarnessAdapter {
 /// A user-defined command template, e.g. `mytool --prompt-file {prompt_file} --cwd {workspace}`.
 ///
 /// Placeholders: `{prompt_file}` (TASK.md), `{workspace}`, `{scene}`, `{model}`, `{instructions}`
-/// (the fixed bootstrap sentence). A token that is exactly `{model}` is dropped when no model is
-/// chosen. Quoting follows POSIX shell rules ('…', "…", backslash), but no shell ever runs it.
-/// TASK.md is also connected to stdin.
+/// (the fixed bootstrap sentence), `{references}` (the reference images' absolute paths, ref-01
+/// first). A token
+/// that is exactly `{model}` is dropped when no model is chosen; a token that is exactly
+/// `{references}` becomes one argument per image (none without images), and inside a longer token
+/// it becomes the paths joined with commas. Quoting follows POSIX shell rules ('…', "…",
+/// backslash), but no shell ever runs it. TASK.md is also connected to stdin.
 public struct CustomAdapter: HarnessAdapter {
     /// Every placeholder a template may use.
-    public static let placeholders = ["{prompt_file}", "{workspace}", "{scene}", "{model}", "{instructions}"]
+    public static let placeholders = ["{prompt_file}", "{workspace}", "{scene}", "{model}", "{instructions}", "{references}"]
 
     public init() {}
 
@@ -176,11 +211,16 @@ public struct CustomAdapter: HarnessAdapter {
     public func invocation(for harness: AIHarness, context: HarnessContext) throws -> HarnessInvocation {
         let template = harness.customTemplate ?? harness.executable
         let ws = context.workspace
+        let images = context.referenceImages.map { ws.root.appendingPathComponent($0.path).path }
         let values = ["{prompt_file}": ws.taskFile.path, "{workspace}": ws.root.path, "{scene}": ws.scene.path,
-                      "{model}": context.model ?? "", "{instructions}": HarnessAdapters.bootstrapInstruction]
+                      "{model}": context.model ?? "", "{instructions}": HarnessAdapters.bootstrapInstruction,
+                      "{references}": images.joined(separator: ",")]
         var tokens = try CommandTemplate.tokenize(template)
         if context.model == nil { tokens.removeAll { $0 == "{model}" } }
-        tokens = tokens.map { token in values.reduce(token) { $0.replacingOccurrences(of: $1.key, with: $1.value) } }
+        tokens = tokens.flatMap { token -> [String] in
+            if token == "{references}" { return images }
+            return [values.reduce(token) { $0.replacingOccurrences(of: $1.key, with: $1.value) }]
+        }
         guard let program = tokens.first, !program.isEmpty else { throw AIError.invalidTemplate("the command is empty") }
         guard let executable = Self.resolve(program, searchPath: context.searchPath) else { throw AIError.harnessNotFound(program) }
         return HarnessInvocation(executable: executable, arguments: Array(tokens.dropFirst()),

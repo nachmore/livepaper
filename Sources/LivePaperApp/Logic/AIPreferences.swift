@@ -69,6 +69,20 @@ enum PromptComposer {
         prompt.trimmingCharacters(in: .whitespacesAndNewlines).count >= minimumPromptLength
     }
 
+    /// With reference images any prompt will do, even none (`effectivePrompt` fills it in).
+    static func isUsable(_ prompt: String, hasReferences: Bool) -> Bool {
+        hasReferences || isUsable(prompt)
+    }
+
+    /// The prompt to send: what the user typed, or — when they typed nothing but attached images —
+    /// the default request for those images (ReferencePrompts.defaultPrompt; `modify`: worded as a
+    /// change to the scene, which the agent should keep).
+    static func effectivePrompt(_ prompt: String, roles: [AIReferenceRole], modify: Bool = false) -> String {
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.isEmpty else { return trimmed }
+        return ReferencePrompts.defaultPrompt(roles: roles, modify: modify) ?? trimmed
+    }
+
     /// Builds the prompt for another attempt: the original request plus the user's feedback.
     static func retry(original: String, feedback: String) -> String {
         let o = original.trimmingCharacters(in: .whitespacesAndNewlines)

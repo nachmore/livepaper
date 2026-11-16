@@ -21,9 +21,10 @@ struct UsageError: Error, CustomStringConvertible {
 }
 
 /// Parsed command-line arguments: positionals, `--flag`s and `--option value` / `--option=value`.
+/// Options may be repeated: `string` gives the last value, `strings` all of them in order.
 struct Arguments {
     var positional: [String] = []
-    private var values: [String: String] = [:]
+    private var values: [String: [String]] = [:]
     private var flags: Set<String> = []
 
     init(_ args: [String], flags allowedFlags: Set<String> = [], options allowedOptions: Set<String> = []) throws {
@@ -38,7 +39,7 @@ struct Arguments {
                 flags.insert(name)
             } else if allowedOptions.contains(name) {
                 guard let v = inline ?? rest.popFirst() else { throw UsageError("--\(name) needs a value") }
-                values[name] = v
+                values[name, default: []].append(v)
             } else {
                 throw UsageError("unknown option --\(name)")
             }
@@ -46,23 +47,26 @@ struct Arguments {
     }
 
     func flag(_ name: String) -> Bool { flags.contains(name) }
-    func string(_ name: String) -> String? { values[name] }
+    /// The option's value (the last one when it was given more than once).
+    func string(_ name: String) -> String? { values[name]?.last }
+    /// Every value of a repeatable option, in order.
+    func strings(_ name: String) -> [String] { values[name] ?? [] }
 
     func double(_ name: String) throws -> Double? {
-        guard let s = values[name] else { return nil }
+        guard let s = string(name) else { return nil }
         guard let v = Double(s), v.isFinite else { throw UsageError("--\(name) must be a number (got \"\(s)\")") }
         return v
     }
 
     func int(_ name: String) throws -> Int? {
-        guard let s = values[name] else { return nil }
+        guard let s = string(name) else { return nil }
         guard let v = Int(s) else { throw UsageError("--\(name) must be a whole number (got \"\(s)\")") }
         return v
     }
 
     /// `--size 1512x982`
     func size(_ name: String) throws -> (width: Double, height: Double)? {
-        guard let s = values[name] else { return nil }
+        guard let s = string(name) else { return nil }
         let parts = s.lowercased().split(separator: "x")
         guard parts.count == 2, let w = Double(parts[0]), let h = Double(parts[1]), w > 0, h > 0 else {
             throw UsageError("--\(name) must look like 1512x982 (got \"\(s)\")")
@@ -130,6 +134,10 @@ enum CLI {
             return ExitCode.failed
         } catch let e as LibraryError {
             // Unknown id, built-in (read-only) scene, invalid package: the request can't be done as asked.
+            stderr("livepaper \(cmd.name): \(e.localizedDescription)")
+            return ExitCode.failed
+        } catch let e as ReferenceError {
+            // A reference image LivePaper won't take (missing, too large, not an image, …).
             stderr("livepaper \(cmd.name): \(e.localizedDescription)")
             return ExitCode.failed
         } catch {

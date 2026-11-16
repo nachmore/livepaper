@@ -71,7 +71,9 @@ public final class AIService: AIServicing, @unchecked Sendable {
         return found + [Self.customHarness(template: template)]
     }
 
-    public func start(_ request: AISessionRequest, harness: AIHarness, model: String?) throws -> AISessionHandle {
+    public func start(_ request: AISessionRequest, references refs: [PreparedReference], harness: AIHarness,
+                      model: String?) throws -> AISessionHandle {
+        try ReferencePrompts.validate(refs)
         let settings = loadSettings()
         // Old workspaces are kept for debugging for a week; tidy up once per app run.
         let firstStart = lock.withLock { () -> Bool in
@@ -81,7 +83,8 @@ public final class AIService: AIServicing, @unchecked Sendable {
         }
         if firstStart { workspaceBuilder.pruneWorkspaces() }
         let id = Self.makeSessionID()
-        let workspace = try workspaceBuilder.build(request, sessionID: id)
+        let built = try workspaceBuilder.buildSession(request, references: refs, sessionID: id)
+        let workspace = built.workspace
         let detector = self.detector
         let deps = AISession.Dependencies(
             checker: checker,
@@ -103,8 +106,11 @@ public final class AIService: AIServicing, @unchecked Sendable {
             prepareRenderer: Self.rendererWarmUp(for: checker),
             renderRelay: Self.renderRelay(for: checker, workspace: workspace))
         let chosenModel = model ?? settings.models[harness.kind.rawValue]
-        let session = AISession(id: id, workspace: workspace, request: request, harness: harness, model: chosenModel, dependencies: deps)
-        log.info("starting AI session \(id, privacy: .public) with \(harness.name, privacy: .public)")
+        let session = AISession(id: id, workspace: workspace, request: request, harness: harness, model: chosenModel, dependencies: deps,
+                                references: built.references, recordedPrompt: built.taskPrompt)
+        // Counts only: names and paths of the user's pictures never reach the log.
+        let counts = built.references.counts.map { " · \($0.reference) reference, \($0.animate) to animate" } ?? ""
+        log.info("starting AI session \(id, privacy: .public) with \(harness.name, privacy: .public)\(counts, privacy: .public)")
         session.start()
         return session
     }

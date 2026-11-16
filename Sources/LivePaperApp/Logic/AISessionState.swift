@@ -127,6 +127,9 @@ struct AISessionState: Equatable {
                 stillRevisions[url, default: 0] += 1
             }
             stills.append(url)
+            // The check's motion heat maps join the filmstrip but aren't counted as stills (the
+            // check's summary doesn't either).
+            guard !SceneChecker.isMotionMap(url) else { break }
             if case .stills(let n) = entries.last?.kind {
                 replaceLast(.stills(n + 1), date)
             } else {

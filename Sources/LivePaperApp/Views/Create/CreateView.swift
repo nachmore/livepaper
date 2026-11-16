@@ -4,6 +4,10 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct CreateView: View {
+    /// The snapshot harness starts the Describe-it card with images attached.
+    var describeTray: ReferenceTray?
+    var describePrompt = ""
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -15,7 +19,7 @@ struct CreateView: View {
                 }
                 AdaptiveStack(threshold: 780, weights: [0.42, 0.58]) {
                     VideoCreateCard()
-                    DescribeCreateCard()
+                    DescribeCreateCard(tray: describeTray, prompt: describePrompt)
                 }
             }
             .padding(28)
@@ -170,17 +174,32 @@ enum VideoFiles {
 
 struct DescribeCreateCard: View {
     @Environment(AppModel.self) private var model
-    @State private var prompt = ""
+    @State private var prompt: String
     @State private var harnessID: String?
     @State private var modelName = ""
+    @State private var tray: ReferenceTray
+    @State private var dropTargeted = false
+
+    /// `tray` and `prompt` let the snapshot harness start with images attached.
+    @MainActor
+    init(tray: ReferenceTray? = nil, prompt: String = "") {
+        _tray = State(initialValue: tray ?? ReferenceTray())
+        _prompt = State(initialValue: prompt)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             CardHeading(symbol: "sparkles", title: "Describe it",
                         subtitle: "An AI agent on your Mac writes an animated scene, checks it renders well and stays light on the battery.",
                         tint: .purple)
-            PromptEditor(text: $prompt, placeholder: "Describe the scene: what moves, the mood, the colours\u{2026}")
-                .frame(minHeight: 120, idealHeight: 140)
+            VStack(alignment: .leading, spacing: 8) {
+                PromptEditor(text: $prompt, placeholder: "Describe the scene: what moves, the mood, the colours\u{2026}",
+                             onImages: { inputs, notes in tray.add(inputs); tray.addNotes(notes) },
+                             onDropTargeted: { dropTargeted = $0 })
+                    .frame(minHeight: 120, idealHeight: 140)
+                ReferenceSuggestionBar(tray: tray)
+            }
+            ReferenceTrayView(tray: tray, dropTargeted: dropTargeted)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Need an idea?").font(.callout).foregroundStyle(.secondary)
                 FlowLayout(spacing: 6) {
@@ -203,7 +222,7 @@ struct DescribeCreateCard: View {
             }
             HarnessPickerRow(harnessID: $harnessID, modelName: $modelName)
             HStack {
-                Text("Usually takes 3\u{2013}10 minutes. You can keep working meanwhile.")
+                Text(ReferenceTrayText.preparing(tray.preparingCount, busy: tray.isBusy) ?? "Usually takes 3\u{2013}10 minutes. You can keep working meanwhile.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -212,25 +231,47 @@ struct DescribeCreateCard: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .keyboardShortcut(.return, modifiers: .command)
-                .disabled(!PromptComposer.isUsable(prompt) || selectedHarness == nil)
-                .help("Start the agent (\u{2318}\u{21A9})")
+                .disabled(!canGenerate)
+                .help(tray.isBusy ? "Waiting for the images to be prepared" : "Start the agent (\u{2318}\u{21A9})")
             }
         }
         .padding(20)
         .frame(maxHeight: .infinity, alignment: .top)
         .card()
+        .referenceDropTarget(tray, isTargeted: $dropTargeted, cornerRadius: 16)
         .onAppear {
             if harnessID == nil { harnessID = model.preferredHarness?.id }
+            let banners = model.banners
+            tray.onFailures = { messages in
+                if let b = ReferenceTrayText.failureBanner(messages) { banners.post(.warning, b.title, message: b.message) }
+            }
+        }
+        // Paths typed into the prompt: offered as "Attach" suggestions once typing pauses.
+        .task(id: prompt) {
+            try? await Task.sleep(nanoseconds: 400_000_000)
+            guard !Task.isCancelled else { return }
+            await tray.updateSuggestions(for: prompt)
         }
     }
 
     private var selectedHarness: AIHarness? { model.availableHarnesses.first { $0.id == harnessID } }
 
+    private var canGenerate: Bool {
+        !model.isStartingSession && !tray.isBusy && selectedHarness != nil &&
+            PromptComposer.isUsable(prompt, hasReferences: !tray.references.isEmpty)
+    }
+
     private func generate() {
-        guard let harness = selectedHarness, PromptComposer.isUsable(prompt) else { return }
+        guard let harness = selectedHarness, canGenerate else { return }
+        let references = tray.references
+        let request = PromptComposer.effectivePrompt(prompt, roles: references.map(\.role))
         let trimmed = modelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        if model.startSession(.create(prompt: prompt), harness: harness, model: trimmed.isEmpty ? nil : trimmed) != nil {
-            prompt = ""
+        Task {
+            if await model.startSession(.create(prompt: request), references: references, harness: harness,
+                                        model: trimmed.isEmpty ? nil : trimmed) != nil {
+                prompt = ""
+                tray.clear()
+            }
         }
     }
 }

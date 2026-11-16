@@ -29,6 +29,8 @@ public struct CheckBudgets: Sendable, Equatable {
     public var minLiveFpsFraction: Double = 0.85
     /// How alive the scene must feel: coverage, spread, busyness and flicker (MotionAnalysis.swift).
     public var motion = MotionBudgets()
+    /// How much an "animate" scene's stills must look like the picture (ReferenceResemblance.swift).
+    public var reference = ReferenceBudgets()
     public init() {}
 }
 
@@ -62,6 +64,8 @@ public struct CheckPlan: Sendable, Equatable {
     public var motionSizes: [CheckFrame] = []
     public var motionTimes: [Double] = MotionAnalysis.defaultTimes
     public var motionGaps: [Double] = MotionAnalysis.defaultGaps
+    /// Stills (a subset of `stills`) compared with the picture to animate, when the check has one.
+    public var resemblanceFrames: [CheckFrame] = []
 
     public static let primary = CheckFrame(1512, 982, dpr: 2, t: 0)
     public static let ultraWide = CheckFrame(5120, 1440, dpr: 1, t: 0)
@@ -75,8 +79,11 @@ public struct CheckPlan: Sendable, Equatable {
         stills += [12, 90, 600].map { CheckFrame(2560, 720, dpr: 1, t: $0) }     // 32:9
         stills += [12, 90].map { CheckFrame(1280, 1024, dpr: 1, t: $0) }         // 5:4
         stills += [CheckFrame(320, 200, dpr: 2, t: 12)]                          // thumbnail-sized
+        let resemblance = [4, 12, 90, 600].map { CheckFrame(1512, 982, dpr: 2, t: $0) } + [12, 90].map { CheckFrame(2560, 720, dpr: 1, t: $0) }
+            + [CheckFrame(1280, 1024, dpr: 1, t: 12)]
         return CheckPlan(times: times, stills: stills, probeFrames: 30, probeTimes: Array(times.dropLast()),
-                         benchSizes: [primary, ultraWide], benchFrames: 120, power: power, motionSizes: [motionWide, motionSquare])
+                         benchSizes: [primary, ultraWide], benchFrames: 120, power: power, motionSizes: [motionWide, motionSquare],
+                         resemblanceFrames: resemblance)
     }
 
     /// A fast loop for iterating: three stills (+ one 32:9), motion at 16:9 only, one bench, no ultra-wide bench.
@@ -86,7 +93,8 @@ public struct CheckPlan: Sendable, Equatable {
         var bench = primary
         bench.t = 30
         return CheckPlan(times: times, stills: stills, probeFrames: 0, probeTimes: [], benchSizes: [bench],
-                         benchFrames: 60, power: power, motionSizes: [motionWide])
+                         benchFrames: 60, power: power, motionSizes: [motionWide],
+                         resemblanceFrames: [4, 30].map { CheckFrame(1512, 982, dpr: 2, t: $0) } + [CheckFrame(2560, 720, dpr: 1, t: 30)])
     }
 }
 
@@ -99,6 +107,8 @@ public struct CheckResults: Sendable {
     /// One `motion` request per motion size (`frame.t` unused).
     public var motion: [(frame: CheckFrame, response: RenderResponse)] = []
     public var live: RenderResponse?
+    /// The stills compared with the picture to animate (only when the check had a reference target).
+    public var reference: ReferenceMeasurement?
     public init() {}
 }
 
@@ -149,7 +159,14 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
         }
 
         let plan = options.quick ? CheckPlan.quick(power: options.power) : CheckPlan.standard(power: options.power)
-        let results = try await run(plan, html: html, checkDir: checkDir)
+        var results = try await run(plan, html: html, checkDir: checkDir)
+        if let target = options.reference {
+            progress?("comparing \(plan.resemblanceFrames.count) stills with the picture to animate")
+            let wanted = Set(plan.resemblanceFrames)
+            let stills = results.stills.filter { wanted.contains($0.frame) && $0.response.ok }.map { (frame: $0.frame, path: $0.path) }
+            results.reference = ReferenceResemblance.measure(package: pkg, target: target, stills: stills, clock: manifest.clock.position,
+                                                               budgets: budgets.reference)
+        }
         var report = Self.evaluate(results, plan: plan, budgets: budgets, quick: options.quick)
         report.problems = problems + report.problems
         report.passed = report.problems.isEmpty
@@ -210,6 +227,13 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
 
     /// "motion-1280x720@0.5.png": the heat map of one motion size in .check/.
     public static func motionFileName(_ size: CheckFrame) -> String { "motion-\(size.sizeLabel).png" }
+
+    /// A motion heat map (`motionFileName`), not a still: progress lines count them apart, as the
+    /// check's summary does ("13 PNGs" are the stills).
+    public static func isMotionMap(_ url: URL) -> Bool {
+        let name = url.lastPathComponent
+        return name.hasPrefix("motion-") && name.lowercased().hasSuffix(".png")
+    }
 
     static func heaviestTime(_ probes: [(frame: CheckFrame, response: RenderResponse)]) -> Double? {
         probes.filter { $0.response.ok && $0.response.benchMs != nil }
@@ -289,6 +313,15 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
            hi.1 <= b.maxClockLuma {
             warnings.append("The area behind the clock changes a lot (brightness \(fmt(lo.1))–\(fmt(hi.1))/255 between \(lo.0.label) " +
                             "and \(hi.0.label)). Prefer calm, low-contrast motion behind the clock.")
+        }
+
+        // An "animate this exact image" scene: do the stills still show the user's picture?
+        var reference: ReferenceCheckSummary?
+        if let measured = results.reference {
+            let v = ReferenceResemblance.verdict(measured, budgets: b.reference)
+            problems += v.problems
+            warnings += v.warnings
+            reference = v.summary
         }
 
         // Motion: is the scene gently alive everywhere, without being busy or flickering?
@@ -377,7 +410,7 @@ public final class SceneChecker: SceneChecking, @unchecked Sendable {
                             "before you finish.")
         }
         return CheckReport(passed: problems.isEmpty, problems: problems, warnings: warnings, jsErrors: jsErrors, stills: stills,
-                           benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion)
+                           benchMs: benchMs, energyMw: energy, motion: results.motion.isEmpty ? nil : motion, reference: reference)
     }
 
     // MARK: - Manifest

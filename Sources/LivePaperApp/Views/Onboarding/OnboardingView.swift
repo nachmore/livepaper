@@ -484,7 +484,10 @@ private struct LockPage: View {
                 case (.helper, .needed) where model.setupState.helperNeedsApproval:
                     Button("Open Login Items") { SystemActions.openLoginItemsSettings() }
                 case (.helper, .needed):
-                    Button("Start Helper") { Task { await model.registerHelper() } }
+                    Button(model.setupState.helperActionTitle) { Task { await model.registerHelper() } }
+                        .disabled(model.isInstallBusy)
+                case (.helper, .done) where model.setupState.helperOtherCopy != nil:
+                    Button(SetupState.useThisCopysHelperTitle) { Task { await model.registerHelper() } }
                         .disabled(model.isInstallBusy)
                 default:
                     EmptyView()

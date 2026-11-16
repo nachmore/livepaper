@@ -33,6 +33,21 @@ final class ThumbnailCache: @unchecked Sendable {
         return image
     }
 
+    /// Images held in memory (a prepared reference image's vision copy), cached under `id`: the
+    /// bytes behind an id never change, so there are no revisions.
+    static func key(dataID id: String, maxPixel: Int) -> String { "data:\(id)#\(maxPixel)" }
+
+    func load(data: Data, id: String, maxPixel: Int) async -> CGImage? {
+        let key = Self.key(dataID: id, maxPixel: maxPixel)
+        if let hit = cached(key) { return hit }
+        let image = await Task.detached(priority: .utility) { () -> CGImage? in
+            guard let src = CGImageSourceCreateWithData(data as CFData, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+            return Self.thumbnail(src, maxPixel: maxPixel)
+        }.value
+        if let image { cache.setObject(image, forKey: key as NSString) }
+        return image
+    }
+
     private func store(_ image: CGImage, key: String, slot: String, revision: Int) {
         lock.lock(); defer { lock.unlock() }
         if let current = newest[slot] {
@@ -46,6 +61,10 @@ final class ThumbnailCache: @unchecked Sendable {
 
     private static func decode(_ url: URL, maxPixel: Int) -> CGImage? {
         guard let src = CGImageSourceCreateWithURL(url as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return thumbnail(src, maxPixel: maxPixel)
+    }
+
+    private static func thumbnail(_ src: CGImageSource, maxPixel: Int) -> CGImage? {
         let opts: [CFString: Any] = [kCGImageSourceCreateThumbnailFromImageAlways: true,
                                      kCGImageSourceThumbnailMaxPixelSize: maxPixel,
                                      kCGImageSourceCreateThumbnailWithTransform: true,

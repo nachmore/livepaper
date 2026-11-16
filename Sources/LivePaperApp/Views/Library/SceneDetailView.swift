@@ -298,6 +298,13 @@ struct CheckReportSummary: View {
                     InfoRow(label: BenchLabel.title(row.key), value: LPFormat.milliseconds(row.ms) + " / frame")
                 }
                 if let mw = report.energyMw { InfoRow(label: "Energy on battery", value: LPFormat.power(milliwatts: mw)) }
+                if let reference = report.reference {
+                    let help = "How closely the stills match the picture to animate (1 = identical; below 0.35 fails, 0.70 or more is the aim)"
+                    GridRow {
+                        Text("Looks like the picture").foregroundStyle(.secondary).gridColumnAlignment(.trailing).help(help)
+                        Text(LPFormat.resemblance(reference)).monospacedDigit().gridColumnAlignment(.leading).help(help)
+                    }
+                }
                 InfoRow(label: "Checked", value: report.checkedAt.formatted(.relative(presentation: .named)))
             }
             .font(.callout)
@@ -327,7 +334,7 @@ private struct ProvenanceRow: View {
                 if let summary = entry.summary {
                     Text(summary).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
-                let via = [entry.harness, entry.model].compactMap { $0 }.joined(separator: " \u{00B7} ")
+                let via = [entry.harness, entry.model, entry.referencesText].compactMap { $0 }.joined(separator: " \u{00B7} ")
                 if !via.isEmpty { Text(via).font(.caption).foregroundStyle(.tertiary) }
             }
         }

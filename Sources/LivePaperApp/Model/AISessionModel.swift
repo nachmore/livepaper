@@ -17,6 +17,11 @@ final class AISessionModel: Identifiable {
 
     let id: String
     let request: AISessionRequest
+    /// The prepared images the session was started with, in tray order (kept so "Try Again" can
+    /// reuse them without opening the originals again, and for the session view's thumbnails). Only
+    /// the picture to animate keeps its full-size master (`slimmed`); once the session is accepted
+    /// that goes too.
+    private(set) var references: [PreparedReference]
     let harness: AIHarness
     let model: String?
     let startedAt: Date
@@ -40,18 +45,35 @@ final class AISessionModel: Identifiable {
     var isRunning: Bool { !state.phase.isTerminal }
     var isModify: Bool { if case .modify = request { return true } else { return false } }
     var targetSceneID: String? { if case .modify(let id, _) = request { return id } else { return nil } }
-
-    init(handle: AISessionHandle, request: AISessionRequest, harness: AIHarness, model: String?,
+    /// nil without reference images.
+    var referenceCounts: ReferenceCounts? { references.isEmpty ? nil : ReferenceCounts(roles: references.map(\.role)) }
+    init(handle: AISessionHandle, request: AISessionRequest, references: [PreparedReference] = [], harness: AIHarness, model: String?,
          timeout: TimeInterval, clonedFrom: String? = nil, now: Date = Date()) {
         self.id = handle.id
         self.handle = handle
         self.request = request
+        self.references = Self.slimmed(references)
         self.harness = harness
         self.model = model
         self.timeout = timeout
         self.clonedFrom = clonedFrom
         self.startedAt = now
     }
+
+    /// `refs` holding only what a session still needs: a reference image's master (≤ 3840 px, several
+    /// MB) is only ever used for the picture to animate, and roles don't change within a session or
+    /// on Try Again, so the others share their vision copy's bytes instead (copy-on-write Data).
+    static func slimmed(_ refs: [PreparedReference], keepingAnimate: Bool = true) -> [PreparedReference] {
+        refs.map { r in
+            guard !(keepingAnimate && r.role == .animate), r.master != r.vision else { return r }
+            return PreparedReference(id: r.id, role: r.role, displayName: r.displayName, requestedPath: r.requestedPath, originPath: r.originPath,
+                                     original: r.original, master: r.vision, vision: r.vision, summary: r.summary)
+        }
+    }
+
+    /// After the session was accepted (no Try Again any more): drops the picture to animate's
+    /// master too; the thumbnails come from the vision copies.
+    func releasePictureToAnimate() { references = Self.slimmed(references, keepingAnimate: false) }
 
     /// Starts consuming events. `onFinish` runs once when the session reaches a terminal phase.
     func start(onFinish: @escaping @MainActor (AISessionModel) -> Void) {

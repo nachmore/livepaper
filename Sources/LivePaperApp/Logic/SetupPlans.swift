@@ -19,6 +19,25 @@ struct SetupState: Equatable, Sendable {
 
     /// The helper is registered as a login item but macOS waits for the user to allow it.
     var helperNeedsApproval: Bool { !install.helperRunning && install.helperLoginItem == .requiresApproval }
+
+    /// The helper is set up, but launchd can't start it (after an update of an ad-hoc-signed
+    /// LivePaper), or a re-registration left it unregistered: "Repair Helper" registers it again.
+    var helperCannotStart: Bool { !install.helperRunning && !helperNeedsApproval && install.helperProblem?.cannotStart == true }
+
+    /// A repair unregistered the helper's login item, and registering it again didn't finish.
+    var helperUnregistered: Bool { if case .unregistered? = install.helperProblem { return true }; return false }
+
+    /// What the helper row's button says ("Repair Helper" when launchd can't start it).
+    var helperActionTitle: String { helperCannotStart ? "Repair Helper" : "Start Helper" }
+
+    /// The helper that runs is another copy of LivePaper's (its path): Settings › Lock offers
+    /// "Use This Copy's Helper", which registers the login item from this copy.
+    var helperOtherCopy: String? {
+        guard install.helperRunning, case .otherCopy(let app)? = install.helperProblem else { return nil }
+        return app
+    }
+
+    static let useThisCopysHelperTitle = "Use This Copy\u{2019}s Helper"
 }
 
 /// The onboarding pages. Every page is idempotent: it shows live status and only offers the
@@ -101,12 +120,23 @@ enum SetupChecklist {
                                : "Makes \u{2303}\u{2318}Q, Apple menu \u{203A} Lock Screen and the lock key start your scene before locking. No permissions needed.",
                            state: state.lockKeysShowScene ? .done : .needed),
                 SetupCheck(id: .password, title: "Password required immediately", detail: passwordDetail, state: passwordState),
-                SetupCheck(id: .helper, title: state.helperNeedsApproval ? "LivePaper helper waiting for approval" : "LivePaper helper running",
+                SetupCheck(id: .helper,
+                           title: state.helperNeedsApproval ? "LivePaper helper waiting for approval"
+                               : state.helperCannotStart ? "LivePaper helper can\u{2019}t start" : "LivePaper helper running",
                            detail: s.helperRunning
-                               ? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle."
+                               ? (state.helperOtherCopy.map {
+                                      "It runs from another copy of LivePaper (\($0)). \(SetupState.useThisCopysHelperTitle) runs " +
+                                      "this copy\u{2019}s instead (macOS then says LivePaper can run in the background)."
+                                  } ?? "Adds your own lock shortcut and opens LivePaper from the screen saver. Uses no CPU while idle.")
                                : state.helperNeedsApproval
                                    ? "Allow LivePaper in System Settings \u{203A} General \u{203A} Login Items."
-                                   : "A small login item for your own lock shortcut and the screen saver's \u{201C}Open LivePaper\u{201D} button.",
+                                   : state.helperCannotStart
+                                       ? (state.helperUnregistered
+                                           ? "LivePaper took its helper\u{2019}s login item down to register it again, and that didn\u{2019}t " +
+                                             "finish. Repair Helper registers it again (LivePaper also tries when it opens)."
+                                           : "Since LivePaper was updated, macOS refuses to start its helper: it still expects the " +
+                                             "previous build. Repair Helper registers it again (LivePaper also tries when it opens).")
+                                       : "A small login item for your own lock shortcut and the screen saver's \u{201C}Open LivePaper\u{201D} button.",
                            state: s.helperRunning ? .done : .needed),
             ]
         }

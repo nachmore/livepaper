@@ -40,6 +40,20 @@ enum SystemActions {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    /// Asks for reference images: image files and folders of them, several at once.
+    static func chooseReferenceImages() -> [URL] {
+        let panel = NSOpenPanel()
+        panel.title = "Add Reference Images"
+        panel.message = "Choose images, or folders of images, for the agent to work from."
+        panel.prompt = "Add"
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [.image, .folder]
+        return panel.runModal() == .OK ? panel.urls : []
+    }
+
     /// Lock Now's fallback when no helper answers: start the screen saver. With "require password
     /// immediately" the saver locks, and loginwindow draws the lock UI over the running scene
     /// (ARCHITECTURE §1, §7). Only ever called for an explicit "Lock Now".

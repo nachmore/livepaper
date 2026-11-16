@@ -108,6 +108,134 @@ extension SelfTests {
             try expectEqual(calls, ["uninstall --yes"])
             try expect(fm.fileExists(atPath: app.path), "the fake CLI failed the uninstall, so the app was never deleted")
         },
+        TestCase(name: "cli.packaging.dev-install-helper") {
+            // scripts/dev-install.sh can't register the helper's login item again (only the app can),
+            // so it never restarts one launchd would refuse, and says when launching LivePaper is
+            // needed. It compares the new helper with the code that *runs* (what launchd accepted),
+            // never with the file it replaces. Installs a fake app into a temp folder; fake launchctl,
+            // codesign, pgrep, pkill and lsregister keep it away from the real helper, Launch Services
+            // and any LivePaper. The fake codesign behaves like the real one: `-dvvv <pid>` describes
+            // the file now at the process's path, `--verify <pid>` compares it with what runs.
+            let root = try tempDir("dev-install")
+            defer { try? FileManager.default.removeItem(at: root) }
+            let fm = FileManager.default
+            let bin = root.appendingPathComponent("bin"), state = root.appendingPathComponent("launchd"), log = root.appendingPathComponent("calls.log")
+            let src = root.appendingPathComponent("build/LivePaper.app"), dest = root.appendingPathComponent("Apps")
+            let installedHelper = dest.appendingPathComponent("LivePaper.app/Contents/Helpers/LivePaperHelper")
+            func file(_ text: String, _ url: URL, executable: Bool = true) throws {
+                try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try Data((text + "\n").utf8).write(to: url)
+                if executable { try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: url.path) }
+            }
+            func helperText(_ helper: String) -> String { "#!/bin/sh\n# \(helper)" }
+            func fakeApp(_ app: URL, helper: String) throws {
+                try file(helperText(helper), app.appendingPathComponent("Contents/Helpers/LivePaperHelper"))
+                try PropertyListSerialization.data(fromPropertyList: ["CFBundleShortVersionString": "0.1.0", "CFBundleVersion": "190"],
+                                                   format: .xml, options: 0).write(to: app.appendingPathComponent("Contents/Info.plist"))
+                try file("#!/bin/sh\nexit 0", app.appendingPathComponent("Contents/Helpers/livepaper"))
+            }
+            try file("#!/bin/sh\necho \"launchctl $*\" >> '\(log.path)'\ncase \"$1\" in\n  print) f='\(state.path)/'\"$(basename \"$2\")\".print\n" +
+                     "    if [ -f \"$f\" ]; then cat \"$f\"; exit 0; fi\n    echo 'Could not find service' >&2; exit 113 ;;\nesac\nexit 0",
+                     bin.appendingPathComponent("launchctl"))
+            // A pid stands for the helper process: its executable is in running-exe, the helper it
+            // started from in started-from. A helper whose text says "team" has a Team ID.
+            try file("""
+            #!/bin/sh
+            for last; do :; done
+            S='\(state.path)'
+            case "$last" in
+              ''|*[!0-9]*) f="$last" ;;
+              *) f="$(cat "$S/running-exe" 2>/dev/null)" ;;
+            esac
+            case "$1" in
+              -dvvv)
+                [ -e "$f" ] || { echo "$last: No such file or directory" >&2; exit 1; }
+                echo "Executable=$f" >&2
+                echo "CDHash=$(shasum < "$f" | cut -c1-40)" >&2
+                if grep -q team "$f"; then echo 'TeamIdentifier=TEAM1' >&2; else echo 'Signature=adhoc' >&2; fi ;;
+              --verify)
+                case "$last" in ''|*[!0-9]*) exit 0 ;; esac
+                [ "$(shasum < "$f" | cut -c1-40)" = "$(shasum < "$S/started-from" | cut -c1-40)" ] && exit 0
+                echo "$last: the code on disk does not match what is running" >&2; exit 1 ;;
+            esac
+            exit 0
+            """, bin.appendingPathComponent("codesign"))
+            try file("#!/bin/sh\nexit 1", bin.appendingPathComponent("pgrep"))
+            try file("#!/bin/sh\nexit 1", bin.appendingPathComponent("pkill"))
+            try file("#!/bin/sh\nexit 0", bin.appendingPathComponent("lsregister"))
+            var env = ProcessInfo.processInfo.environment.filter { !$0.key.hasPrefix("LIVEPAPER_") }
+            env["PATH"] = bin.path + ":/usr/bin:/bin"
+            env["HOME"] = root.path
+            env["LIVEPAPER_LSREGISTER"] = bin.appendingPathComponent("lsregister").path
+            let devInstall = CLITestSupport.repo.appendingPathComponent("scripts/dev-install.sh").path
+            let uid = getuid(), login = "gui/\(uid)/\(LPPaths.helperLabel)", fallback = "gui/\(uid)/\(LPPaths.helperLabel).fallback"
+            // The helper "process" is this test's own (a pid that is alive).
+            let running = "gui/\(uid)/\(LPPaths.helperLabel) = {\n\tstate = running\n\tpid = \(getpid())\n\tparent bundle version = 186\n\tjob state = running\n}"
+            let stopped = "gui/\(uid)/\(LPPaths.helperLabel) = {\n\tstate = not running\n\tlast exit code = 0\n\tjob state = exited\n}"
+            let broken = "gui/\(uid)/\(LPPaths.helperLabel) = {\n\tstate = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n" +
+                         "\tresource coalition = {\n\t\tstate = active\n\t}\n\tjob state = spawn failed\n" +
+                         "\tproperties = partial import | runatload | resolve program | needs LWCR update | has LWCR\n}"
+            /// Installs `new` over an app whose helper says `previous`, with these jobs loaded; a running
+            /// login item started from the helper `startedFrom` (at `runningExe`, default the installed one).
+            func install(new: String = "new helper", previous: String?, loginJob: String?, startedFrom: String? = nil, runningExe: URL? = nil,
+                         fallbackJob: String? = nil, fresh: Bool = true) throws -> (CLITestSupport.Result, [String]) {
+                try? fm.removeItem(at: log)
+                if fresh { try? fm.removeItem(at: state); try? fm.removeItem(at: dest) }
+                try fm.createDirectory(at: state, withIntermediateDirectories: true)
+                try fakeApp(src, helper: new)
+                if let previous { try fakeApp(dest.appendingPathComponent("LivePaper.app"), helper: previous) }
+                if let loginJob { try file(loginJob, state.appendingPathComponent("\(LPPaths.helperLabel).print"), executable: false) }
+                if let fallbackJob { try file(fallbackJob, state.appendingPathComponent("\(LPPaths.helperLabel).fallback.print"), executable: false) }
+                if let startedFrom {
+                    try file(helperText(startedFrom), state.appendingPathComponent("started-from"), executable: false)
+                    try file((runningExe ?? installedHelper).path, state.appendingPathComponent("running-exe"), executable: false)
+                }
+                let r = try CLITestSupport.exec(URL(fileURLWithPath: "/bin/bash"), [devInstall, "--app", src.path, "--dest", dest.path],
+                                                environment: env, stdin: nil)
+                let calls = ((try? String(contentsOf: log, encoding: .utf8)) ?? "").split(separator: "\n").map(String.init)
+                return (r, calls)
+            }
+            let kickstarts = { (calls: [String]) in calls.filter { $0.hasPrefix("launchctl kickstart") } }
+            // The owner's state: launchd can't start the login item. No restart; launch the app.
+            var (r, calls) = try install(previous: "old helper", loginJob: broken)
+            try expect(r.status == 0, r.out + r.err)
+            try expect(r.out.contains("needs LivePaper.app: launchd can't start it (spawn failed, last exit code 78: EX_CONFIG, " +
+                                      "needs LWCR update)") && r.out.contains("launching LivePaper"), r.out)
+            try expect(kickstarts(calls).isEmpty, "\(calls)")
+            try expect(fm.fileExists(atPath: installedHelper.path))
+            // Running build A's helper, and this build changes it: left running (a restart would be
+            // refused), and the same advice.
+            (r, calls) = try install(previous: "helper A", loginJob: running, startedFrom: "helper A")
+            try expect(r.out.contains("the running helper isn't this build's") && r.out.contains("keeps going until then"), r.out)
+            try expect(kickstarts(calls).isEmpty, "\(calls)")
+            // … and then build B', whose helper is the same as the B just installed: the running one is
+            // still A's, so still no restart (the file being replaced isn't what launchd recorded).
+            (r, calls) = try install(previous: nil, loginJob: running, startedFrom: "helper A", fresh: false)
+            try expect(r.out.contains("the running helper isn't this build's"), r.out)
+            try expect(kickstarts(calls).isEmpty, "B -> B' kickstarted the login item: \(calls)")
+            // The running helper already is this build's code: nothing to restart, nothing to say.
+            (r, calls) = try install(previous: "new helper", loginJob: running, startedFrom: "new helper")
+            try expect(r.out.contains("already runs this build's code") && !r.out.contains("needs LivePaper.app"), r.out)
+            try expect(kickstarts(calls).isEmpty, "\(calls)")
+            // Stopped: never started from here for an ad-hoc helper (only the app knows what launchd recorded).
+            (r, calls) = try install(previous: "new helper", loginJob: stopped)
+            try expect(r.out.contains("needs LivePaper.app: it isn't running"), r.out)
+            try expect(kickstarts(calls).isEmpty, "\(calls)")
+            // Another copy's helper runs: left alone, and said so.
+            let other = root.appendingPathComponent("Other/LivePaper.app")
+            try fakeApp(other, helper: "helper A")
+            (r, calls) = try install(previous: "old helper", loginJob: running, startedFrom: "helper A",
+                                     runningExe: other.appendingPathComponent("Contents/Helpers/LivePaperHelper"))
+            try expect(r.err.contains("belongs to another copy of LivePaper") && r.err.contains("Settings › Lock › Use This Copy’s Helper"),
+                       r.out + r.err)
+            try expect(kickstarts(calls).isEmpty, "\(calls)")
+            // A Team ID-signed helper that changed: restarted (launchd accepts it under the same requirement).
+            (r, calls) = try install(new: "new team helper", previous: "old team helper", loginJob: running, startedFrom: "old team helper")
+            try expect(calls.contains("launchctl kickstart -k \(login)") && !r.out.contains("needs LivePaper.app"), r.out + "\(calls)")
+            // The LaunchAgent fallback is a plain plist: always restarted.
+            (r, calls) = try install(previous: "old helper", loginJob: nil, fallbackJob: "gui/\(uid)/x = {\n\tstate = running\n}")
+            try expect(calls.contains("launchctl kickstart -k \(fallback)") && !r.out.contains("needs LivePaper.app"), r.out + "\(calls)")
+        },
     ] }
 
     // MARK: - Commands
@@ -124,6 +252,7 @@ extension SelfTests {
             try expectEqual(try sb.run(["frobnicate"]).status, 2)
             let usage = try sb.run(["help", "ai"]).out
             try expect(usage.contains("usage: livepaper ai create"), usage)
+            try expect(usage.contains("[--ref <image|folder>]…") && usage.contains("[--animate <image>]"), usage)
         },
         cliTest("cli.version") { sb in
             let r = try sb.run(["--version"])
@@ -426,6 +555,7 @@ extension SelfTests {
             #!/bin/sh
             mkdir -p scene/.check
             for t in 0 4 12 30 90 600; do printf 'png' > "scene/.check/1512x982@2-t$t.png"; done
+            for s in 1512x982@2 5120x1440@1; do printf 'png' > "scene/.check/motion-$s.png"; done
             sleep 2
             echo "Looked at the stills."
             echo '// v2' > scene/scene.js
@@ -436,8 +566,9 @@ extension SelfTests {
             try expectEqual(r.status, 1)
             let stillLines = r.out.split(separator: "\n").filter { $0.contains("◻") }
             try expectEqual(stillLines.count, 1)
-            try expect(stillLines.first?.contains("◻ 6 stills in scene/.check/: 1512x982@2-t0.png, 1512x982@2-t12.png") == true &&
-                       stillLines.first?.hasSuffix(", … (+2)") == true, r.out)
+            // The check's motion heat maps are counted apart, as its summary does ("6 PNGs").
+            try expect(stillLines.first?.contains("◻ 6 stills and 2 motion maps in scene/.check/: 1512x982@2-t0.png, 1512x982@2-t12.png") == true &&
+                       stillLines.first?.hasSuffix(", … (+4)") == true, r.out)
 
             r = try sb.run(["ai", "create", "x", "--command", "/nonexistent/agent {prompt_file}"])
             try expectEqual(r.status, 1)
@@ -533,6 +664,218 @@ extension SelfTests {
                     try expect(!cli.output.contains("agent finished"), cli.output)
                 }
             }
+        },
+        cliTest("cli.ai.references") { sb in
+            // A stand-in agent that lists what it was given; the session then fails at validation
+            // (no render server may start here), after every earlier stage ran.
+            let agent = sb.root.appendingPathComponent("tools/ref-agent")
+            try FileManager.default.createDirectory(at: agent.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("""
+            #!/bin/sh
+            ls references > .livepaper/refs.txt
+            printf '%s\\n' "LivePaper.scene({ draw(lp) { LivePaper.image('reference.jpg'); } });" > scene/scene.js
+
+            """.utf8).write(to: agent)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+            let pics = sb.root.appendingPathComponent("pics")
+            func picture(_ name: String, _ layout: ReferenceFixtures.Layout = .lake) throws -> URL {
+                let url = pics.appendingPathComponent(name)
+                try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try ReferenceFixtures.encode(ReferenceFixtures.photo(layout, width: 300, height: 200), type: .png).write(to: url)
+                return url
+            }
+            let heron = try picture("heron.png"), city = try picture("set/city.png", .city), face = try picture("set/face.png", .portrait)
+            _ = (city, face)
+            var r = try sb.run(["ai", "create", "Make it move", "--ref", pics.appendingPathComponent("set").path, "--animate", heron.path,
+                                "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            let events = r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }
+            let started = try SelfTests.unwrap(events.first { $0["event"] as? String == "started" })
+            try expectEqual(started["references"] as? [String: Int], ["reference": 2, "animate": 1])
+            try expect(!r.out.contains("heron.png") && !r.out.contains(pics.path), "names only in text mode: \(r.out)")
+            let ws = try SelfTests.unwrap(started["workspace"] as? String)
+            try expectEqual(try String(contentsOfFile: ws + "/.livepaper/refs.txt", encoding: .utf8),
+                            "ref-01.jpg\nref-01.json\nref-02.jpg\nref-02.json\nref-03.jpg\nref-03.json\nreferences.json\n")
+            try expect(FileManager.default.fileExists(atPath: ws + "/scene/assets/reference.jpg"))
+
+            // Text mode names the user's own files (their terminal) and prepares them first.
+            r = try sb.run(["ai", "create", "Make it move", "--ref", heron.path, "--command", agent.path])
+            try expect(r.out.contains("\u{00B7} 1 reference image") && r.out.contains("ref-01 \u{2190} ") && r.out.contains("heron.png"), r.out)
+            try expect(r.err.contains("preparing 1 reference image"), r.err)
+
+            // No prompt: the default one, about the picture.
+            r = try sb.run(["ai", "create", "--animate", heron.path, "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            let ws2 = try SelfTests.unwrap(r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }
+                .first { $0["event"] as? String == "started" }?["workspace"] as? String)
+            let task2 = try String(contentsOfFile: ws2 + "/TASK.md", encoding: .utf8)
+            try expect(task2.contains("Bring the attached picture to life"), task2)
+
+            // Usage errors (2) and bad files (1).
+            r = try sb.run(["ai", "create", "x", "--animate", heron.path, "--animate", heron.path, "--command", agent.path])
+            try expectEqual(r.status, 2); try expect(r.err.contains("--animate can be given once"), r.err)
+            r = try sb.run(["ai", "create", "x", "--animate", pics.path, "--command", agent.path])
+            try expectEqual(r.status, 2); try expect(r.err.contains("is a folder; --animate takes one image file"), r.err)
+            let notes = pics.appendingPathComponent("notes.txt")
+            try Data("hello".utf8).write(to: notes)
+            r = try sb.run(["ai", "create", "x", "--ref", notes.path, "--command", agent.path])
+            try expectEqual(r.status, 1); try expect(r.err.contains("\u{201C}notes.txt\u{201D} isn't an image macOS can read"), r.err)
+            r = try sb.run(["ai", "create", "x", "--ref", pics.appendingPathComponent("missing.png").path, "--command", agent.path])
+            try expectEqual(r.status, 1); try expect(r.err.contains("missing.png"), r.err)
+            let many = try (1...11).map { try picture("many/p\($0).png") }
+            r = try sb.run(["ai", "create", "x", "--command", agent.path] + many.flatMap { ["--ref", $0.path] })
+            try expectEqual(r.status, 2); try expect(r.err.contains("up to 10 reference images (11 were given)"), r.err)
+            // A folder over the cap: a note, and the session goes on with the first 10.
+            for i in 12...13 { _ = try picture("many/p\(i).png") }
+            r = try sb.run(["ai", "create", "x", "--ref", pics.appendingPathComponent("many").path, "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            try expect(r.out.contains(#""event":"note""#) && r.out.contains("left out 3 more images (the limit is 10 per session)"), r.out)
+            try expect(r.out.contains(#""references":{"animate":0,"reference":10}"#), r.out)
+            // `--ref ~/…` is expanded even when the shell didn't (`--ref=~/x`): with the home redirected
+            // into the sandbox (CFFIXED_USER_HOME is what Foundation's home follows; HOME isn't),
+            // the picture under it is found and attached.
+            let home = ["HOME": sb.root.path, "CFFIXED_USER_HOME": sb.root.path]
+            r = try sb.run(["ai", "create", "x", "--ref=~/pics/heron.png", "--command", agent.path, "--json"], extraEnv: home)
+            try expectEqual(r.status, 1)
+            try expect(r.out.contains(#""references":{"animate":0,"reference":1}"#), "the tilde path was found: \(r.out) \(r.err)")
+            r = try sb.run(["ai", "create", "x", "--ref=~/no-such-dir/x.png", "--command", agent.path], extraEnv: home)
+            try expectEqual(r.status, 1); try expect(r.err.contains("\u{201C}x.png\u{201D} doesn't exist"), r.err)
+
+            // ai modify: images may replace the prompt (the default request then asks for a change),
+            // and the picture goes into the scene being modified; nothing at all is a usage error.
+            r = try sb.run(["new", "Mine", "--from", "starter", "--json"])
+            let mine = try SelfTests.unwrap(try CLITestSupport.jsonObject(r.out)["id"] as? String)
+            r = try sb.run(["ai", "modify", mine, "--command", agent.path])
+            try expectEqual(r.status, 2); try expect(r.err.contains("or images with --ref / --animate"), r.err)
+            try expectEqual(try sb.run(["ai", "modify", mine, "a", "b", "--ref", heron.path, "--command", agent.path]).status, 2)
+            r = try sb.run(["ai", "modify", mine, "--animate", heron.path, "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            let modifyStarted = try SelfTests.unwrap(r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }
+                .first { $0["event"] as? String == "started" })
+            try expectEqual(modifyStarted["references"] as? [String: Int], ["reference": 0, "animate": 1])
+            let mws = try SelfTests.unwrap(modifyStarted["workspace"] as? String)
+            let mtask = try String(contentsOfFile: mws + "/TASK.md", encoding: .utf8)
+            try expect(mtask.contains("Change the existing LivePaper scene `\(mine)`") &&
+                       mtask.contains("Make this scene show the attached picture and bring it to life") && !mtask.contains("Create a scene"), mtask)
+            try expect(FileManager.default.fileExists(atPath: mws + "/scene/assets/reference.jpg"))
+            try expectEqual(try String(contentsOfFile: mws + "/.livepaper/refs.txt", encoding: .utf8), "ref-01.jpg\nref-01.json\nreferences.json\n")
+        },
+        cliTest("cli.ai.reference-hint") { sb in
+            let agent = sb.root.appendingPathComponent("tools/quiet-agent")
+            try FileManager.default.createDirectory(at: agent.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: agent)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+            let image = sb.root.appendingPathComponent("shots/heron.png")
+            try FileManager.default.createDirectory(at: image.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try ReferenceFixtures.encode(ReferenceFixtures.photo(.lake, width: 120, height: 80), type: .png).write(to: image)
+            var r = try sb.run(["ai", "create", "animate \(image.path) please, like \(image.deletingLastPathComponent().path)/", "--command", agent.path])
+            try expect(r.out.contains("livepaper ai: the prompt mentions \(image.path) (an image). The agent can't open files outside its workspace; " +
+                                      "add --ref \(image.path) to attach a copy (or --animate \(image.path) to animate it exactly)."), r.out)
+            try expect(r.out.contains("(a folder)") && r.out.contains("add --ref \(image.deletingLastPathComponent().path)/ to attach copies"), r.out)
+            r = try sb.run(["ai", "create", "animate \(image.path)", "--command", agent.path, "--json"])
+            try expect(r.out.contains(#""event":"note""#) && r.out.contains("the prompt mentions"), r.out)
+            // Missing files and attached ones get no hint.
+            r = try sb.run(["ai", "create", "animate \(sb.root.path)/nope.png", "--command", agent.path])
+            try expect(!r.out.contains("the prompt mentions"), r.out)
+            r = try sb.run(["ai", "create", "animate \(image.path)", "--animate", image.path, "--command", agent.path])
+            try expect(!r.out.contains("the prompt mentions"), r.out)
+            // Paths in privacy-protected places (Desktop, Documents, …, volumes) are judged by syntax
+            // alone — never looked up, so the terminal gets no privacy prompt — and hinted even though
+            // nothing is there. The home is redirected into the sandbox, so nothing real is touched.
+            let home = ["HOME": sb.root.path, "CFFIXED_USER_HOME": sb.root.path]
+            r = try sb.run(["ai", "create", "animate ~/Desktop/heron.png please, style from ~/Documents/refs/", "--command", agent.path], extraEnv: home)
+            try expect(r.out.contains("livepaper ai: the prompt mentions ~/Desktop/heron.png (an image). The agent can't open files outside its " +
+                                      "workspace; add --ref ~/Desktop/heron.png to attach a copy"), r.out)
+            try expect(r.out.contains("the prompt mentions ~/Documents/refs/ (a folder)"), r.out)
+            try expect(!FileManager.default.fileExists(atPath: sb.root.appendingPathComponent("Desktop").path))
+            r = try sb.run(["ai", "create", "animate /Volumes/NoSuchCard-\(UUID().uuidString.prefix(6))/x.png", "--command", agent.path])
+            try expect(r.out.contains("(an image). The agent can't open files outside its workspace"), r.out)
+            // A screenshot name with spaces: the whole name, quoted for the shell.
+            r = try sb.run(["ai", "create", "animate ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png", "--command", agent.path], extraEnv: home)
+            try expect(r.out.contains("the prompt mentions ~/Desktop/Screenshot 2026-11-15 at 10.41.23.png (an image)") &&
+                       r.out.contains("add --ref '~/Desktop/Screenshot 2026-11-15 at 10.41.23.png'") && !r.out.contains("quote the whole path"), r.out)
+            // A folder whose name has a space, unquoted, without a trailing slash: where it may be
+            // looked up, the longer reading that exists is named (quoted for the shell); on the Desktop
+            // the hint can't know, and says to quote the whole path.
+            let trip = sb.root.appendingPathComponent("Summer Trip")
+            try FileManager.default.createDirectory(at: trip, withIntermediateDirectories: true)
+            try ReferenceFixtures.encode(ReferenceFixtures.photo(.lake, width: 120, height: 80), type: .png).write(to: trip.appendingPathComponent("a.png"))
+            r = try sb.run(["ai", "create", "use \(trip.path) for the palette", "--command", agent.path])
+            try expect(r.out.contains("the prompt mentions \(trip.path) (a folder)") && r.out.contains("add --ref '\(trip.path)' to attach copies") &&
+                       !r.out.contains("quote the whole path"), r.out)
+            r = try sb.run(["ai", "create", "use ~/Desktop/Summer Trip for the palette", "--command", agent.path], extraEnv: home)
+            try expect(r.out.contains("the prompt mentions ~/Desktop/Summer (a folder)") &&
+                       r.out.contains("If its name goes on after the space, quote the whole path."), r.out)
+            // "w/" ends no folder name.
+            r = try sb.run(["ai", "create", "use \(image.deletingLastPathComponent().path) w/ soft light", "--command", agent.path])
+            try expect(r.out.contains("add --ref \(image.deletingLastPathComponent().path) to attach copies"), r.out)
+        },
+        cliTest("cli.check.reference") { sb in
+            // `livepaper check` inside a session that animates a picture compares the candidate's
+            // stills with it (ReferenceWorkspace.checkTarget): report.json has `reference`, the
+            // summary a `picture` line; outside the session, neither.
+            let agent = sb.root.appendingPathComponent("tools/pic-agent")
+            try FileManager.default.createDirectory(at: agent.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("""
+            #!/bin/sh
+            printf '%s\\n' "LivePaper.scene({ draw(lp) { const img = LivePaper.image('reference.jpg'); lp.ctx.drawImage(img, 0, 0, lp.w, lp.h); } });" > scene/scene.js
+
+            """.utf8).write(to: agent)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+            let photo = ReferenceFixtures.photo(.lake, seed: 6, width: 1200, height: 800)
+            let lake = sb.root.appendingPathComponent("pics/lake.png")
+            try FileManager.default.createDirectory(at: lake.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try ReferenceFixtures.encode(photo, type: .png).write(to: lake)
+            // The session itself fails at its own check (no render server yet); its workspace stays.
+            var r = try sb.run(["ai", "create", "--animate", lake.path, "--command", agent.path, "--json"])
+            try expectEqual(r.status, 1)
+            let ws = try SelfTests.unwrap(r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }
+                .first { $0["event"] as? String == "started" }?["workspace"] as? String)
+            let scene = ws + "/scene"
+            // A stand-in render server whose stills show the picture cover-fit, with fog.
+            _ = try RuntimeTests.serve(sb.support.appendingPathComponent("render.sock"), count: 80) { line in
+                guard let req = try? JSONDecoder().decode(RenderRequest.self, from: line) else { return Data("{}".utf8) }
+                var resp: RenderResponse
+                switch req.op {
+                case .still:
+                    let w = Int(((req.width ?? 1512) / 4).rounded()), h = Int(((req.height ?? 982) / 4).rounded())
+                    if let out = req.out {
+                        try? ReferenceFixtures.encode(ReferenceFixtures.still(photo, .fog, width: w, height: h), type: .png).write(to: URL(fileURLWithPath: out))
+                    }
+                    resp = RenderResponse(ok: true, ready: true, out: req.out, meanLuma: 60, clockLuma: 30)
+                case .bench: resp = RenderResponse(ok: true, ready: true, benchMs: 1.1)
+                case .motion:
+                    resp = RuntimeTests.aliveMotion(CheckFrame(Int(req.width ?? 1280), Int(req.height ?? 720), dpr: req.dpr ?? 0.5, t: 0))
+                    resp.out = req.out
+                default: resp = RenderResponse(ok: true, ready: true)
+                }
+                return (try? JSONEncoder().encode(resp)) ?? Data()
+            }
+            let session = [AISessionPolicy.sessionVariable: "s-ref", AISessionPolicy.workspaceVariable: ws]
+            r = try sb.run(["check", scene, "--quick", "--json"], extraEnv: session)
+            try expectEqual(r.status, 0)
+            let report = try SceneManifest.decoder().decode(CheckReport.self, from: Data(r.out.utf8))
+            let ref = try SelfTests.unwrap(report.reference)
+            try expectEqual(ref.asset, "assets/reference.jpg")
+            try expect(ref.referencedInScene && ref.assetIntact && (ref.median ?? 0) >= 0.7, "\(ref)")
+            try expectEqual(ref.similarity.count, 3)
+            r = try sb.run(["check", scene, "--quick"], extraEnv: session)
+            try expect(r.out.contains("  picture      like the reference: "), r.out)
+            // Outside the session (or on another package) there is nothing to compare with.
+            r = try sb.run(["check", scene, "--quick", "--json"])
+            try expectEqual(try SceneManifest.decoder().decode(CheckReport.self, from: Data(r.out.utf8)).reference, nil)
+            r = try sb.run(["check", scene, "--quick"])
+            try expect(!r.out.contains("  picture  "), r.out)
+        },
+        cliTest("cli.arguments.repeatable") { sb in
+            // A repeated option keeps its last value (--model), repeatable ones keep all (--ref, above).
+            let agent = sb.root.appendingPathComponent("tools/quiet-agent")
+            try FileManager.default.createDirectory(at: agent.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try Data("#!/bin/sh\nexit 0\n".utf8).write(to: agent)
+            try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: agent.path)
+            let r = try sb.run(["ai", "create", "x", "--model", "first", "--model=second", "--command", agent.path, "--json"])
+            let started = r.out.split(separator: "\n").compactMap { try? CLITestSupport.jsonObject(String($0)) }.first { $0["event"] as? String == "started" }
+            try expectEqual(started?["model"] as? String, "second")
         },
         cliTest("cli.path-invocation") { sb in
             // Run from PATH (argv[0] is the bare name) in another directory without
