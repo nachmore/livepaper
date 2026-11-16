@@ -160,8 +160,10 @@ final class LivePaperSaverView: ScreenSaverView, SceneHostDelegate {
 
     override func stopAnimation() {
         super.stopAnimation()
-        gate.animating = false
-        logLifecycle("stopAnimation")
+        // The sleep notification may arrive just after the host's stopAnimation: ask the displays.
+        if !gate.displaysAsleep { gate.displaysAsleep = saverDisplayIsAsleep }
+        gate.noteStopAnimation()
+        logLifecycle("stopAnimation", gate.resumeOnWake ? "for display sleep; resumes on wake" : "")
         update()
     }
 

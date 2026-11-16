@@ -539,6 +539,10 @@ struct SaverRunGate: Equatable {
     var windowVisible = true
     /// Previews: the app that shows them (System Settings) is frontmost (or that is unknown).
     var previewHostActive = true
+    /// The host stopped this real instance's animation because the displays went to sleep under a
+    /// running saver; it doesn't start it again when they wake (macOS 26.7, logged 2026-11-16: the
+    /// lock screen then showed the desktop picture over an empty saver), so the wake does.
+    private(set) var resumeOnWake = false
     var policy = SaverGatePolicy.standard
 
     init(preview: Bool, sessionLocked: Bool, policy: SaverGatePolicy = .standard) {
@@ -597,15 +601,27 @@ struct SaverRunGate: Equatable {
     }
 
     /// Applies a system event (lock-UI, publish and window events don't change the gate).
+    /// stopAnimation from the host. While the displays sleep under a running real instance it is the
+    /// host pausing for the sleep, not the end of the run: remember to resume when they wake.
+    mutating func noteStopAnimation() {
+        if !preview && !exiting && animating && displaysAsleep && openedBy != nil { resumeOnWake = true }
+        animating = false
+    }
+
     mutating func apply(_ event: SaverSystemEvent) {
         switch event {
         case .screenLocked: sessionLocked = true
         // A run that was started ends with the unlock, its didstop or willstop.
-        case .screenUnlocked: sessionLocked = false; saverStarted = false
+        case .screenUnlocked: sessionLocked = false; saverStarted = false; resumeOnWake = false
         case .saverDidStart: saverStarted = true
-        case .saverDidStop, .willStop: saverStarted = false
+        case .saverDidStop, .willStop: saverStarted = false; resumeOnWake = false
         case .screensDidSleep: displaysAsleep = true
-        case .screensDidWake: displaysAsleep = false
+        case .screensDidWake:
+            displaysAsleep = false
+            // The saver is still up (something still opens the gate): run again, as if the host had
+            // called startAnimation.
+            if resumeOnWake && !exiting && openedBy != nil { animating = true }
+            resumeOnWake = false
         case .engineLaunched: engineRunning = true
         case .engineTerminated: engineRunning = false
         case .previewHostActivated: previewHostActive = true

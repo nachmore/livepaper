@@ -45,7 +45,12 @@ while the displays sleep (a lid-close lock loads on wake). It pauses on unlock, 
 `stopAnimation` and display sleep, and 5 s after its gate closed for good (unlock, didstop,
 `stopAnimation`; not display sleep) it frees its web view or player — and with it the WebContent
 process — so nothing stays resident and the next run reads the playlist again. The 5 s keep the
-last frame up during loginwindow's fade-out. Previews (`isPreview || width < 500`, because
+last frame up during loginwindow's fade-out. When the displays sleep under a running saver the host calls
+`stopAnimation` and, on wake, never calls `startAnimation` again (macOS 26.7, logged 2026-11-16:
+the lock screen then showed the desktop picture over an empty saver). A real instance whose gate
+is still open therefore remembers that stop (`SaverRunGate.noteStopAnimation`) and resumes by
+itself on `screensDidWake` — not after an unlock, didstop or willstop in between, and never for
+a prewarmed instance nothing presented. Previews (`isPreview || width < 500`, because
 `isPreview` is unreliable in the macOS 26 host) render once started, but pause while the session
 is locked, while the displays sleep, while System Settings isn't the frontmost app, and while
 their window is ordered out, miniaturised or occluded (each window signal is trusted only after it

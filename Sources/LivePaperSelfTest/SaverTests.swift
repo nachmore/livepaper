@@ -489,6 +489,40 @@ extension SelfTests {
             gate.apply(.screensDidWake)
             try expect(gate.mayLoad && gate.shouldRun)
         },
+        TestCase(name: "saver.gate.resumes-after-display-sleep") {
+            // Logged on macOS 26.7: the displays sleep under a running saver, the host calls
+            // stopAnimation, and on wake it never calls startAnimation again — the lock screen showed
+            // the desktop picture over an empty saver. The wake resumes the run itself.
+            var gate = SaverRunGate(preview: false, sessionLocked: true)
+            gate.animating = true
+            try expect(gate.shouldRun)
+            gate.apply(.screensDidSleep)
+            gate.noteStopAnimation()
+            try expect(!gate.shouldRun && gate.resumeOnWake)
+            gate.apply(.screensDidWake)
+            try expect(gate.animating && gate.shouldRun && !gate.resumeOnWake, "running again after the wake")
+            // A stopAnimation with the displays on is the end of the run: the wake doesn't undo it.
+            gate.noteStopAnimation()
+            gate.apply(.screensDidSleep); gate.apply(.screensDidWake)
+            try expect(!gate.animating && !gate.shouldRun)
+            // Unlocked (or the saver stopped) while asleep: nothing to resume.
+            for end in [SaverSystemEvent.screenUnlocked, .saverDidStop, .willStop] {
+                var g = SaverRunGate(preview: false, sessionLocked: true)
+                g.animating = true
+                g.apply(.screensDidSleep); g.noteStopAnimation(); g.apply(end); g.apply(.screensDidWake)
+                try expect(!g.animating, "\(end): stays stopped")
+            }
+            // A prewarmed instance nothing presented (gate closed) isn't started by a wake.
+            var hidden = SaverRunGate(preview: false, sessionLocked: false)
+            hidden.animating = true
+            hidden.apply(.screensDidSleep); hidden.noteStopAnimation(); hidden.apply(.screensDidWake)
+            try expect(!hidden.animating)
+            // Previews are the System Settings host's business.
+            var preview = SaverRunGate(preview: true, sessionLocked: false)
+            preview.animating = true
+            preview.apply(.screensDidSleep); preview.noteStopAnimation(); preview.apply(.screensDidWake)
+            try expect(!preview.animating)
+        },
         TestCase(name: "saver.gate.release") {
             var gate = SaverRunGate(preview: false, sessionLocked: true)
             try expect(gate.shouldRelease, "not started: nothing may stay loaded")
