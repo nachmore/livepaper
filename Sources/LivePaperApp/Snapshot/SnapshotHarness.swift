@@ -230,6 +230,34 @@ enum SnapshotHarness {
         clearBanners(model)
         shoot("playlist-displays-single-light", displaysSize, dark: false, PlaylistView())
 
+        // Collections (the mock library's sample collections): the sidebar section with three cards
+        // chosen in the library (the selection bar), a collection the screen saver follows, an empty
+        // one, the New Collection and Delete sheets, and the Screen Saver screen's Play picker on a
+        // collection.
+        MockSampleData.displays = MockSampleData.defaultDisplays
+        model.refreshDisplays()
+        var plain = model.playlist
+        plain.mode = .shuffle; plain.sceneIDs = []; plain.collectionID = nil
+        plain.displays = .standard; plain.displayNames = [:]
+        wait { await model.savePlaylist(plain, announce: false) }
+        clearBanners(model)
+        model.section = .library
+        let picked = ["neon-rain", "paper-lanterns", "ink-bloom"]
+        for id in picked { _ = model.selection.click(id, .toggle, order: model.visibleEntries.map(\.id)) }
+        shoot("collections-select-light", main, dark: false, MainWindowView())
+        model.selection.clear()
+        wait { await model.useCollectionAsScreenSaver(MockSampleData.nightSkiesID) }
+        clearBanners(model)
+        model.showCollection(MockSampleData.nightSkiesID)
+        shoot("collection-dark", main, dark: true, MainWindowView())
+        model.showCollection(MockSampleData.warmToneID)
+        shoot("collection-empty-light", CGSize(width: 1000, height: 640), dark: false, MainWindowView())
+        shoot("sheet-new-collection-light", CGSize(width: 480, height: 180), dark: false, CollectionActionSheet(action: .new(sceneIDs: picked)))
+        shoot("sheet-delete-collection-dark", CGSize(width: 480, height: 200), dark: true,
+              CollectionActionSheet(action: .delete(MockSampleData.nightSkiesID)))
+        model.section = .playlist
+        shoot("playlist-collection-light", CGSize(width: 1180, height: 900), dark: false, MainWindowView())
+
         running?.cancel()
         print("snapshot: wrote PNGs to \(dir.path)")
     }

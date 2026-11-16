@@ -265,7 +265,15 @@ struct SceneCard: View {
                 }
             }
             .overlay(alignment: .top) {
-                HStack {
+                HStack(spacing: 6) {
+                    if isSelected {
+                        Image(systemName: "checkmark.circle.fill")
+                            .font(.title3)
+                            .symbolRenderingMode(.palette)
+                            .foregroundStyle(.white, Color.accentColor)
+                            .shadow(radius: 2)
+                            .accessibilityHidden(true)
+                    }
                     OverlayBadge(title: entry.badge.label, symbol: entry.badge.symbolName, tint: entry.badge.tint)
                     Spacer()
                     if entry.energy != .unmeasured {
@@ -277,17 +285,6 @@ struct SceneCard: View {
             }
             .overlay(alignment: .bottomLeading) {
                 if highlighted { fullScreenButton }
-            }
-            .overlay(alignment: .topLeading) {
-                if isSelected {
-                    Image(systemName: "checkmark.circle.fill")
-                        .font(.title2)
-                        .symbolRenderingMode(.palette)
-                        .foregroundStyle(.white, Color.accentColor)
-                        .shadow(radius: 2)
-                        .padding(6)
-                        .accessibilityHidden(true)
-                }
             }
             .overlay(alignment: .bottomTrailing) {
                 // When every scene plays, a per-card marker would carry no information.
