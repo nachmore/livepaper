@@ -35,7 +35,9 @@ struct DiskChanges: OptionSet, Sendable, Hashable {
     static let library = DiskChanges(rawValue: 1 << 0)
     /// playlist-settings.json (e.g. `livepaper publish --scenes …`).
     static let playlist = DiskChanges(rawValue: 1 << 1)
-    static let all: DiskChanges = [.library, .playlist]
+    /// collections.json (e.g. `livepaper collection add …`).
+    static let collections = DiskChanges(rawValue: 1 << 2)
+    static let all: DiskChanges = [.library, .playlist, .collections]
 }
 
 /// Coalesces bursts of signals: `fire` runs once, `delay` after the last `signal` but never later
@@ -89,11 +91,12 @@ final class ChangeDebouncer: @unchecked Sendable {
 }
 
 /// Watches one support directory (LPPaths.supportRoot, or the mock root in sample mode):
-/// `Library/` recursively and `playlist-settings.json`.
+/// `Library/` recursively, `playlist-settings.json` and `collections.json`.
 final class LibraryWatcher: @unchecked Sendable {
     /// Paths relative to the watched root.
     static let libraryDirectoryName = LPPaths.library.lastPathComponent
     static let playlistSettingsName = PublishService.settingsFileName
+    static let collectionsName = CollectionsFile.fileName
     /// Never delivered at all (busy while agents work, irrelevant to the UI).
     static let excludedNames = [LPPaths.workspaces, LPPaths.logs, LPPaths.backups].map(\.lastPathComponent)
     /// Files inside a package that the library grid, the playlist and the detail view read, and
@@ -175,6 +178,7 @@ final class LibraryWatcher: @unchecked Sendable {
     static func classify(relative components: [String]) -> DiskChanges {
         guard let first = components.first else { return .all }
         if first == playlistSettingsName { return components.count == 1 ? .playlist : [] }
+        if first == collectionsName { return components.count == 1 ? .collections : [] }
         guard first == libraryDirectoryName else { return [] }   // state.json, render.sock, ai-settings.json, …
         guard components.count > 1 else { return .library }       // the library directory itself
         let package = components[1]

@@ -2,9 +2,21 @@
 // (Foundation-only; also compiled into LivePaperSelfTest via Sources/LivePaperSelfTest/AppLogic/).
 //
 // `PlaylistSettings.sceneIDs` empty means "all scenes" (new scenes join automatically); a non-empty
-// list is an explicit, ordered selection.
+// list is an explicit, ordered selection. With `collectionID` the playlist follows a collection (a
+// live link: its scenes, in its order, whatever they are when it is published); `sceneIDs` then keeps
+// the collection's scenes as they were when the settings were last saved (PlaylistSettings.following).
 import Foundation
 import LivePaperCore
+
+/// Where the playlist's scenes come from (the Screen Saver screen's "Play" picker).
+enum PlaylistSource: Hashable, Sendable {
+    /// Every scene; new scenes join automatically.
+    case all
+    /// The scenes chosen on the Screen Saver screen, in their order.
+    case chosen
+    /// A collection's scenes, in its order, following its changes.
+    case collection(String)
+}
 
 struct PlaylistDraft: Equatable, Sendable {
     var settings: PlaylistSettings
@@ -15,6 +27,32 @@ struct PlaylistDraft: Equatable, Sendable {
     init(_ settings: PlaylistSettings) { self.settings = settings }
 
     var includesAllScenes: Bool { settings.sceneIDs.isEmpty }
+
+    var source: PlaylistSource {
+        if let id = settings.collectionID { return .collection(id) }
+        return includesAllScenes ? .all : .chosen
+    }
+
+    /// Switches where the scenes come from. Choosing scenes starts from what plays now: every scene,
+    /// or the collection's (a copy, which no longer follows it); a collection's scenes are kept as
+    /// the stored copy. A collection of several scenes doesn't play as "One scene".
+    mutating func setSource(_ source: PlaylistSource, available: [String], collections: [SceneCollection]) {
+        switch source {
+        case .all:
+            settings.collectionID = nil
+            settings.sceneIDs = []
+        case .chosen:
+            let existing = Set(available)
+            let playing = settings.following(collections).sceneIDs.filter(existing.contains)
+            settings.collectionID = nil
+            settings.sceneIDs = playing.isEmpty ? available : playing
+        case .collection(let id):
+            guard let collection = collections.first(where: { $0.id == id }) else { return }
+            settings.collectionID = id
+            settings.sceneIDs = collection.sceneIDs
+            if settings.mode == .single && collection.sceneIDs.count > 1 { settings.mode = .sequence }
+        }
+    }
 
     /// The scenes the saver will actually get, in order: explicit IDs that still exist, or every
     /// available scene when the selection is "all" (or every explicit scene has been deleted).
@@ -29,6 +67,7 @@ struct PlaylistDraft: Equatable, Sendable {
 
     /// Switches between "all scenes" and an explicit list seeded with everything available.
     mutating func setIncludesAllScenes(_ all: Bool, available: [String]) {
+        settings.collectionID = nil
         settings.sceneIDs = all ? [] : available
     }
 
@@ -61,6 +100,16 @@ struct PlaylistDraft: Equatable, Sendable {
     mutating func useOnly(_ id: String) {
         settings.mode = .single
         settings.sceneIDs = [id]
+        settings.collectionID = nil
+    }
+
+    /// "Use as Screen Saver" on a collection: the playlist follows it (its scenes, in its order, also
+    /// after it changes). The playback settings stay, except that several scenes don't play as "One
+    /// scene".
+    mutating func follow(_ collection: SceneCollection) {
+        settings.collectionID = collection.id
+        settings.sceneIDs = collection.sceneIDs
+        if settings.mode == .single && collection.sceneIDs.count > 1 { settings.mode = .sequence }
     }
 
     /// "Add to playlist". Returns false when the scene is already part of it.
@@ -102,16 +151,19 @@ struct PlaylistDraft: Equatable, Sendable {
     /// "Shuffle · 4 scenes · every 5 minutes" / "Aurora Lake", plus the display mode when it changes
     /// what plays ("… · different on each display"). `displays`: the connected displays (nil =
     /// unknown: the mode is named whenever it applies with two or more).
+    /// `collection`: the collection the playlist follows, if any ("“Night Skies” · Shuffle · 4 scenes · …";
+    /// an empty one plays every scene). Pass the settings as they play (`following`).
     static func summary(_ s: PlaylistSettings, available: [String], names: [String: String],
-                        displays: LPDisplayLayout? = nil) -> String {
+                        displays: LPDisplayLayout? = nil, collection: SceneCollection? = nil) -> String {
         let ids = PlaylistDraft(s).effectiveSceneIDs(available: available)
         guard !ids.isEmpty else { return "No scenes yet" }
         let suffix = displaySuffix(s, sceneCount: ids.count, available: available, displays: displays)
-        if s.mode == .single || ids.count == 1 { return (names[ids[0]] ?? ids[0]) + suffix }
+        let prefix = collection.map { "\u{201C}\($0.name)\u{201D}" + ($0.sceneIDs.isEmpty ? " is empty" : "") + " \u{00B7} " } ?? ""
+        if s.mode == .single || ids.count == 1 { return prefix + (names[ids[0]] ?? ids[0]) + suffix }
         let mode = s.mode == .shuffle ? "Shuffle" : "In order"
         let count = s.sceneIDs.isEmpty ? "all \(ids.count) scenes" : "\(ids.count) scenes"
         let cycle = s.cycleMinutes > 0 ? LPFormat.cycle(minutes: s.cycleMinutes).lowercased() : "one per session"
-        return "\(mode) \u{00B7} \(count) \u{00B7} \(cycle)" + suffix
+        return prefix + "\(mode) \u{00B7} \(count) \u{00B7} \(cycle)" + suffix
     }
 
     /// " · different on each display" and so on, or "" when every display plays the same: "Same";

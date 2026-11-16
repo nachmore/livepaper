@@ -21,8 +21,8 @@ struct MenuBarContent: View {
         Button("Next Scene") { Task { await model.advanceScene() } }
             .disabled(!model.canAdvanceScene || model.isPublishing)
         // What the screen saver plays, full screen on the display under the pointer.
-        Button("Preview Full Screen") { FullScreenPreviewLauncher.previewPlaylist(model.playlist, model: model, fromMenuBar: true) }
-            .disabled(!FullScreenPreviewLauncher.canPreview(model.playlist, model: model))
+        Button("Preview Full Screen") { FullScreenPreviewLauncher.previewPlaylist(model.effectivePlaylist, model: model, fromMenuBar: true) }
+            .disabled(!FullScreenPreviewLauncher.canPreview(model.effectivePlaylist, model: model))
         Divider()
         aiSection
         Divider()

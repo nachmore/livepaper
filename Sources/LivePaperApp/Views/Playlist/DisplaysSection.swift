@@ -36,7 +36,7 @@ struct DisplaysSection: View {
                     .foregroundStyle(.secondary)
             }
             if mode == .different,
-               let note = PlaylistDraft.differentNote(sceneCount: draft.effectiveSceneIDs(available: model.availableSceneIDs).count,
+               let note = PlaylistDraft.differentNote(sceneCount: PlaylistDraft(draft.settings.following(model.collections)).effectiveSceneIDs(available: model.availableSceneIDs).count,
                                                       displayCount: layout.count) {
                 Label(note, systemImage: "info.circle")
                     .font(.callout)
@@ -126,7 +126,7 @@ struct DisplaysSection: View {
 
     @ViewBuilder
     private var spanRow: some View {
-        let ids = draft.effectiveSceneIDs(available: model.availableSceneIDs)
+        let ids = PlaylistDraft(draft.settings.following(model.collections)).effectiveSceneIDs(available: model.availableSceneIDs)
         let manifests = Dictionary(model.entries.map { ($0.id, $0.manifest) }, uniquingKeysWith: { a, _ in a })
         let support = PlaylistDraft.spanSupport(ids: ids, manifests: manifests)
         let total = support.spanning.count + support.notSpanning.count

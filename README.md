@@ -140,9 +140,23 @@ re-run from Settings and only changes what still needs it.
   usual (`livepaper ai sessions` lists them).
 * **By hand.** `livepaper new "Aurora Lake"` scaffolds a web scene from the template; edit its
   `scene.js` (see [Runtime/SCENE_API.md](Runtime/SCENE_API.md)) and run `livepaper check` on it.
-* **The playlist.** Choose which scenes the screen saver shows, shuffle / in sequence / one scene,
-  how often it changes, whether to show the clock, and the performance profile. Changes are
-  published into the saver and take effect the next time it starts.
+* **Collections.** Gather scenes into named collections — *New Collection…* in the sidebar, *Add to
+  Collection* in a scene's menu or its detail view, or drag scene cards onto a collection in the
+  sidebar (⌘-click and ⇧-click choose several cards at once). A scene can be in any number of
+  collections; renaming or deleting a collection never deletes a scene, and deleting a scene takes it
+  out of every collection. On a collection's screen, drag cards to change the order, move scenes to
+  another collection, preview it full screen, or *Use as Screen Saver*: the screen saver then follows
+  the collection — adding, removing or reordering its scenes updates it. *Export…* writes one
+  `Name.lpcollection` file with the collection and your scenes in it (built-in scenes are named, not
+  copied); double-click it, drop it on the sidebar or use *File › Import Collection…* on another Mac.
+  Scenes the library already has aren't imported again, and importing a collection you already have
+  changes nothing unless you ask (*Add N Scenes* / *Import as a Copy*).
+  From the terminal: `livepaper collection new "Night Skies" aurora-lake neon-rain`,
+  `livepaper collection export "Night Skies"`, `livepaper publish --collection "Night Skies"`.
+* **The playlist.** Choose which scenes the screen saver shows — every scene, the ones you pick, or a
+  collection — shuffle / in sequence / one scene, how often it changes, whether to show the clock,
+  and the performance profile. Changes are published into the saver and take effect the next time
+  it starts.
 * **Multiple displays.** On the same Screen Saver screen: every display shows the same scene (the
   default), a different scene on each display, a scene you choose per display (displays without a
   choice play the playlist; a choice is remembered while its display is disconnected), or one scene
@@ -168,8 +182,11 @@ is limited to editing the scene and running those commands (details in
 | `still`, `bench`, `live`, `compile` | one frame to a PNG · frame time at one moment · fps/CPU/energy while running live · the self-contained HTML |
 | `new <name> [--from <id>]` | scaffold a web scene in the library, or clone one |
 | `list [--json]` | the library (yours first, then built-in), with frame times and playlist membership |
-| `import <video \| .lpscene \| .zip> [--name N] [--battery]` | add a video or a scene package |
+| `import <video \| .lpscene \| .zip \| .lpcollection> [--name N] [--battery]` | add a video, a scene package or a collection file |
 | `publish [--scenes a,b\|all] [--mode M] [--cycle MIN] [--performance P] [--clock\|--no-clock]` | update the playlist settings (optional) and publish into the installed saver |
+| `publish --collection <name>\|none` | make the screen saver follow a collection (its scenes, in its order, as it changes), or stop |
+| `collection list\|show\|new\|rename\|delete\|add\|remove\|move` | collections of scenes: `new "Night Skies" a b`, `add "Night Skies" c --at 1`, `move "Night Skies" c --after a`, … (by name or id; changing the one the screen saver plays republishes it) |
+| `collection export <name> [--out F]` / `collection import <file> [--merge\|--copy]` | one `.lpcollection` file with the collection and your scenes in it; importing reuses scenes you already have |
 | `publish [--displays same\|different\|choose\|span] [--display <uuid>=<id>\|playlist]… [--battery-displays live\|still\|off]` | the multiple-display settings: the mode, a scene per display (its UUID, as Copy Display ID in the app gives it; `all=playlist` clears them) and what other displays show on battery |
 | `ai create "<prompt>"` / `ai modify <id> "<prompt>"` | run an AI session in the terminal; `--harness claude\|codex\|kiro\|custom`, `--command "<template>"`, `--model`, `--timeout`, `--yes` to accept without asking, `--json` for one JSON event per line |
 | `ai create [...] --ref <image\|folder>… [--animate <image>]` | the same with reference images (up to 10; `--ref` is repeatable and folders expand) and at most one picture to animate exactly; the prompt may be left out when images are given (also for `ai modify`) |

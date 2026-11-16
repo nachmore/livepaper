@@ -25,8 +25,8 @@ struct SceneActionSheet: View {
     }
 }
 
-/// Shared frame for the action sheets: icon + title, content, buttons.
-private struct SheetScaffold<Content: View, Buttons: View>: View {
+/// Shared frame for the action sheets (scenes and collections): icon + title, content, buttons.
+struct SheetScaffold<Content: View, Buttons: View>: View {
     let symbol: String
     let title: String
     var subtitle: String?
@@ -186,9 +186,20 @@ private struct DeleteSheet: View {
     var body: some View {
         SheetScaffold(symbol: "trash", title: "Delete \u{201C}\(entry.manifest.name)\u{201D}?",
                       subtitle: "The scene, its AI history and previous versions are removed from your library. This can't be undone.") {
-            if model.isInPlaylist(entry.id) && !PlaylistDraft(model.playlist).includesAllScenes {
-                Label("It will also be removed from the screen saver playlist.", systemImage: "play.rectangle.on.rectangle")
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                if model.isInPlaylist(entry.id) && !PlaylistDraft(model.effectivePlaylist).includesAllScenes {
+                    Label("It will also be removed from the screen saver playlist.", systemImage: "play.rectangle.on.rectangle")
+                        .foregroundStyle(.secondary)
+                }
+                let inCollections = model.collections(containing: entry.id)
+                if !inCollections.isEmpty {
+                    let names = inCollections.prefix(3).map { "\u{201C}\($0.name)\u{201D}" }.joined(separator: ", ")
+                        + (inCollections.count > 3 ? " and \(inCollections.count - 3) more" : "")
+                    Label("It will also be removed from \(inCollections.count == 1 ? "the collection" : "the collections") \(names).",
+                          systemImage: "rectangle.stack")
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         } buttons: {
             Button("Cancel", role: .cancel) { dismiss() }

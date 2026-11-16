@@ -37,6 +37,8 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
     private let compiler: SceneCompiling
     private let lockURL: URL
     private let notify: @Sendable (String) -> Void
+    /// The collections a playlist may follow (PlaylistSettings.collectionID); nil: none.
+    private let collections: CollectionStore?
     private let lock = NSLock()
     private let log = Logger(subsystem: LPPaths.bundleID, category: "publish")
 
@@ -46,9 +48,10 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
                 settingsURL: URL = LPPaths.supportRoot.appendingPathComponent(PublishService.settingsFileName),
                 saverURL: URL = LPPaths.installedSaver,
                 lockURL: URL = LPPaths.supportRoot.appendingPathComponent("publish.lock"),
-                notify: @escaping @Sendable (String) -> Void = { PublishService.postDistributedNotification($0) }) {
+                notify: @escaping @Sendable (String) -> Void = { PublishService.postDistributedNotification($0) },
+                collections: CollectionStore? = nil) {
         self.library = library; self.compiler = compiler; self.settingsURL = settingsURL
-        self.saverURL = saverURL; self.lockURL = lockURL; self.notify = notify
+        self.saverURL = saverURL; self.lockURL = lockURL; self.notify = notify; self.collections = collections
     }
 
     public static func postDistributedNotification(_ name: String) {
@@ -86,7 +89,8 @@ public final class PublishService: PublishServicing, @unchecked Sendable {
         guard FileOps.isRegularFile(saverURL.appendingPathComponent("Contents/Info.plist")) else {
             throw PublishError.saverNotInstalled(saverURL.path)
         }
-        let settings = loadSettings()
+        // A playlist that follows a collection plays the collection as it is now (a live link).
+        let settings = loadSettings().following(collections?.load().collections ?? [])
         let (chosen, all) = try resolveScenes(settings)
         let fm = FileManager.default
         let live = playlistDirectory

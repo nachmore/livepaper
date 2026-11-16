@@ -12,14 +12,20 @@ enum MockServices {
         let library = try MockLibraryService(root: root, pace: pace)
         let render = MockRenderClient()
         let compiler = MockSceneCompiler()
+        // The real collection service over the mock library, seeded with the sample collections.
+        let store = CollectionStore(fileURL: root.appendingPathComponent(CollectionsFile.fileName))
+        if !FileManager.default.fileExists(atPath: store.fileURL.path) {
+            try store.update { $0.collections = MockSampleData.collections() }
+        }
         return LivePaperServices(
             library: library,
-            publish: MockPublishService(root: root, library: library, pace: pace),
+            publish: MockPublishService(root: root, library: library, pace: pace, collections: store),
             ai: MockAIService(library: library, workspaces: root.appendingPathComponent("Workspaces"), pace: pace),
             install: MockInstallService(status: InstallStatus(screenTimers: MockInstallService.sampleScreenTimers)),
             render: render,
             checker: MockSceneChecker(pace: pace),
-            compiler: compiler)
+            compiler: compiler,
+            collections: CollectionService(library: library, store: store))
     }
 
     /// A fresh per-process temporary root.
@@ -243,6 +249,7 @@ final class MockLibraryService: LibraryServicing, @unchecked Sendable {
 final class MockPublishService: PublishServicing, @unchecked Sendable {
     private let settingsURL: URL
     private let library: MockLibraryService
+    private let collections: CollectionStore?
     private let pace: Double
     private let lock = NSLock()
     private var generation = 0
@@ -256,9 +263,10 @@ final class MockPublishService: PublishServicing, @unchecked Sendable {
         var errorDescription: String? { "The screen saver bundle is busy (simulated failure)." }
     }
 
-    init(root: URL, library: MockLibraryService, pace: Double) {
+    init(root: URL, library: MockLibraryService, pace: Double, collections: CollectionStore? = nil) {
         settingsURL = root.appendingPathComponent("playlist-settings.json")
         self.library = library
+        self.collections = collections
         self.pace = pace
     }
 
@@ -276,7 +284,8 @@ final class MockPublishService: PublishServicing, @unchecked Sendable {
         if pace > 0 { Thread.sleep(forTimeInterval: 0.4 * pace) }
         lock.lock(); defer { lock.unlock() }
         if failNextPublish { failNextPublish = false; throw PublishFailed() }
-        let s = loadSettings()
+        // Like PublishService: a playlist that follows a collection plays it as it is now.
+        let s = loadSettings().following(collections?.load().collections ?? [])
         let scenes = try library.scenes()
         let byID = Dictionary(scenes.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
         let chosen = PlaylistDraft(s).effectiveSceneIDs(available: scenes.map(\.id))

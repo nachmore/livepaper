@@ -12,7 +12,7 @@ import LivePaperCore
 import os
 
 extension SelfTests {
-    static var app: [TestCase] { appLogic + appDisplays + appModel + appModelDisplays + appWatch }
+    static var app: [TestCase] { appLogic + appDisplays + appModel + appModelDisplays + appWatch + appCollections }
 
     // MARK: - Pure logic
 

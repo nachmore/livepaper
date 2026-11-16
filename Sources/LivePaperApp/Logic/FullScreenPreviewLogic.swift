@@ -16,6 +16,8 @@ enum FullScreenPreviewSource: Equatable, Sendable {
     case library
     /// The Screen Saver (playlist) screen or the menu bar: the playlist's order.
     case playlist
+    /// A collection (its screen, a card in it, the sidebar): the collection's order.
+    case collection
     /// An AI session's result before it is accepted: the new scene alone, or (modify) the new
     /// version first and the library's current version second, so ← → compare them.
     case candidate
@@ -150,6 +152,16 @@ struct FullScreenPreviewRequest: Equatable, Sendable {
         guard let sequence = FullScreenPreviewSequence(ids: ids, start: start, source: .playlist) else { return nil }
         return FullScreenPreviewRequest(sequence: sequence, showClock: settings.showClock, performance: settings.performance,
                                         cycleMinutes: settings.mode == .single ? 0 : settings.cycleMinutes)
+    }
+
+    /// A collection's scenes that are in the library, in its order, from `start` (nil: the first),
+    /// with the saved playlist's clock and performance settings. ← → step; nothing moves on by itself.
+    static func collection(_ sceneIDs: [String], available: [String], start: String? = nil,
+                           playlist: PlaylistSettings) -> FullScreenPreviewRequest? {
+        let existing = Set(available)
+        guard let sequence = FullScreenPreviewSequence(ids: sceneIDs.filter(existing.contains), start: start, source: .collection)
+        else { return nil }
+        return FullScreenPreviewRequest(sequence: sequence, showClock: playlist.showClock, performance: playlist.performance)
     }
 
     /// An AI session's result before it is accepted, with the saved playlist's clock and performance

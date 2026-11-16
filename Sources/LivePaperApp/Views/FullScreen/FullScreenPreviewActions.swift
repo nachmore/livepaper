@@ -22,6 +22,18 @@ enum FullScreenPreviewLauncher {
         FullScreenPreviewController.shared.present(request, model: model, origin: fromMenuBar ? .pointer : .window(currentWindowFrame))
     }
 
+    /// A collection's scenes in its order, from `start` (nil: the first).
+    static func previewCollection(_ id: String, start: String? = nil, model: AppModel) {
+        guard let c = model.collection(id: id),
+              let request = FullScreenPreviewRequest.collection(c.sceneIDs, available: model.availableSceneIDs, start: start,
+                                                                playlist: model.playlist) else { return }
+        FullScreenPreviewController.shared.present(request, model: model, origin: .window(currentWindowFrame))
+    }
+
+    static func canPreviewCollection(_ id: String, model: AppModel) -> Bool {
+        model.collection(id: id).map { !$0.existingSceneIDs(available: Set(model.availableSceneIDs)).isEmpty } ?? false
+    }
+
     /// An AI session's result before it is accepted (it still lives in the session's workspace).
     /// Modifying a library scene: ← → switch between the new version and the current one. Once the
     /// result is accepted and in the library it is a library scene and previews like one

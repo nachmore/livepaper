@@ -1,5 +1,5 @@
-// MainWindowView — the main window: sidebar navigation, the selected screen, non-modal banners,
-// scene-action sheets and the onboarding sheet.
+// MainWindowView — the main window: sidebar navigation (with the collections), the selected screen,
+// non-modal banners, scene- and collection-action sheets and the onboarding sheet.
 import AppKit
 import LivePaperCore
 import SwiftUI
@@ -18,6 +18,9 @@ struct MainWindowView: View {
         .overlay(alignment: .top) { BannerStack() }
         .sheet(item: $model.sceneAction) { action in
             SceneActionSheet(action: action)
+        }
+        .sheet(item: $model.collectionAction) { action in
+            CollectionActionSheet(action: action)
         }
         .sheet(isPresented: $model.showOnboarding) {
             OnboardingView()
@@ -42,6 +45,8 @@ private struct DetailRouter: View {
             CreateView()
         case .playlist:
             PlaylistView()
+        case .collection(let id):
+            CollectionScreen(collectionID: id)
         case .session(let id):
             if let session = model.session(id: id) {
                 AISessionView(session: session)
@@ -58,6 +63,9 @@ private struct DetailRouter: View {
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    /// The collection row scenes are being dragged onto ("new" for New Collection…).
+    @State private var dropTarget: String?
+    @State private var filesTargeted = false
 
     var body: some View {
         @Bindable var model = model
@@ -70,6 +78,43 @@ struct SidebarView: View {
                     .tag(AppModel.Section.create)
                 Label("Screen Saver", systemImage: "play.rectangle.on.rectangle")
                     .tag(AppModel.Section.playlist)
+            }
+            Section {
+                ForEach(model.collections) { collection in
+                    CollectionSidebarRow(collection: collection, count: model.sceneCount(of: collection),
+                                         playing: model.isFollowed(collection.id), targeted: dropTarget == collection.id)
+                        .tag(AppModel.Section.collection(collection.id))
+                        .contextMenu { CollectionMenuItems(collection: collection) }
+                        .dropDestination(for: SceneDragPayload.self) { payloads, _ in
+                            let ids = SceneDragPayload.sceneIDs(payloads)
+                            dropTarget = nil
+                            // Dropped back onto the collection they came from: nothing to do.
+                            guard !ids.isEmpty, !payloads.allSatisfy({ $0.sourceCollection == collection.id }) else { return false }
+                            Task { await model.addToCollection(ids, collection.id) }
+                            return true
+                        } isTargeted: { targeted in
+                            if targeted { dropTarget = collection.id } else if dropTarget == collection.id { dropTarget = nil }
+                        }
+                }
+                Button {
+                    model.collectionAction = .new(sceneIDs: [])
+                } label: {
+                    Label("New Collection\u{2026}", systemImage: "plus")
+                        .foregroundStyle(dropTarget == "new" ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("A new collection. Drop scenes here to make one with them.")
+                .dropDestination(for: SceneDragPayload.self) { payloads, _ in
+                    let ids = SceneDragPayload.sceneIDs(payloads)
+                    dropTarget = nil
+                    guard !ids.isEmpty else { return false }
+                    model.collectionAction = .new(sceneIDs: ids)
+                    return true
+                } isTargeted: { targeted in
+                    if targeted { dropTarget = "new" } else if dropTarget == "new" { dropTarget = nil }
+                }
+            } header: {
+                Text("Collections")
             }
             if !model.sessions.isEmpty {
                 Section("AI Sessions") {
@@ -87,7 +132,54 @@ struct SidebarView: View {
             }
         }
         .listStyle(.sidebar)
+        // .lpcollection and .lpscene files dropped from Finder are imported (scenes the library already
+        // has just open).
+        .dropDestination(for: URL.self) { urls, _ in
+            let files = urls.filter { [CollectionArchive.fileExtension, SceneManifest.packageExtension].contains($0.pathExtension.lowercased()) }
+            for url in files {
+                Task {
+                    if url.pathExtension.lowercased() == CollectionArchive.fileExtension { await model.importCollection(at: url) }
+                    else { await model.openScenePackage(at: url) }
+                }
+            }
+            return !files.isEmpty
+        } isTargeted: { filesTargeted = $0 }
+        .overlay {
+            if filesTargeted {
+                RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor, lineWidth: 2).padding(4).allowsHitTesting(false)
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) { SetupStatusFooter() }
+    }
+}
+
+private struct CollectionSidebarRow: View {
+    let collection: SceneCollection
+    let count: Int
+    /// The screen saver plays it.
+    let playing: Bool
+    /// Scenes are being dragged onto it.
+    let targeted: Bool
+
+    var body: some View {
+        Label {
+            HStack(spacing: 4) {
+                Text(collection.name).lineLimit(1)
+                if playing {
+                    Image(systemName: "play.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .help("The screen saver plays this collection")
+                        .accessibilityLabel("Plays in the screen saver")
+                }
+            }
+        } icon: {
+            Image(systemName: targeted ? "rectangle.stack.badge.plus" : "rectangle.stack")
+        }
+        .badge(count)
+        .padding(.vertical, 1)
+        .background(targeted ? RoundedRectangle(cornerRadius: 5).fill(Color.accentColor.opacity(0.25)) : nil)
+        .accessibilityElement(children: .combine)
+        .accessibilityValue(CollectionText.sceneCount(count) + (playing ? ", plays in the screen saver" : ""))
     }
 }
 

@@ -112,6 +112,7 @@ struct OnboardingView: View {
         } else {
             settings.mode = .shuffle
             settings.sceneIDs = []
+            settings.collectionID = nil
         }
         // Without an installed saver there is nothing to publish into yet; installing publishes.
         let publish = model.installStatus.saverInstalled

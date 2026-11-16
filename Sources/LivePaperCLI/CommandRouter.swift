@@ -93,10 +93,10 @@ struct CLICommand {
 
 enum CLI {
     static var groups: [[CLICommand]] {
-        [SceneCommands.all, LibraryCommands.all, AICommands.all, InstallCommands.all, ServerCommands.all]
+        [SceneCommands.all, LibraryCommands.all, CollectionCommands.all, AICommands.all, InstallCommands.all, ServerCommands.all]
     }
     static var commands: [CLICommand] { groups.flatMap { $0 } }
-    static let groupTitles = ["Scenes", "Library & screen saver", "AI authoring", "Installation", "Render server"]
+    static let groupTitles = ["Scenes", "Library & screen saver", "Collections", "AI authoring", "Installation", "Render server"]
 
     static func main(_ argv: [String]) async -> Int32 {
         var args = Array(argv.dropFirst())
@@ -134,6 +134,10 @@ enum CLI {
             return ExitCode.failed
         } catch let e as LibraryError {
             // Unknown id, built-in (read-only) scene, invalid package: the request can't be done as asked.
+            stderr("livepaper \(cmd.name): \(e.localizedDescription)")
+            return ExitCode.failed
+        } catch let e as CollectionError {
+            // No such collection, a name that is taken, a file that isn't a collection, …
             stderr("livepaper \(cmd.name): \(e.localizedDescription)")
             return ExitCode.failed
         } catch let e as ReferenceError {

@@ -21,7 +21,7 @@ func tempDir(_ name: String) throws -> URL {
 }
 
 enum SelfTests {
-    static var all: [TestCase] { contracts + runtime + runtimeSpan + runtimeSpanJS + references + saver + saverDisplays + core + app + recovery + helper + preSleep + cli + wallpaper + builtinScenes }
+    static var all: [TestCase] { contracts + runtime + runtimeSpan + runtimeSpanJS + references + saver + saverDisplays + core + collections + app + recovery + helper + preSleep + cli + wallpaper + builtinScenes }
 }
 
 // Line-buffered even into a pipe (CI runs `… | tee`): results show as they happen, and if a test

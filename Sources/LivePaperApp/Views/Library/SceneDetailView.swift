@@ -170,6 +170,15 @@ private struct SceneDetailContent: View {
                 Label("Add to Playlist", systemImage: "text.badge.plus")
             }
             .disabled(model.isPublishing || (model.isInPlaylist(entry.id) && model.playlist.mode != .single))
+            .help(model.followedCollection.map { "The screen saver plays \u{201C}\($0.name)\u{201D}, so the scene is added to that collection." }
+                  ?? "Add the scene to the screen saver playlist")
+            Menu {
+                AddToCollectionItems(sceneIDs: [entry.id])
+            } label: {
+                Label("Add to Collection", systemImage: "rectangle.stack.badge.plus")
+            }
+            .fixedSize()
+            .help("Add the scene to a collection, or take it out of one (the checkmarks)")
             Button {
                 model.sceneAction = .modify(entry.id)
             } label: {
@@ -203,6 +212,8 @@ private struct SceneDetailContent: View {
                     InfoRow(label: "Cloned from", value: model.entry(id: parent)?.manifest.name ?? parent)
                 }
                 if !m.tags.isEmpty { InfoRow(label: "Tags", value: m.tags.joined(separator: ", ")) }
+                let inCollections = model.collections(containing: entry.id)
+                if !inCollections.isEmpty { InfoRow(label: "Collections", value: inCollections.map(\.name).joined(separator: ", ")) }
                 InfoRow(label: "Location", value: LPFormat.abbreviatingHome(entry.item.packageURL.path))
             }
             .font(.callout)

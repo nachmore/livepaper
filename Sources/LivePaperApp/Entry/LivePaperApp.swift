@@ -155,12 +155,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
-    /// Double-clicking a .lpscene package (declared in Info.plist) opens it: a scene that is already
-    /// in the library just opens; anything else is imported (AppModel.openScenePackage).
+    /// Double-clicking a .lpscene package or a .lpcollection file (declared in Info.plist) opens it: a
+    /// scene or collection that is already in the library just opens; anything else is imported
+    /// (AppModel.openScenePackage, AppModel.importCollection).
     func application(_ application: NSApplication, open urls: [URL]) {
         let model = AppBootstrap.model
-        for url in urls where url.pathExtension.lowercased() == SceneManifest.packageExtension {
-            Task { await model.openScenePackage(at: url) }
+        for url in urls {
+            switch url.pathExtension.lowercased() {
+            case SceneManifest.packageExtension: Task { await model.openScenePackage(at: url) }
+            case CollectionArchive.fileExtension: Task { await model.importCollection(at: url) }
+            default: continue
+            }
         }
         WindowRouter.shared.openMainWindow?()
     }
@@ -197,19 +202,33 @@ struct LivePaperCommands: Commands {
     /// Published by the focused library card, the scene detail view or the Screen Saver screen.
     @FocusedValue(\.fullScreenPreview) private var fullScreenPreview
 
+    /// The scene whose detail view is on screen (opened from the library or a collection).
     private var currentScene: LibraryEntry? {
-        guard model.section == .library, let id = model.libraryPath.last else { return nil }
-        return model.entry(id: id)
+        switch model.section {
+        case .library?: return model.libraryPath.last.flatMap { model.entry(id: $0) }
+        case .collection?: return model.collectionPath.last.flatMap { model.entry(id: $0) }
+        default: return nil
+        }
     }
 
     var body: some Commands {
         CommandGroup(replacing: .newItem) {
             Button("New Scene\u{2026}") { show(.create) }
                 .keyboardShortcut("n")
+            Button("New Collection\u{2026}") {
+                openWindow(id: WindowID.main)
+                model.collectionAction = .new(sceneIDs: [])
+            }
+            .keyboardShortcut("n", modifiers: [.command, .option])
+            Divider()
             Button("Import Scene\u{2026}") {
                 if let url = SystemActions.chooseScenePackage() { Task { await model.openScenePackage(at: url) } }
             }
             .keyboardShortcut("o")
+            Button("Import Collection\u{2026}") {
+                for url in SystemActions.chooseCollectionFiles() { Task { await model.importCollection(at: url) } }
+            }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
         }
         CommandGroup(after: .sidebar) {
             Button("Library") { show(.library) }.keyboardShortcut("1")

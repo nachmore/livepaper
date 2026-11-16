@@ -38,7 +38,9 @@
 	<false/>
 	<key>NSSupportsSuddenTermination</key>
 	<false/>
-	<!-- Scene packages (<id>.lpscene directories): Finder shows them as one item; opening one imports it. -->
+	<!-- Scene packages (<id>.lpscene directories): Finder shows them as one item; opening one imports it.
+	     Collections (<name>.lpcollection, a zip of collection.json + scene packages): opening one imports it.
+	     Scene references: what dragging scene cards inside LivePaper carries (never written to disk). -->
 	<key>UTExportedTypeDeclarations</key>
 	<array>
 		<dict>
@@ -59,6 +61,34 @@
 				</array>
 			</dict>
 		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.nachmore.livepaper.collection</string>
+			<key>UTTypeDescription</key>
+			<string>LivePaper Collection</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+				<string>public.composite-content</string>
+			</array>
+			<key>UTTypeTagSpecification</key>
+			<dict>
+				<key>public.filename-extension</key>
+				<array>
+					<string>lpcollection</string>
+				</array>
+			</dict>
+		</dict>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>com.nachmore.livepaper.scene-references</string>
+			<key>UTTypeDescription</key>
+			<string>LivePaper Scenes</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+		</dict>
 	</array>
 	<key>CFBundleDocumentTypes</key>
 	<array>
@@ -74,6 +104,18 @@
 			<key>LSItemContentTypes</key>
 			<array>
 				<string>com.nachmore.livepaper.scene</string>
+			</array>
+		</dict>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>LivePaper Collection</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>Owner</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>com.nachmore.livepaper.collection</string>
 			</array>
 		</dict>
 	</array>

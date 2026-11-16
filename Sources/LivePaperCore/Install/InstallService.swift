@@ -1259,9 +1259,10 @@ public final class InstallService: InstallServicing, @unchecked Sendable {
 
     // MARK: - Uninstall
 
-    /// Files in the support directory that are kept when the library is kept: the scenes and the
-    /// user's preferences, so reinstalling picks up where they left off.
-    static let keptWithLibrary: Set<String> = ["Library", "state.json", PublishService.settingsFileName, AIService.settingsFileName]
+    /// Files in the support directory that are kept when the library is kept: the scenes, their
+    /// collections and the user's preferences, so reinstalling picks up where they left off.
+    static let keptWithLibrary: Set<String> = ["Library", CollectionsFile.fileName, "state.json", PublishService.settingsFileName,
+                                               AIService.settingsFileName]
 
     /// Title of the uninstall step that undoes the screen-saver selection.
     public static let restoreScreenSaverTitle = "Restore the previous screen saver choice"

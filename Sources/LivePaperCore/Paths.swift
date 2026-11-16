@@ -21,6 +21,8 @@ public enum LPPaths {
     public static var renderSocket: URL { supportRoot.appendingPathComponent("render.sock") }
     public static var renderdPIDFile: URL { supportRoot.appendingPathComponent("renderd.pid") }
     public static var logs: URL { supportRoot.appendingPathComponent("Logs") }
+    /// Collections of scenes (CollectionStore, ARCHITECTURE §4.6).
+    public static var collectionsFile: URL { supportRoot.appendingPathComponent(CollectionsFile.fileName) }
 
     public static var screenSaversDir: URL {
         if let o = ProcessInfo.processInfo.environment["LIVEPAPER_SAVERS_DIR"], !o.isEmpty { return URL(fileURLWithPath: o) }

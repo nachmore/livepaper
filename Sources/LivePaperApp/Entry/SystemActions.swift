@@ -31,6 +31,34 @@ enum SystemActions {
         return panel.runModal() == .OK ? panel.url : nil
     }
 
+    /// The .lpcollection file type (declared in Info.plist; by its extension when running unbundled).
+    static var collectionType: UTType {
+        UTType("com.nachmore.livepaper.collection") ?? UTType(filenameExtension: CollectionArchive.fileExtension) ?? .data
+    }
+
+    /// Asks where to export a collection ("Night Skies.lpcollection").
+    static func chooseCollectionExportDestination(for collection: SceneCollection) -> URL? {
+        let panel = NSSavePanel()
+        panel.title = "Export \u{201C}\(collection.name)\u{201D}"
+        panel.message = "One file with the collection and your scenes in it, to import into another LivePaper."
+        panel.nameFieldStringValue = CollectionArchive.suggestedFileName(for: collection.name)
+        panel.allowedContentTypes = [collectionType]
+        panel.canCreateDirectories = true
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Asks for .lpcollection files to import.
+    static func chooseCollectionFiles() -> [URL] {
+        let panel = NSOpenPanel()
+        panel.title = "Import Collection"
+        panel.message = "Choose a LivePaper collection (.\(CollectionArchive.fileExtension))."
+        panel.allowedContentTypes = [collectionType]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        return panel.runModal() == .OK ? panel.urls : []
+    }
+
     /// Asks for a video file.
     static func chooseVideo() -> URL? {
         let panel = NSOpenPanel()
