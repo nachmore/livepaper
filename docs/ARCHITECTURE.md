@@ -718,7 +718,11 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   and the timeout send SIGTERM to the group and SIGKILL 3 s later; whatever the harness leaves in
   its group when it exits gets 1 s. `AISessionTerminating.terminateNow(grace:)` does the same
   synchronously and returns once the group is empty: quitting the app (`applicationShouldTerminate`
-  → `.terminateLater`, at most 3 s) and uninstalling (before anything is deleted) use it. A cancel
+  → `.terminateLater`, at most 3 s) and uninstalling (before anything is deleted) use it
+  (`AppModel.stopAllAgents`). Both first refuse new sessions and wait (at most 3 s) for sessions still
+  being started — their workspaces are built off the main thread and their harnesses launch as the
+  start returns — so those agents are stopped too (a start that finishes after that stops its own
+  agent); an uninstall that didn't finish allows new sessions again. A cancel
   or terminateNow while the launch is still warming up (login shell, Kiro capability probe, render
   server) never waits for it: the launch stops at its next step and the harness is never started
   (the last check and the spawn are atomic). `livepaper ai create|modify`: the first Ctrl-C/SIGTERM

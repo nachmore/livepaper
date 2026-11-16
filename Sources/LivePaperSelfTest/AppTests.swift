@@ -1576,11 +1576,19 @@ extension SelfTests {
                 try expectEqual(failed.failures.map(\.title), ["Remove \(LPPaths.installedSaver.path)".replacingOccurrences(of: NSHomeDirectory() + "/", with: "~/")])
                 try expect(model.hasCompletedOnboarding, "an unfinished uninstall keeps the setup state")
                 try expect(model.installStatus.saverInstalled && !model.installStatus.helperRunning)
+                // LivePaper is still in use: sessions start again.
+                let harness = try unwrap(model.preferredHarness)
+                try expect(!model.refusesNewSessions)
+                try started(model, .create(prompt: "After an unfinished uninstall"), harness: harness, model: nil).cancel()
                 install.failingUninstallStep = nil
                 try awaitMain { report = await model.uninstall(keepScenes: false) }
                 try expect(report?.succeeded == true)
                 try expect(report?.rows.first?.state == .skipped, "finished steps are skipped on retry")
                 try expect(!model.hasCompletedOnboarding && !model.installStatus.saverInstalled)
+                // Uninstalled (the app is about to quit, its support directory is gone): none do.
+                var late: AISessionModel?
+                try awaitMain { late = await model.startSession(.create(prompt: "After uninstalling"), harness: harness, model: nil) }
+                try expect(late == nil && model.refusesNewSessions)
             }
         },
         TestCase(name: "app.model.publish-skipped") {
@@ -1839,6 +1847,61 @@ extension SelfTests {
                 }
             }
         },
+        TestCase(name: "app.model.quit-during-start") {
+            // Quitting (or uninstalling) while a session is still being started: its harness launches
+            // once the workspace is built, so quitting waits for that start and stops its agent too
+            // (here one that ignores SIGTERM), and no new session starts from then on.
+            try withScratchPaths("quit-starting") { root in
+                let (scripted, harness) = try scriptedAIService(root: root, agent: """
+                trap '' TERM
+                echo $$ > .livepaper/agent.pid
+                echo started
+                while :; do sleep 1; done
+                """)
+                let ai = GatedAIService(scripted)
+                let mock = try MockServices.make(root: root.appendingPathComponent("Mock"), pace: 0)
+                let services = LivePaperServices(library: mock.library, publish: mock.publish, ai: ai, install: mock.install,
+                                                 render: mock.render, checker: mock.checker, compiler: mock.compiler)
+                try MainActor.assumeIsolated {
+                    let model = AppModel(services: services, environment: testEnvironment(root: root, saved: SavedStates()))
+                    var returned = false, handedBack: AISessionModel?
+                    Task { @MainActor in
+                        handedBack = await model.startSession(.create(prompt: "Started as LivePaper quits"), harness: harness, model: nil)
+                        returned = true
+                    }
+                    try awaitMain(until: { ai.starts.withLock { $0 } == 1 })
+                    try expect(model.isStartingSession && model.sessions.isEmpty && model.hasAgentsToStop, "quitting has an agent to stop")
+                    var stopped = false
+                    Task { @MainActor in await model.stopAllAgents(); stopped = true }
+                    let soon = Date().addingTimeInterval(0.3)
+                    try awaitMain(until: { Date() > soon })
+                    try expect(!stopped && !returned, "quitting waits for the start")
+                    ai.gate.signal()
+                    try awaitMain(until: { stopped })
+                    try expect(returned && handedBack == nil, "the start hands back no session to use")
+                    try expect(!model.isStartingSession)
+                    let session = try unwrap(model.sessions.first)
+                    try expectEqual(session.state.phase, .cancelled)
+                    // Its agent never ran, or is gone — also a moment later (a launch stopped while
+                    // warming up never spawns).
+                    let pidFile = AIWorkspace(root: session.workspace).internalDirectory.appendingPathComponent("agent.pid")
+                    func agentAlive() -> Bool {
+                        guard let text = try? String(contentsOf: pidFile, encoding: .utf8),
+                              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)) else { return false }
+                        return kill(pid, 0) == 0
+                    }
+                    try expect(!agentAlive(), "the agent was stopped before LivePaper would exit")
+                    let later = Date().addingTimeInterval(1.5)
+                    try awaitMain(until: { Date() > later })
+                    try expect(!agentAlive(), "no agent spawned after the stop")
+                    // From now on nothing starts.
+                    ai.gate.signal()
+                    var refused: AISessionModel?
+                    try awaitMain { refused = await model.startSession(.create(prompt: "One more"), harness: harness, model: nil) }
+                    try expect(refused == nil && ai.starts.withLock { $0 } == 1, "a new session isn't started while quitting")
+                }
+            }
+        },
         TestCase(name: "app.model.quit-wait-is-bounded") {
             // An agent that can't be stopped in time never holds up quitting past the limit.
             try MainActor.assumeIsolated {
@@ -1858,6 +1921,23 @@ extension SelfTests {
             }
         },
     ] }
+
+    /// Holds every start (a workspace that takes a while to build) until `gate` is signalled, then
+    /// starts for real — the harness launches as the start returns, as AIService's does.
+    final class GatedAIService: AIServicing, @unchecked Sendable {
+        let base: AIServicing
+        let gate = DispatchSemaphore(value: 0)
+        let starts = OSAllocatedUnfairLock(initialState: 0)
+        init(_ base: AIServicing) { self.base = base }
+        func detectHarnesses() async -> [AIHarness] { await base.detectHarnesses() }
+        func start(_ request: AISessionRequest, references: [PreparedReference], harness: AIHarness, model: String?) throws -> AISessionHandle {
+            starts.withLock { $0 += 1 }
+            gate.wait()
+            return try base.start(request, references: references, harness: harness, model: model)
+        }
+        func loadSettings() -> AISettings { base.loadSettings() }
+        func saveSettings(_ settings: AISettings) throws { try base.saveSettings(settings) }
+    }
 
     /// A session whose agent doesn't stop until released.
     final class StuckHandle: AISessionTerminating, @unchecked Sendable {

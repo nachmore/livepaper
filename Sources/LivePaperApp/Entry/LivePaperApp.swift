@@ -148,10 +148,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 
     /// Agents run in their own process groups and don't die with LivePaper: quitting (the menu,
-    /// ⌘Q, logout, the end of an uninstall) waits until they are gone, for at most a few seconds.
+    /// ⌘Q, logout, the end of an uninstall) waits until they are gone — also those of sessions still
+    /// being started, whose harnesses launch once their workspaces are built — for at most a few seconds.
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         let model = AppBootstrap.model
-        guard !model.sessions.isEmpty else { return .terminateNow }
+        guard model.hasAgentsToStop else { return .terminateNow }
         Task { @MainActor in
             await model.stopAllAgents()
             sender.reply(toApplicationShouldTerminate: true)

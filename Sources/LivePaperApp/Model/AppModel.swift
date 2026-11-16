@@ -1082,11 +1082,15 @@ final class AppModel {
         await saverUpdate?.value
         await helperRepair?.value
         let install = services.install
-        // Agents work inside the support directory this deletes: they must be gone first.
+        // Agents work inside the support directory this deletes: they must be gone first — also the
+        // ones whose sessions are still being started — and no new ones start meanwhile.
         await stopAllAgents()
         let steps = (try? await offMain { install.performUninstall(removeLibrary: !keepScenes) }) ?? []
         let report = UninstallReport.make(steps)
         await refreshInstallStatus()
+        // An uninstall that didn't finish leaves LivePaper in use (Try Again skips what is done);
+        // after one that did, the app goes to the Trash and quits.
+        if !report.succeeded { refusesNewSessions = false }
         if report.succeeded {
             environment.defaults.removeObject(forKey: AppEnvironment.onboardingCompletedKey)
             // state.json survives when the scenes are kept; don't leave it claiming the lock keys
@@ -1136,10 +1140,26 @@ final class AppModel {
     /// and Try Again wait meanwhile.
     private(set) var startingSessions = 0
     var isStartingSession: Bool { startingSessions > 0 }
+    /// Quitting or uninstalling has begun: no new session starts (its agent would outlive the app,
+    /// or work in a support directory that is about to be deleted). An uninstall that didn't finish
+    /// allows them again.
+    private(set) var refusesNewSessions = false
 
-    /// Stops every AI agent and waits (at most `AgentShutdown.limit`) until their processes are
-    /// gone: before LivePaper quits, and before uninstalling deletes their workspaces.
-    func stopAllAgents() async { await AgentShutdown.stop(sessions) }
+    /// Agents run, or may be about to (a session still being started has its harness launching
+    /// once its workspace is built): quitting has to stop them first.
+    var hasAgentsToStop: Bool { !sessions.isEmpty || isStartingSession }
+
+    /// Stops every AI agent and waits until their processes are gone: before LivePaper quits, and
+    /// before uninstalling deletes their workspaces. New sessions are refused from here on; sessions
+    /// still being started are waited for first (at most `AgentShutdown.limit`; one that finishes
+    /// later stops its own agent), so their agents are stopped too. Then at most
+    /// `AgentShutdown.limit` for the agents.
+    func stopAllAgents() async {
+        refusesNewSessions = true
+        let deadline = Date().addingTimeInterval(AgentShutdown.limit)
+        while isStartingSession, Date() < deadline { try? await Task.sleep(nanoseconds: 20_000_000) }
+        await AgentShutdown.stop(sessions)
+    }
 
     func session(id: String) -> AISessionModel? { sessions.first { $0.id == id } }
 
@@ -1162,6 +1182,7 @@ final class AppModel {
         let trimmed = model?.trimmingCharacters(in: .whitespacesAndNewlines)
         let chosen = (trimmed?.isEmpty == false ? trimmed : nil) ?? defaultModel(for: harness)
         let ai = services.ai
+        guard !refusesNewSessions else { return nil }   // quitting or uninstalling
         startingSessions += 1
         defer { startingSessions -= 1 }
         do {
@@ -1170,6 +1191,13 @@ final class AppModel {
                                          timeout: aiSettings.timeout, clonedFrom: clonedFrom)
             sessions.insert(session, at: 0)
             session.start { [weak self] s in self?.sessionDidFinish(s) }
+            if refusesNewSessions {
+                // Quitting or uninstalling began while the workspace was built, and its harness is
+                // already launching: stop it before this start counts as done (stopAllAgents waits
+                // for that). Stopped while still launching, it never spawns.
+                await AgentShutdown.stop([session])
+                return nil
+            }
             section = .session(session.id)
             return session
         } catch {
