@@ -244,7 +244,7 @@ extension SelfTests {
         cliTest("cli.help") { sb in
             let r = try sb.run(["help"])
             try expectEqual(r.status, 0)
-            for command in ["check", "still", "bench", "thumbnail", "new", "list", "import", "publish", "ai", "doctor", "uninstall", "server"] {
+            for command in ["check", "still", "bench", "thumbnail", "new", "list", "import", "publish", "ai", "doctor", "select", "uninstall", "server"] {
                 try expect(r.out.contains("\n  \(command) "), "help doesn't list \(command)")
             }
             try expect(!r.out.contains("not available"), "help still lists placeholder commands")
@@ -372,6 +372,74 @@ extension SelfTests {
             r = try sb.run(["doctor", "--no-ai"])
             try expect(r.out.contains("LivePaper doctor") && r.out.contains("problem"), r.out)
         },
+        cliTest("cli.select") { sb in
+            // `livepaper select` on a store shaped like the one that showed macOS's default on four of
+            // six displays (RealShapedStore), in the sandbox's scratch store.
+            let store = RealShapedStore.self
+            let module = WallpaperSaverModule(url: sb.saver)
+            var r = try sb.run(["select"])
+            try expectEqual(r.status, 1)
+            try expect(r.out.contains("isn't installed yet"), r.out)
+            try sb.installFakeSaver()
+            let reverted = try store.data(store.reverted(livePaper: sb.saver.path))
+            try reverted.write(to: sb.wallpaperStore)
+            func selectedRow(_ env: [String: String] = [:]) throws -> (status: String?, detail: String) {
+                let out = try sb.run(["doctor", "--no-ai", "--json"], extraEnv: env).out
+                let checks = (try CLITestSupport.jsonObject(out)["checks"] as? [[String: Any]]) ?? []
+                let row = checks.first { $0["section"] as? String == "Screen saver" && $0["name"] as? String == "selected" }
+                return (row?["status"] as? String, row?["detail"] as? String ?? "")
+            }
+            // doctor: a problem, with the fix — counting the display records (no display list here)…
+            var row = try selectedRow()
+            try expectEqual(row.status, "problem")
+            try expect(row.detail.contains("for 4 of the 6 displays in your wallpaper settings") && row.detail.contains("`livepaper select`"), row.detail)
+            try expect(!row.detail.contains("by itself"), "LivePaper didn't make this selection: \(row.detail)")
+            // …or the connected ones first, when they are known (two of the four in use, here).
+            let connected = ["LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS": "\(store.c),\(store.d)"]
+            row = try selectedRow(connected)
+            try expect(row.status == "problem" && row.detail.contains("on 2 of your 2 connected displays: they show macOS\u{2019}s default")
+                       && row.detail.contains("so would 2 displays not connected now") && row.detail.contains("`livepaper select`"), row.detail)
+            row = try selectedRow(["LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS": store.a])
+            try expect(row.status == "problem" && row.detail.contains("on your connected display, but not for 4 displays not connected now"), row.detail)
+            // No WallpaperAgent to restart in the sandbox: refused, with the reason, nothing changed.
+            r = try sb.run(["select"])
+            try expectEqual(r.status, 3)
+            try expect(r.out.contains("LivePaper didn't change the screen saver (") && r.out.contains("can't be changed here"), r.out)
+            try expectEqual(try Data(contentsOf: sb.wallpaperStore), reverted)
+            // With the stand-in agent: every display, every placeholder recorded.
+            let agent = ["LIVEPAPER_SELFTEST_WALLPAPER_AGENT": "1"]
+            r = try sb.run(["select"], extraEnv: agent)
+            try expect(r.status == 0 && r.out.contains("for every display"), "\(r.status): \(r.out) \(r.err)")
+            let selected = try WallpaperStoreDocument(data: Data(contentsOf: sb.wallpaperStore))
+            try expect(selected.selection(of: module).isSelectedEverywhere)
+            let manifest = try WallpaperSelectionManifest.load(from: sb.support.appendingPathComponent("backups/wallpaper-selection.json"))
+            try expectEqual(manifest?.slots.map(\.record), ([.systemDefault] + store.placeholderDisplayPaths).sorted())
+            row = try selectedRow()
+            try expect(row.status == "ok" && row.detail.contains("on every display"), row.detail)
+            // Again: nothing left to change, nothing written.
+            let once = try Data(contentsOf: sb.wallpaperStore)
+            r = try sb.run(["select"], extraEnv: agent)
+            try expectEqual(r.status, 0)
+            try expectEqual(try Data(contentsOf: sb.wallpaperStore), once)
+            // Uninstall puts the placeholders back exactly; nothing names LivePaper; the saver goes.
+            r = try sb.run(["uninstall", "--yes", "--keep-scenes"], extraEnv: agent)
+            try expect(r.status == 0, "\(r.out) \(r.err)")
+            let before = try WallpaperStoreDocument(data: reverted)
+            let after = try WallpaperStoreDocument(data: Data(contentsOf: sb.wallpaperStore))
+            try expect((([.systemDefault] + store.placeholderDisplayPaths) as [WallpaperRecordPath]).allSatisfy {
+                after.idleSlot(at: $0) == before.idleSlot(at: $0)
+            }, "placeholders back exactly")
+            try expect(after.selection(of: module).livePaper.isEmpty)
+            try expectEqual(desktopSlots(after), desktopSlots(before))
+            try expect(!FileManager.default.fileExists(atPath: sb.saver.path))
+            // A store in a format LivePaper doesn't know that names LivePaper: a warning, not "selected".
+            try sb.installFakeSaver()
+            let config = StoreFixture.moduleConfiguration(sb.saver.path)
+            try PlistValue.dictionary(["Displays": .dictionary(["X": .dictionary(["Idle": .dictionary(["Choice": .data(config)])])])])
+                .binaryData().write(to: sb.wallpaperStore)
+            row = try selectedRow()
+            try expect(row.status == "warning" && row.detail.contains("can\u{2019}t tell which displays use it"), "\(row)")
+        },
         cliTest("cli.uninstall") { sb in
             _ = try sb.run(["new", "aurora-lake"])
             try sb.installFakeSaver()
@@ -416,7 +484,7 @@ extension SelfTests {
             try CLITestSupport.writeWebScene(at: outside, id: "glow", name: "Glow")
             let session = [AISessionPolicy.sessionVariable: "s1", AISessionPolicy.workspaceVariable: ws.path]
             let marker = sb.root.appendingPathComponent("pwned")
-            for args in [["uninstall", "--yes"], ["publish"], ["import", outside.path], ["new", "X"], ["list"], ["doctor"],
+            for args in [["uninstall", "--yes"], ["publish"], ["import", outside.path], ["new", "X"], ["list"], ["doctor"], ["select"],
                          ["ai", "create", "x", "--command", "/usr/bin/touch \(marker.path)", "--yes"], ["server", "stop"]] {
                 let r = try sb.run(args, extraEnv: session)
                 try expectEqual(r.status, 2)
@@ -1062,6 +1130,8 @@ final class CLISandbox {
     var savers: URL { root.appendingPathComponent("savers") }
     var saver: URL { savers.appendingPathComponent(LPPaths.saverName) }
     var work: URL { root.appendingPathComponent("cwd") }
+    /// The redirected wallpaper store (LIVEPAPER_WALLPAPER_STORE; doesn't exist until a test writes it).
+    var wallpaperStore: URL { root.appendingPathComponent("store/Index.plist") }
 
     init(binary: URL) throws {
         self.binary = binary
@@ -1082,7 +1152,7 @@ final class CLISandbox {
         env["LIVEPAPER_HOME"] = support.path
         env["LIVEPAPER_SAVERS_DIR"] = savers.path
         env["LIVEPAPER_LAUNCH_AGENTS_DIR"] = root.appendingPathComponent("agents").path
-        env["LIVEPAPER_WALLPAPER_STORE"] = root.appendingPathComponent("store/Index.plist").path
+        env["LIVEPAPER_WALLPAPER_STORE"] = wallpaperStore.path
         env["LIVEPAPER_RESOURCES"] = resources.path
         env["LIVEPAPER_NO_SPAWN"] = "1"
         env["LIVEPAPER_RENDERD"] = "/usr/bin/false"   // belt and braces: nothing could start anyway

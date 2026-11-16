@@ -338,7 +338,7 @@ private struct ScreenSaverPage: View {
                     Button {
                         Task { needsGuidedSelection = !(await model.makeLivePaperScreenSaver()) }
                     } label: {
-                        Text(status.saverInstalled && status.saverUpToDate ? "Select LivePaper" : "Install & Select")
+                        Text(model.setupState.selectActionTitle(otherwise: status.saverInstalled && status.saverUpToDate ? "Select LivePaper" : "Install & Select"))
                             .frame(minWidth: 140)
                     }
                     .buttonStyle(.borderedProminent)

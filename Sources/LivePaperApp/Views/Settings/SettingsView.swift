@@ -67,7 +67,7 @@ private struct ScreenSaverSettingsTab: View {
                 ForEach(SetupChecklist.checks(for: .screenSaver, state: model.setupState)) { SetupCheckRow(check: $0) }
                 if !(status.saverInstalled && status.saverUpToDate && status.saverSelected) {
                     HStack {
-                        Button("Make LivePaper My Screen Saver") {
+                        Button(model.setupState.selectActionTitle(otherwise: "Make LivePaper My Screen Saver")) {
                             Task { needsGuidedSelection = !(await model.makeLivePaperScreenSaver()) }
                         }
                         .buttonStyle(.borderedProminent)

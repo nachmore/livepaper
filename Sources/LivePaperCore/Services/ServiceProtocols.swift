@@ -375,6 +375,39 @@ public enum HelperRecoveryOutcome: Sendable, Equatable {
     case needsApproval
 }
 
+/// Which displays show LivePaper when the Mac idles or locks, read from the wallpaper store
+/// (WallpaperSelection; docs/RESEARCH.md §5.8).
+public enum SaverSelection: Sendable, Equatable {
+    /// No display does.
+    case none
+    /// Some display records resolve to LivePaper, not all: how many displays show another screen
+    /// saver (macOS's default, or one picked in System Settings) in some or every Space.
+    case partly(DisplayCount)
+    /// Every display the wallpaper store has a record for does (with none yet: its SystemDefault).
+    case everyDisplay
+    /// The wallpaper store is in a format LivePaper doesn't know (a newer macOS) and names LivePaper
+    /// in a screen-saver slot: which displays show it can't be told.
+    case unknown
+
+    /// The displays `.partly` is about. A display counts as missing when some record of it (in some
+    /// Space) resolves to something else; the others show LivePaper in every Space, so
+    /// `displays - missing` never counts a display twice.
+    public struct DisplayCount: Sendable, Equatable {
+        /// Displays the wallpaper store has records for, connected or not.
+        public var displays: Int
+        public var missing: Int
+        /// The same two counts for the displays connected now (CoreGraphics' display UUIDs are the
+        /// store's display keys, docs/RESEARCH.md §5.8). nil when that isn't known: no display list
+        /// (no window server, a stand-in system) or none of the connected displays has a record.
+        public var connected: Int?
+        public var connectedMissing: Int?
+
+        public init(displays: Int, missing: Int, connected: Int? = nil, connectedMissing: Int? = nil) {
+            self.displays = displays; self.missing = missing; self.connected = connected; self.connectedMissing = connectedMissing
+        }
+    }
+}
+
 public struct InstallStatus: Sendable, Equatable {
     public var saverInstalled: Bool
     /// The installed saver is the build this LivePaper ships (CFBundleVersion).
@@ -382,8 +415,13 @@ public struct InstallStatus: Sendable, Equatable {
     /// The installed saver is a newer build than this LivePaper's copy (installed by another copy
     /// of LivePaper): launching this one never replaces it; only an explicit install does.
     public var saverNewerInstalled: Bool
-    /// The LivePaper saver is the selected screen saver (any display).
-    public var saverSelected: Bool
+    /// Which displays show LivePaper as their screen saver.
+    public var saverSelection: SaverSelection
+    /// LivePaper owns the selection, is still chosen somewhere, and some display record shows macOS's
+    /// default screen saver — or inherits LivePaper from a record WallpaperAgent rewrites itself
+    /// (SystemDefault, a Space's Default) — only because its own Idle slot holds the placeholder: the
+    /// app re-applies the selection by itself (InstallServicing.reapplySelectionIfNeeded).
+    public var selectionReapplyNeeded: Bool
     public var helperRunning: Bool
     /// The helper's SMAppService login item (`.notFound` when it runs from the LaunchAgent fallback,
     /// and in the CLI, which can't ask SMAppService about the app's login item).
@@ -404,13 +442,16 @@ public struct InstallStatus: Sendable, Equatable {
     /// LivePaper changed that preference and keeps its previous value; uninstall puts it back.
     public var lockKeysChangedByLivePaper: Bool
 
+    /// - Parameter saverSelection: overrides `saverSelected` (true: every display, false: none).
     public init(saverInstalled: Bool = false, saverUpToDate: Bool = false, saverNewerInstalled: Bool = false, saverSelected: Bool = false,
+                saverSelection: SaverSelection? = nil, selectionReapplyNeeded: Bool = false,
                 helperRunning: Bool = false, helperLoginItem: LoginItemStatus = .notRegistered, helperProblem: HelperProblem? = nil,
                 passwordImmediately: Bool = false,
                 managedByMDM: Bool = false, passwordManagedByMDM: Bool = false, lockKeysShowScene: Bool = false,
                 lockKeysChangedByLivePaper: Bool = false) {
         self.saverInstalled = saverInstalled; self.saverUpToDate = saverUpToDate; self.saverNewerInstalled = saverNewerInstalled
-        self.saverSelected = saverSelected
+        self.saverSelection = saverSelection ?? (saverSelected ? .everyDisplay : .none)
+        self.selectionReapplyNeeded = selectionReapplyNeeded
         self.helperRunning = helperRunning; self.helperLoginItem = helperLoginItem; self.helperProblem = helperProblem
         self.passwordImmediately = passwordImmediately
         self.managedByMDM = managedByMDM; self.passwordManagedByMDM = passwordManagedByMDM; self.lockKeysShowScene = lockKeysShowScene
@@ -420,6 +461,33 @@ public struct InstallStatus: Sendable, Equatable {
     /// The installed saver is an older build than this LivePaper's: what the launch-time update
     /// (InstallServicing.updateSaver) replaces.
     public var saverUpdateAvailable: Bool { saverInstalled && !saverUpToDate && !saverNewerInstalled }
+
+    /// LivePaper is the selected screen saver: every display resolves to it (`.everyDisplay`). Setting
+    /// it (stand-ins, tests) means every display or none.
+    public var saverSelected: Bool {
+        get { saverSelection == .everyDisplay }
+        set { saverSelection = newValue ? .everyDisplay : .none }
+    }
+
+    /// LivePaper is the screen saver of some displays but not of all (`.partly`): "Use LivePaper on
+    /// Every Display", `livepaper select`.
+    public var saverPartlySelected: Bool { if case .partly = saverSelection { return true }; return false }
+
+    /// The wallpaper store names LivePaper but is in a format LivePaper can't resolve (`.unknown`):
+    /// neither "selected" nor "not selected" can be claimed.
+    public var saverSelectionUnknown: Bool { saverSelection == .unknown }
+}
+
+/// What the app's quiet re-apply of the selection did (InstallServicing.reapplySelectionIfNeeded).
+public enum SelectionReapplyOutcome: Sendable, Equatable {
+    /// Nothing to do, and why (every display resolves to LivePaper or to a screen saver the user
+    /// chose, LivePaper doesn't own the selection, it isn't installed, …).
+    case notNeeded(String)
+    /// The placeholder Idle slots of this many displays choose LivePaper now (confirmed after
+    /// WallpaperAgent restarted).
+    case reapplied(displays: Int)
+    /// LivePaper didn't touch the store (the Mac is locked, System Settings is open, …): the reason.
+    case refused(String)
 }
 
 /// What the launch-time saver update did (InstallServicing.updateSaver).
@@ -462,9 +530,16 @@ public protocol InstallServicing: AnyObject, Sendable {
     /// never installs one that isn't there or was uninstalled, and never swaps it while
     /// `isSessionLocked()` (checked again right before the swap); then republishes.
     func updateSaver(isSessionLocked: () -> Bool) throws -> SaverUpdateOutcome
-    /// Makes LivePaper the selected screen saver. Returns false if it could not be done automatically
-    /// (the UI then shows the one-click guided step via openScreenSaverSettings()).
+    /// Makes LivePaper the selected screen saver of every display. Returns false if it could not be
+    /// done automatically (the UI then shows the one-click guided step via openScreenSaverSettings()).
     func selectSaver() throws -> Bool
+    /// The app's quiet re-apply (at launch and after display changes): while LivePaper owns the
+    /// selection (it made it, or found itself selected), gives LivePaper to the displays that fall
+    /// back to macOS's default screen saver only because their Idle slot holds the placeholder — say
+    /// a display that appeared after something reset SystemDefault. Never replaces a screen saver
+    /// the user chose (nor what a display inherits from one); never after an uninstall. Throws only
+    /// when the store was written but the change couldn't be confirmed.
+    func reapplySelectionIfNeeded() throws -> SelectionReapplyOutcome
     /// Sets the helper up (login item, else the LaunchAgent fallback) and makes sure it runs this
     /// build: starts a stopped job, and registers the login item again when launchd can't run this
     /// build's helper — also when the login item belongs to another copy of LivePaper (the user asked
@@ -492,6 +567,9 @@ public protocol InstallServicing: AnyObject, Sendable {
 public extension InstallServicing {
     /// Stand-ins that know nothing about launchd have nothing to repair.
     func recoverHelper() throws -> HelperRecoveryOutcome { .notNeeded("not supported here") }
+
+    /// Stand-ins without a wallpaper store have nothing to re-apply.
+    func reapplySelectionIfNeeded() throws -> SelectionReapplyOutcome { .notNeeded("not supported here") }
 
     /// `performUninstall` that throws `InstallError.uninstallIncomplete` if any step failed.
     func uninstall(removeLibrary: Bool) throws {

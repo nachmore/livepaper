@@ -45,6 +45,10 @@ struct AppEnvironment {
     /// The login session is locked right now (any thread; live: CGSSessionScreenIsLocked). The
     /// installed saver is never swapped under a running lock screen.
     var isSessionLocked: @Sendable () -> Bool = { false }
+    /// How long display changes must have stopped before the app looks at the wallpaper store again
+    /// (AppModel.screenParametersDidChange): connecting a display sends a burst of changes, and
+    /// WallpaperAgent writes the new display's record meanwhile.
+    var screenChangeSettleDelay: TimeInterval = 3
 
     static let onboardingCompletedKey = "onboardingCompleted"
 }
@@ -216,6 +220,16 @@ final class AppModel {
     /// Banners about the helper not running (the repair's, Start Helper's): dismissed once a status
     /// read shows it running.
     @ObservationIgnored private var helperBanners: Set<UUID> = []
+    /// The quiet re-apply of the selection while it runs (setup and uninstall wait for it).
+    @ObservationIgnored private var selectionReapply: Task<Void, Never>?
+    /// A re-apply was due while other install work ran: it runs once that work is over.
+    @ObservationIgnored private var selectionReapplyPending = false
+    /// Set while a re-apply waits for the next unlock; calling it stops waiting.
+    @ObservationIgnored private var cancelReapplyUnlockWait: (@MainActor () -> Void)?
+    /// The wait for a burst of display changes to end.
+    @ObservationIgnored private var screenChangeSettle: Task<Void, Never>?
+    /// Quiet re-applies started this launch (tests, diagnostics).
+    @ObservationIgnored private(set) var selectionReapplyCount = 0
     private(set) var isLocking = false
 
     // AI
@@ -250,10 +264,17 @@ final class AppModel {
         // Alongside the rest: waiting for publish.lock (another process publishing) mustn't hold
         // up the launch.
         let update = beginSaverUpdateIfNeeded()
+        // Displays that fell back to macOS's default get LivePaper back, once the update (which
+        // replaces the saver) is done; not held up by the thumbnails either.
+        let reapply = Task { @MainActor [weak self] in
+            await update?.value
+            await self?.reapplySelectionIfNeeded()
+        }
         syncLockKeysMirror()
         await detectHarnesses()
         await generateMissingThumbnails()
         await update?.value
+        await reapply.value
     }
 
     // MARK: - Library
@@ -832,7 +853,13 @@ final class AppModel {
             showLockRefusal(.passwordNotImmediate)
             return .refused
         }
-        if !installStatus.saverSelected {
+        if installStatus.saverPartlySelected {
+            banners.post(.warning, "LivePaper isn\u{2019}t the screen saver on every display",
+                         message: SetupChecklist.selectionDetail(installStatus.saverSelection),
+                         actions: [.init(title: SetupState.everyDisplayActionTitle) { [weak self] in
+                             Task { await self?.makeLivePaperScreenSaver() }
+                         }])
+        } else if !installStatus.saverSelected && !installStatus.saverSelectionUnknown {
             banners.post(.warning, "LivePaper isn't your screen saver yet",
                          message: "Locking will show the regular lock screen.",
                          actions: [.init(title: "Set Up") { [weak self] in Task { await self?.makeLivePaperScreenSaver() } }])
@@ -947,10 +974,13 @@ final class AppModel {
     }
 
     /// Ends one piece of install work; once none is left, a helper problem the status showed
-    /// meanwhile gets its repair (it is held back while other install work runs).
+    /// meanwhile gets its repair, and a re-apply of the selection that was due runs (both are held
+    /// back while other install work runs).
     private func endInstallJob() {
         installJobs -= 1
-        if installJobs == 0 { beginHelperRepairIfNeeded() }
+        guard installJobs == 0 else { return }
+        beginHelperRepairIfNeeded()
+        if selectionReapplyPending { _ = beginSelectionReapplyIfNeeded() }
     }
 
     /// The helper runs now (repaired, approved in Login Items, started): what said otherwise goes.
@@ -1020,17 +1050,121 @@ final class AppModel {
         await refreshInstallStatus()
     }
 
-    /// Installs (if needed) and selects the saver. Returns false when macOS needs the user to pick
-    /// it in System Settings (the UI then shows the guided step).
+    // MARK: - Selection on every display
+
+    /// Displays were connected, disconnected or rearranged (NSApplication's
+    /// didChangeScreenParametersNotification, observed in Entry/LivePaperApp.swift). Once the burst
+    /// is over — `screenChangeSettleDelay` without another change, time for WallpaperAgent to write a
+    /// new display's record — the status is read again and the selection re-applied if a display
+    /// fell back to macOS's default: at most once per burst.
+    func screenParametersDidChange() {
+        screenChangeSettle?.cancel()
+        let delay = environment.screenChangeSettleDelay
+        screenChangeSettle = Task { @MainActor [weak self] in
+            if delay > 0 { try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000)) }
+            guard !Task.isCancelled, let self else { return }
+            self.screenChangeSettle = nil
+            // A re-apply still running read the store before this burst: look again after it.
+            await self.selectionReapply?.value
+            await self.refreshInstallStatus()
+            await self.reapplySelectionIfNeeded()
+        }
+    }
+
+    /// A burst of display changes is being waited out (tests).
+    var isSettlingScreenChange: Bool { screenChangeSettle != nil }
+    /// A re-apply waits for the next unlock (tests).
+    var isReapplyWaitingForUnlock: Bool { cancelReapplyUnlockWait != nil }
+
+    /// The quiet re-apply (InstallServicing.reapplySelectionIfNeeded), when the status says a display
+    /// falls back to macOS's default screen saver only because its slot holds the placeholder while
+    /// LivePaper owns the selection (InstallStatus.selectionReapplyNeeded): LivePaper goes back on
+    /// those displays — never over a screen saver the user chose. Not while the Mac is locked (it
+    /// runs after the next unlock) and not while other install work runs (it runs once that is
+    /// over). Quiet: only a change that was written but couldn't be confirmed shows a banner.
+    func reapplySelectionIfNeeded() async {
+        await beginSelectionReapplyIfNeeded()?.value
+    }
+
+    private func beginSelectionReapplyIfNeeded() -> Task<Void, Never>? {
+        if let running = selectionReapply { return running }
+        selectionReapplyPending = false
+        guard installStatusLoaded, installStatus.selectionReapplyNeeded else { return nil }
+        guard installJobs == 0 else {
+            selectionReapplyPending = true
+            return nil
+        }
+        if environment.isSessionLocked() {
+            reapplySelectionAfterUnlock()
+            return nil
+        }
+        stopWaitingForUnlockToReapply()
+        installJobs += 1
+        selectionReapplyCount += 1
+        let task = Task { @MainActor in
+            defer { self.selectionReapply = nil; self.endInstallJob() }
+            await self.runSelectionReapply()
+        }
+        selectionReapply = task
+        return task
+    }
+
+    private func runSelectionReapply() async {
+        let install = services.install
+        do {
+            switch try await offMain({ try install.reapplySelectionIfNeeded() }) {
+            case .notNeeded(let why):
+                NSLog("LivePaper: the screen saver needed no re-apply: \(why)")
+            case .reapplied(let displays):
+                NSLog("LivePaper: LivePaper is the screen saver again on \(displays) display(s) that had fallen back to macOS's default")
+            case .refused(let why):
+                NSLog("LivePaper: didn't re-apply the screen saver now: \(why)")
+                // Locked between the check and the edit: the same wait as before it.
+                if environment.isSessionLocked() { reapplySelectionAfterUnlock() }
+            }
+        } catch {
+            NSLog("LivePaper: couldn't re-apply the screen saver on every display: \(error.localizedDescription)")
+            banners.error("Couldn\u{2019}t use LivePaper on every display", error) { [weak self] in
+                Task { await self?.makeLivePaperScreenSaver() }
+            }
+        }
+        await refreshInstallStatus()
+    }
+
+    /// Waits for the next unlock, then reads the status again and re-applies if still needed. One
+    /// wait at a time; uninstall ends it.
+    private func reapplySelectionAfterUnlock() {
+        guard cancelReapplyUnlockWait == nil else { return }
+        NSLog("LivePaper: the Mac is locked; re-applying the screen saver on every display once it is unlocked")
+        cancelReapplyUnlockWait = environment.observeUnlock { [weak self] in
+            guard let self, self.cancelReapplyUnlockWait != nil else { return }
+            self.stopWaitingForUnlockToReapply()
+            Task { @MainActor in
+                await self.refreshInstallStatus()
+                await self.reapplySelectionIfNeeded()
+            }
+        }
+    }
+
+    private func stopWaitingForUnlockToReapply() {
+        let cancel = cancelReapplyUnlockWait
+        cancelReapplyUnlockWait = nil
+        cancel?()
+    }
+
+    /// Installs (if needed) and selects the saver on every display (also "Use LivePaper on Every
+    /// Display"). Returns false when macOS needs the user to pick it in System Settings (the UI then
+    /// shows the guided step).
     @discardableResult
     func makeLivePaperScreenSaver() async -> Bool {
         installJobs += 1
         exclusiveInstallWork += 1
         defer { exclusiveInstallWork -= 1; endInstallJob() }
         // The launch-time update is the same install: let it finish rather than race it (also one an
-        // unlock is about to start), and start none meanwhile.
+        // unlock is about to start), and start none meanwhile. A quiet re-apply edits the same store.
         await unlockRetry?.value
         await saverUpdate?.value
+        await selectionReapply?.value
         let install = services.install
         do {
             let published = try await offMain { () -> PublishResult? in
@@ -1095,9 +1229,13 @@ final class AppModel {
         // wait for those, and start none from here on.
         helperRepairAttempted = true
         stopWaitingForUnlock()
+        stopWaitingForUnlockToReapply()
+        screenChangeSettle?.cancel()
+        screenChangeSettle = nil
         await unlockRetry?.value
         await saverUpdate?.value
         await helperRepair?.value
+        await selectionReapply?.value
         let install = services.install
         // Agents work inside the support directory this deletes: they must be gone first — also the
         // ones whose sessions are still being started — and no new ones start meanwhile.

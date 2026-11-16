@@ -100,6 +100,22 @@ enum CLIEnvironment {
     /// overrides) so nothing outside a temporary directory is ever touched.
     static var noSystemCommands: Bool { ProcessInfo.processInfo.environment["LIVEPAPER_NO_SYSTEM_COMMANDS"] == "1" }
 
+    /// LIVEPAPER_SELFTEST_WALLPAPER_AGENT=1 (with LIVEPAPER_NO_SYSTEM_COMMANDS=1 only): select and
+    /// uninstall edit the redirected wallpaper store (LIVEPAPER_WALLPAPER_STORE) with a stand-in for
+    /// WallpaperAgent (ScratchWallpaperSystem, which refuses the real store) instead of refusing, so
+    /// the self-tests can run `livepaper select` end to end.
+    static var scratchWallpaperAgent: Bool {
+        noSystemCommands && ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_WALLPAPER_AGENT"] == "1"
+    }
+
+    /// LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS=<uuid>,<uuid> (with LIVEPAPER_NO_SYSTEM_COMMANDS=1 only):
+    /// the displays the stand-in system reports as connected, so the self-tests see how `doctor`
+    /// counts them. nil: unknown, like any stand-in.
+    static var selfTestConnectedDisplays: Set<String>? {
+        guard noSystemCommands, let list = ProcessInfo.processInfo.environment["LIVEPAPER_SELFTEST_CONNECTED_DISPLAYS"] else { return nil }
+        return Set(list.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty })
+    }
+
     // MARK: - Terminal
 
     static var stdinIsTerminal: Bool { isatty(STDIN_FILENO) == 1 }
@@ -181,8 +197,17 @@ enum CLIServices {
     static func installer(dryRun: Bool = false) -> InstallService {
         let live = (Self.live.install as? InstallService) ?? InstallService(publisher: Self.live.publish)
         if CLIEnvironment.noSystemCommands {
+            // Without the stand-in agent the recording runner makes every store edit refuse.
+            var quick = WallpaperApplyOptions()
+            quick.quietInterval = 0.3
+            quick.pollInterval = 0.05
+            let connected = CLIEnvironment.selfTestConnectedDisplays
+            let agent: WallpaperSystem = CLIEnvironment.scratchWallpaperAgent
+                ? ScratchWallpaperSystem(storeURL: live.paths.wallpaperStore, connectedDisplayIDs: connected)
+                : UnavailableWallpaperSystem(reason: "system commands are only recorded", connectedDisplayIDs: connected)
             return InstallService(paths: live.paths, publisher: Self.live.publish, runner: sandboxRunner,
-                                  loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun)
+                                  loginItem: UnavailableLoginItem(), preferences: sandboxPreferences, dryRun: dryRun,
+                                  wallpaperSystem: agent, wallpaperOptions: quick)
         }
         guard dryRun else { return live }
         return InstallService(paths: live.paths, publisher: nil, dryRun: true)

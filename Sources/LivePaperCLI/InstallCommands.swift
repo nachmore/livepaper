@@ -9,6 +9,9 @@ enum InstallCommands {
             CLICommand(name: "doctor", synopsis: "[--no-ai] [--json]",
                        summary: "diagnose the installation (saver, helper, lock settings, render server, AI tools); exit 1 on problems",
                        run: doctor),
+            CLICommand(name: "select", synopsis: "",
+                       summary: "make LivePaper the screen saver for every display (only the screen-saver choice changes; a backup is kept)",
+                       run: select),
             CLICommand(name: "uninstall", synopsis: "[--yes] [--keep-scenes] [--dry-run]",
                        summary: "remove the helper and screen saver, restore changed settings, delete LivePaper's data",
                        run: uninstall),
@@ -101,12 +104,8 @@ enum InstallCommands {
         } else {
             add(section, "installed", .ok, "\(displayPath(paths.installedSaver)) (build \(bundleVersion(paths.installedSaver) ?? "?"))")
         }
-        if status.saverSelected {
-            add(section, "selected", .ok, "LivePaper is the selected screen saver")
-        } else {
-            add(section, "selected", .problem, "LivePaper isn't the selected screen saver, so the lock screen won't show your scenes. " +
-                "Choose it in System Settings › Wallpaper › Screen Saver.")
-        }
+        let selected = selectionCheck(status.saverSelection, reappliedByApp: status.selectionReapplyNeeded)
+        add(section, "selected", selected.status, selected.detail)
         if status.saverInstalled {
             if let playlist = try? LPPlaylist.load(from: paths.installedPlaylist) {
                 add(section, "published", playlist.scenes.isEmpty ? .warning : .ok,
@@ -183,6 +182,42 @@ enum InstallCommands {
         return DoctorReport(version: CLIEnvironment.version.display, checks: checks, paths: pathList)
     }
 
+    /// The "selected" row. Selected means every display resolves to LivePaper; the fix for some or
+    /// none is `livepaper select` (the app's button does the same). Counts name the connected
+    /// displays when they are known, otherwise the display records of the wallpaper store.
+    ///
+    /// - Parameter reappliedByApp: the displays only fell back to macOS's default (the app re-applies
+    ///   the selection by itself when it starts).
+    static func selectionCheck(_ selection: SaverSelection, reappliedByApp: Bool = false) -> (status: Check.Status, detail: String) {
+        let byItself = reappliedByApp ? " LivePaper also does this by itself when it starts." : ""
+        let fix = " Run `livepaper select` (or LivePaper › Settings › Screen Saver › \u{201C}Use LivePaper on Every Display\u{201D})." + byItself
+        func displays(_ n: Int) -> String { n == 1 ? "1 display" : "\(n) displays" }
+        switch selection {
+        case .everyDisplay:
+            return (.ok, "LivePaper is the selected screen saver on every display")
+        case .partly(let count):
+            let shows = "macOS\u{2019}s default or another screen saver when your Mac idles or locks"
+            if let connected = count.connected, let missing = count.connectedMissing {
+                let elsewhere = count.missing - missing
+                if missing > 0 {
+                    let also = elsewhere > 0 ? " (so would \(displays(elsewhere)) not connected now)" : ""
+                    return (.problem, "LivePaper isn\u{2019}t the screen saver on \(missing) of your \(connected) connected " +
+                            "display\(connected == 1 ? "" : "s"): \(missing == 1 ? "it shows" : "they show") \(shows)\(also)." + fix)
+                }
+                return (.problem, "LivePaper is the screen saver on your connected display\(connected == 1 ? "" : "s"), but not for " +
+                        "\(displays(elsewhere)) not connected now: \(elsewhere == 1 ? "it would show" : "they would show") \(shows)." + fix)
+            }
+            return (.problem, "LivePaper isn\u{2019}t the screen saver for \(count.missing) of the \(count.displays) displays in your " +
+                    "wallpaper settings (connected or not): \(count.missing == 1 ? "it shows" : "they show") \(shows)." + fix)
+        case .unknown:
+            return (.warning, "LivePaper can\u{2019}t tell which displays use it: this macOS stores its wallpaper settings in a format " +
+                    "LivePaper doesn\u{2019}t know (they do name LivePaper). Check System Settings › Wallpaper › Screen Saver.")
+        case .none:
+            return (.problem, "LivePaper isn't the selected screen saver, so the lock screen won't show your scenes. Run " +
+                    "`livepaper select` (or open LivePaper and follow the setup), or choose it in System Settings › Wallpaper › Screen Saver." + byItself)
+        }
+    }
+
     /// The helper row: running, running an older build or another copy's, can't start or left
     /// unregistered by a repair (with the fix), or not running.
     static func helperCheck(_ status: InstallStatus) -> (status: Check.Status, detail: String) {
@@ -255,6 +290,34 @@ enum InstallCommands {
     }
 
     // MARK: - uninstall
+
+    // MARK: - select
+
+    /// The installer's own selection (InstallService.selectSaver: only the wallpaper store's Idle
+    /// slots — SystemDefault, explicit choices and every display's placeholder — with the backup
+    /// uninstall restores from), for when something else changed it back or a display shows
+    /// macOS's default screen saver (doctor points here).
+    static func select(_ argv: [String]) async throws -> Int32 {
+        let args = try Arguments(argv, flags: [])
+        guard args.positional.isEmpty else { throw UsageError("select takes no arguments") }
+        let install = CLIServices.installer()
+        guard install.status().saverInstalled else {
+            print("The LivePaper screen saver isn't installed yet: open LivePaper to set it up.")
+            return ExitCode.failed
+        }
+        guard try install.selectSaver() else {
+            // The refusal's reason (the Mac is locked, System Settings is open, …) is the step's.
+            let why = install.transcript.last.flatMap { step -> String? in
+                if case .skipped(let reason) = step.outcome { return reason }
+                return nil
+            }
+            print("LivePaper didn't change the screen saver" + (why.map { " (\($0))" } ?? "") +
+                  ". Try again, or pick LivePaper in System Settings › Wallpaper › Screen Saver.")
+            return ExitCode.unavailable
+        }
+        print("LivePaper is the screen saver for every display (the previous choice is backed up; uninstalling puts it back).")
+        return ExitCode.ok
+    }
 
     static func uninstall(_ argv: [String]) async throws -> Int32 {
         let args = try Arguments(argv, flags: ["yes", "keep-scenes", "dry-run"])

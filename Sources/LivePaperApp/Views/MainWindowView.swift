@@ -143,17 +143,34 @@ private struct SetupStatusFooter: View {
     var body: some View {
         let status = model.installStatus
         let ready = status.saverInstalled && status.saverSelected
+        // Some displays show another screen saver: one click selects LivePaper on all of them.
+        let partly = status.saverInstalled && status.saverPartlySelected
+        // A wallpaper-settings format LivePaper doesn't know: it can't tell, System Settings can.
+        let unknown = status.saverInstalled && status.saverSelectionUnknown
         VStack(alignment: .leading, spacing: 6) {
             HStack(spacing: 6) {
                 Circle().fill(ready ? Color.green : Color.orange).frame(width: 7, height: 7)
-                Text(ready ? "Screen saver active" : "Setup not finished")
+                Text(ready ? "Screen saver active" : partly ? "Not on every display" : unknown ? "Can\u{2019}t check the screen saver"
+                           : "Setup not finished")
                     .font(.callout.weight(.medium))
             }
-            Text(ready ? model.playlistSummary : "LivePaper isn't your screen saver yet.")
+            Text(ready ? model.playlistSummary : partly ? SetupChecklist.saverSummary(status) + "."
+                       : unknown ? "Check System Settings \u{203A} Wallpaper \u{203A} Screen Saver."
+                       : "LivePaper isn't your screen saver yet.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
-            if !ready {
+            if partly {
+                Button(SetupState.everyDisplayActionTitle) {
+                    // The guided step lives in setup, for when macOS doesn't let LivePaper do it.
+                    Task { if !(await model.makeLivePaperScreenSaver()) { model.showOnboarding = true } }
+                }
+                .controlSize(.small)
+                .disabled(model.isInstallBusy)
+            } else if unknown {
+                Button("Open Screen Saver Settings") { model.openScreenSaverSettings() }
+                    .controlSize(.small)
+            } else if !ready {
                 Button("Finish Setup\u{2026}") { model.showOnboarding = true }
                     .controlSize(.small)
             }
