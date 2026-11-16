@@ -958,7 +958,10 @@ runtime.e2e.animateScene`): 0.89–0.95 at every size, motion 9/9 regions, 0.4 m
   scene id / discarded: Discard, Try Again, a declined CLI prompt, or LivePaper for a session in which
   nothing happened) and `recoveredAt`. Written before the agent starts, with LivePaper's copies of the
   vision images and the picture to animate; the agent's facts once it is spawned; the outcome when the
-  session ends (failed or cancelled: the copies go); the resolution when the user decides (the copies go).
+  session ends (failed or cancelled: the copies go) — `terminateNow` records `cancelled` itself before
+  it returns, as the process exits right after (quitting, a closed terminal), so a session stopped on
+  purpose is never recovered, while a finished, undecided one keeps `passed` and is offered again;
+  the resolution when the user decides (the copies go).
   At launch the app calls `AIServicing.recoverSessions` (off the main thread, after pruning, below), which
   decides each record (`AISessionRecovery.decide`) and claims the ones it takes over — runner := the app,
   `recoveredAt` — in the same locked step, so two LivePapers launched together never both take one:
