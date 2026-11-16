@@ -775,6 +775,17 @@ enum ReferenceTests {
         try expectEqual(resolved("\(img.path) \(dir.path)/set \(dir.path)/missing.png"),
                         [.image(img), .folder(dir.appendingPathComponent("set")), .missing])
         _ = txt
+        // A folder this process may not look into (what macOS does to the Desktop without Files and
+        // Folders access; here plain permissions): not permitted, which isn't "missing" — for the
+        // tray's chips, the importer and the CLI's --ref.
+        let locked = dir.appendingPathComponent("locked")
+        let inside = try write(png(ReferenceFixtures.photo(.city, width: 120, height: 80)), locked.appendingPathComponent("in.png"))
+        try FileManager.default.setAttributes([.posixPermissions: 0], ofItemAtPath: locked.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: locked.path) }
+        try expectEqual(resolved("\(inside.path) \(locked.path)/missing.png"), [.notPermitted, .notPermitted])
+        try expectReferenceError({ $0 == .notPermitted(name: "in.png") }) { _ = try prepare(inside) }
+        try expectReferenceError({ $0 == .notPermitted(name: "in.png") }) { _ = try ReferenceFolders.collect(references: [inside], animate: nil) }
+        try expectReferenceError({ $0 == .notPermitted(name: "in.png") }) { _ = try ReferenceFolders.collect(references: [], animate: inside) }
         let refs = [try prepare(other, role: .animate), try prepare(img), try prepare(img2)]
         let r = PromptPaths.rewrite("Animate \(other.path). Style from \(dir.path)/set/ and ~/Desktop/else.jpg.", attached: refs, home: home)
         try expectEqual(r.text, "Animate `references/ref-01.jpg`. Style from `references/` (ref-02, ref-03) and ~/Desktop/else.jpg.")
